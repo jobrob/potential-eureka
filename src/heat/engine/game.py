@@ -197,6 +197,12 @@ class Game:
         gear_decisions = self._collect_gear_decisions()
         events += phase_shift_gears(self._state, gear_decisions)
 
+        # Capture each active player's hand BEFORE playing cards
+        pre_play_hands: dict[int, list[str]] = {}
+        if self._state.logging_enabled:
+            for player in self._state.active_players:
+                pre_play_hands[player.player_id] = [c.display_name for c in player.hand]
+
         # 2. PLAY CARDS (simultaneous)
         card_decisions = self._collect_card_decisions()
         events += phase_play_cards(self._state, card_decisions)
@@ -220,10 +226,10 @@ class Game:
                         next_corner_dist = dist
                         next_corner_limit = corner.speed_limit
 
-                hand_repr = [repr(c) for c in player.hand]
+                hand_repr = pre_play_hands.get(pid, [c.display_name for c in player.hand])
                 turn_start_data = {
                     "hand": hand_repr,
-                    "hand_size": len(player.hand),
+                    "hand_size": len(hand_repr),
                     "gear": player.gear,
                     "heat_available": player.heat_available,
                     "position": player.position,

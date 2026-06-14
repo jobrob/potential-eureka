@@ -33,8 +33,8 @@ def main() -> None:
         description="Run a HEAT board game race with play-by-play output."
     )
     parser.add_argument(
-        "--track", default="usa",
-        help="Track name to race on (default: usa)",
+        "--track", default="silverstone",
+        help="Track name to race on (default: silverstone)",
     )
     parser.add_argument(
         "--laps", type=int, default=None,

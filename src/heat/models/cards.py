@@ -28,10 +28,28 @@ class Card:
     value: int
     id: str
 
+    @property
+    def display_name(self) -> str:
+        if self.card_type == CardType.SPEED:
+            return str(self.value)
+        elif self.card_type == CardType.HEAT:
+            return "Heat"
+        elif self.card_type == CardType.STRESS:
+            return "Stress"
+        elif self.card_type == CardType.UPGRADE:
+            return f"Upgrade({self.value})"
+        return self.card_type.value
+
     def __repr__(self) -> str:
         if self.card_type == CardType.SPEED:
-            return f"Speed({self.value})"
-        return f"{self.card_type.value.capitalize()}(id={self.id})"
+            return str(self.value)
+        elif self.card_type == CardType.HEAT:
+            return "Heat"
+        elif self.card_type == CardType.STRESS:
+            return "Stress"
+        elif self.card_type == CardType.UPGRADE:
+            return f"Upgrade({self.value})"
+        return self.card_type.value
 
 
 class Deck:
@@ -93,22 +111,12 @@ class Deck:
 def create_starting_deck(player_id: int) -> list[Card]:
     """Create the standard 12-card starting deck for a player.
 
-    Standard HEAT starting hand:
-    - Speed cards: 1, 1, 2, 2, 3, 3, 4, 4, 5, 5 (two of each 1-5, but plan
-      says value-based, we'll use the standard distribution)
-    Actually the real game has specific speed values. We'll use a common setup:
-    1×0 (start), 1×1, 2×2, 2×3, 2×4, 1×5 = not quite right.
-
-    Real HEAT starting deck (12 cards): 1, 2, 3, 4, 5, 6, 7, 8, 0(heat-adjacent)
-    Let's use: two copies each of speed 1, 2, 3, 4 and one each of speed 5, 6
-    = 10 speed cards + 0 stress. That's not 12.
-
-    Simplified standard: speed values [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]
+    Starting deck: 3 copies each of values 1, 2, 3, 4 (12 cards total).
     """
     prefix = f"p{player_id}"
     cards: list[Card] = []
     card_id = 0
-    for value in [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]:
+    for value in [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]:
         cards.append(Card(CardType.SPEED, value, f"{prefix}_spd_{card_id}"))
         card_id += 1
     return cards

@@ -56,10 +56,10 @@ def format_event(event: GameEvent, state: GameState) -> str | None:
             cost = d["heat_cost"]
             if d.get("spun_out"):
                 return f"  {name}: forced to gear {new} (spun out)"
-            shift = ""
             if cost > 0:
-                shift = f" (paid {cost} heat)"
-            return f"  {name}: gear {old} -> {new}{shift}"
+                heat = d.get("heat_available", "?")
+                return f"  {name}: gear {old} -> {new} (paid {cost} heat, heat: {heat})"
+            return f"  {name}: gear {old} -> {new}"
 
         case "play_cards":
             cards = d["cards"]
@@ -77,7 +77,7 @@ def format_event(event: GameEvent, state: GameState) -> str | None:
                 disc_str = ", ".join(discarded)
                 return (
                     f"  {name}: stress resolved -> speed {val} "
-                    f"(flipped {flipped}: discarded [{disc_str}], kept Speed({kept_val}))"
+                    f"(flipped {flipped}: discarded [{disc_str}], kept {kept_val})"
                 )
             return f"  {name}: stress resolved -> speed {val} (flipped {flipped} cards)"
 
@@ -91,12 +91,14 @@ def format_event(event: GameEvent, state: GameState) -> str | None:
 
         case "cooldown":
             count = d["count"]
-            return f"  {name}: cooled {count} heat card(s)"
+            heat = d.get("heat_available", "?")
+            return f"  {name}: cooled {count} heat card(s) (heat: {heat})"
 
         case "boost":
             val = d["value"]
             flipped = d["flipped_count"]
-            return f"  {name}: boost! speed +{val} (flipped {flipped} cards, paid 1 heat)"
+            heat = d.get("heat_available", "?")
+            return f"  {name}: boost! +{val} speed (flipped {flipped} cards, paid 1 heat, heat: {heat})"
 
         case "adrenaline_granted":
             return f"  {name}: adrenaline available"
@@ -114,13 +116,15 @@ def format_event(event: GameEvent, state: GameState) -> str | None:
             cost = d["heat_cost"]
             if cost == 0:
                 return None  # Don't clutter output with "no cost" messages
-            return f"  {name}: corner check (speed {spd}, {corners} corner(s)) -> paid {cost} heat"
+            heat = d.get("heat_available", "?")
+            return f"  {name}: corner check (speed {spd}, {corners} corner(s)) -> paid {cost} heat (heat: {heat})"
 
         case "spin_out":
             pos = d["new_position"]
             stress = d["stress_added"]
             heat_paid = d["heat_paid"]
-            return f"  {name}: SPIN OUT! paid {heat_paid} heat, +{stress} stress, back to space {pos}, gear -> 1"
+            heat = d.get("heat_available", "?")
+            return f"  {name}: SPIN OUT! paid {heat_paid} heat, +{stress} stress, back to space {pos}, gear -> 1 (heat: {heat})"
 
         case "discard":
             count = d["count"]

@@ -61,6 +61,17 @@ class HeuristicAgent(BaseAgent):
             spaces_this_lap = track.length
         return spaces_this_lap + laps_remaining * track.length
 
+    def _compute_corner_heat_cost(
+        self, state: GameState, player_id: int, from_position: int, speed: int
+    ) -> tuple[int, list[Corner]]:
+        """Compute total corner heat cost if moving `speed` spaces from `from_position`."""
+        track = state.track
+        player = state.get_player(player_id)
+        new_pos, _ = rules.calculate_move_position(from_position, speed, track, player.lap)
+        crossed = rules.corners_crossed(from_position, new_pos, track)
+        total_cost = sum(rules.corner_heat_cost(speed, corner) for corner in crossed)
+        return total_cost, crossed
+
     # ------------------------------------------------------------------
     # Decision methods
     # ------------------------------------------------------------------
@@ -72,37 +83,46 @@ class HeuristicAgent(BaseAgent):
         legal_gears: list[tuple[int, int]],
     ) -> tuple[int, int]:
         player = state.get_player(player_id)
-        corner, corner_dist = self._next_corner(state, player_id)
         heat_in_hand = len(player.heat_in_hand)
+
+        # Estimate speed from hand: get playable card values
+        playable = [c for c in player.hand if c.card_type != CardType.HEAT]
+        playable_values = []
+        for c in playable:
+            if c.card_type == CardType.STRESS:
+                playable_values.append(2.5)  # stress estimate for 1-4 deck
+            else:
+                playable_values.append(float(c.value))
+        playable_values.sort(reverse=True)
 
         best_score = -9999
         best_choice = legal_gears[0]
 
         for new_gear, heat_cost in legal_gears:
-            # Skip gears where we don't have enough playable cards
-            playable = [c for c in player.hand if c.card_type != CardType.HEAT]
+            # Skip gears where we don't have enough playable cards (cluttered)
             if len(playable) < new_gear:
                 continue
 
             score = new_gear * 10  # Base: prefer higher gears
 
-            # Corner proximity penalty
-            if corner is not None and corner_dist <= new_gear * 2:
-                # Estimate max possible speed at this gear
-                max_speed = new_gear * 6  # worst case: all 6-value cards
-                if max_speed > corner.speed_limit:
-                    penalty = (max_speed - corner.speed_limit) * 5
-                    if corner_dist <= new_gear:
-                        penalty *= 2  # very close, stronger penalty
-                    score -= penalty
+            # Estimate speed as sum of top N card values (N = gear)
+            estimated_speed = int(sum(playable_values[:new_gear]))
 
-            # Heat conservation
-            if player.heat_available <= 1:
-                if new_gear >= 3:
-                    score -= 30  # strongly penalize high gears
-            elif player.heat_available <= 3:
-                if new_gear == 4:
-                    score -= 15  # mild penalty for gear 4
+            # Compute actual corner heat cost for this estimated speed
+            corner_cost, crossed = self._compute_corner_heat_cost(
+                state, player_id, player.position, estimated_speed
+            )
+
+            # Corner cost penalty
+            if corner_cost > 0:
+                score -= corner_cost * 10
+                # Spinout risk: corner cost exceeds available heat
+                if corner_cost > player.heat_available:
+                    score -= 100
+
+            # Heat conservation: penalize high gears when heat is critically low
+            if player.heat_available <= 2 and new_gear >= 3:
+                score -= 40
 
             # Gear shift cost
             score -= heat_cost * 15
@@ -130,19 +150,18 @@ class HeuristicAgent(BaseAgent):
             return legal_plays[0]
 
         player = state.get_player(player_id)
-        corner, corner_dist = self._next_corner(state, player_id)
 
         best_score = -9999
         best_play = legal_plays[0]
 
         for play in legal_plays:
-            # Calculate speed (stress = 0 in hand, estimated ~3.5 for scoring)
+            # Calculate speed (stress estimated at 2.5 for 1-4 deck)
             speed = 0
             stress_count = 0
             for card in play:
                 if card.card_type == CardType.STRESS:
                     stress_count += 1
-                    speed += 3.5  # estimated stress resolution value
+                    speed += 2.5  # estimated stress resolution for 1-4 deck
                 else:
                     speed += card.value
 
@@ -151,14 +170,26 @@ class HeuristicAgent(BaseAgent):
             # Stress bonus: stress cards save good cards for later
             score += stress_count * 5
 
-            # Corner penalty
-            if corner is not None and corner_dist <= player.gear * 2:
-                estimated_total_speed = speed
-                if estimated_total_speed > corner.speed_limit:
-                    overshoot = estimated_total_speed - corner.speed_limit
-                    score -= overshoot * 8
-                    if overshoot > player.heat_available:
-                        score -= 50  # spin-out risk
+            # Compute actual corner heat cost for this combo
+            int_speed = int(speed)
+            corner_cost, crossed = self._compute_corner_heat_cost(
+                state, player_id, player.position, int_speed
+            )
+
+            if crossed:
+                # Penalize by heat cost
+                score -= corner_cost * 12
+
+                # Spinout risk: corner cost exceeds available heat
+                if corner_cost > player.heat_available:
+                    score -= 200
+
+                # Reward combos that stay at or under corner speed limits
+                all_under = all(
+                    int_speed <= corner.speed_limit for corner in crossed
+                )
+                if all_under:
+                    score += 10
 
             if score > best_score:
                 best_score = score
@@ -189,30 +220,55 @@ class HeuristicAgent(BaseAgent):
             use_adrenaline_cooldown = True
             cooldown_count = min(max_cooldown + 1, heat_in_hand)
 
-        # Boost decision
+        # Boost decision — the critical fix
         use_boost = False
         if can_boost:
-            near_corner_at_limit = (
-                corner is not None
-                and corner_dist <= 6
-                and player.speed_from_cards >= corner.speed_limit
+            # Check corners actually crossed this turn
+            crossed = rules.corners_crossed(
+                player.turn_start_position, player.position, state.track
             )
-            if player.heat_available >= 3 and not near_corner_at_limit:
+
+            # If speed_from_cards already exceeds ANY crossed corner's limit, DO NOT boost
+            over_corner_limit = any(
+                player.speed_from_cards > c.speed_limit for c in crossed
+            )
+
+            if over_corner_limit:
+                use_boost = False
+            elif player.heat_available <= 2:
+                # Low heat: DO NOT boost
+                use_boost = False
+            elif not crossed and player.heat_available >= 4:
+                # No corners crossed AND plenty of heat: boost
                 use_boost = True
             elif player.lap >= state.track.laps and dist_to_finish <= 10:
-                # Final lap, near finish: boost aggressively
-                use_boost = True
+                # Final lap near finish: boost only if estimated corner cost is affordable
+                estimated_boost_speed = player.speed_from_cards + 2  # rough estimate
+                cost, _ = self._compute_corner_heat_cost(
+                    state, player_id, player.turn_start_position, estimated_boost_speed
+                )
+                if cost <= player.heat_available:
+                    use_boost = True
 
-        # Adrenaline speed: almost always use (+1 free)
+        # Adrenaline speed: use unless it would increase corner costs with low heat
         use_adrenaline_speed = False
         if has_adrenaline:
-            at_corner_limit = (
-                corner is not None
-                and corner_dist == 0
-                and player.speed_from_cards == corner.speed_limit
-                and player.heat_available <= 1
+            # Check corners from this turn
+            crossed = rules.corners_crossed(
+                player.turn_start_position, player.position, state.track
             )
-            if not at_corner_limit:
+            # Compute cost with +1 speed
+            current_speed = player.speed_from_cards + player.speed_from_boost
+            cost_with_adrenaline = sum(
+                rules.corner_heat_cost(current_speed + 1, c) for c in crossed
+            )
+            cost_without = sum(
+                rules.corner_heat_cost(current_speed, c) for c in crossed
+            )
+            extra_cost = cost_with_adrenaline - cost_without
+            if extra_cost > 0 and player.heat_available <= 2:
+                use_adrenaline_speed = False
+            else:
                 use_adrenaline_speed = True
 
         return ReactDecision(

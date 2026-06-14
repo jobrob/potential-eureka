@@ -18,7 +18,7 @@ class TestCard:
 
     def test_repr_speed(self):
         card = Card(CardType.SPEED, 4, "s1")
-        assert "Speed(4)" in repr(card)
+        assert repr(card) == "4"
 
     def test_repr_heat(self):
         card = Card(CardType.HEAT, 0, "h1")
@@ -99,6 +99,11 @@ class TestCardFactories:
         ids0 = {c.id for c in cards0}
         ids1 = {c.id for c in cards1}
         assert ids0.isdisjoint(ids1)
+
+    def test_starting_deck_values(self):
+        cards = create_starting_deck(0)
+        values = sorted(c.value for c in cards)
+        assert values == [1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
 
     def test_heat_cards(self):
         heat = create_heat_cards(0, 6)

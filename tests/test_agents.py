@@ -419,6 +419,62 @@ class TestHeuristicChooseSlipstream:
         assert agent.choose_slipstream(state, 0) is False
 
 
+class TestHeuristicCornerAvoidance:
+    def test_no_boost_when_over_corner_limit(self):
+        """Should not boost when speed already exceeds corner limit."""
+        agent = HeuristicAgent()
+        track = _corner_track()  # corner at 3-5, limit 3
+        state = _make_game_state(track=track)
+        player = state.get_player(0)
+        # Player started before the corner and is now past it
+        player.turn_start_position = 1
+        player.position = 5  # inside the corner
+        player.gear = 2
+        player.speed_from_cards = 4  # exceeds corner limit of 3
+        player.heat_pool = [Card(CardType.HEAT, 0, f"hp{i}") for i in range(5)]
+
+        decision = agent.choose_react(
+            state, 0, max_cooldown=0, can_boost=True, has_adrenaline=False
+        )
+        assert decision.use_boost is False
+
+    def test_no_boost_when_heat_critically_low(self):
+        """Should not boost when heat <= 2."""
+        agent = HeuristicAgent()
+        track = _straight_track()
+        state = _make_game_state(track=track)
+        player = state.get_player(0)
+        player.turn_start_position = 3
+        player.position = 5
+        player.speed_from_cards = 2
+        player.heat_pool = [Card(CardType.HEAT, 0, f"hp{i}") for i in range(2)]
+
+        decision = agent.choose_react(
+            state, 0, max_cooldown=0, can_boost=True, has_adrenaline=False
+        )
+        assert decision.use_boost is False
+
+    def test_choose_cards_avoids_spinout_combo(self):
+        """Should prefer low-speed combo when high-speed would cause spinout."""
+        agent = HeuristicAgent()
+        track = _corner_track()  # corner at 3-5, limit 3
+        state = _make_game_state(track=track)
+        player = state.get_player(0)
+        player.position = 2  # will cross corner
+        player.gear = 2
+        player.heat_pool = [Card(CardType.HEAT, 0, "hp0")]  # only 1 heat
+
+        c1 = Card(CardType.SPEED, 1, "s1")
+        c2 = Card(CardType.SPEED, 2, "s2")
+        c3 = Card(CardType.SPEED, 3, "s3")
+        c4 = Card(CardType.SPEED, 4, "s4")
+
+        # Low combo: speed=3 (within limit), high combo: speed=7 (way over)
+        legal = [(c1, c2), (c3, c4)]
+        choice = agent.choose_cards(state, 0, legal)
+        assert choice == (c1, c2)
+
+
 class TestHeuristicChooseDiscard:
     def test_returns_empty_when_few_playable(self) -> None:
         """Should keep cards when few playable in hand."""

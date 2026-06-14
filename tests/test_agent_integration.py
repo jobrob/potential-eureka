@@ -81,7 +81,7 @@ class TestHeuristicVsRandom:
                 heuristic_wins += 1
 
         win_rate = heuristic_wins / total
-        assert win_rate > 0.55, (
-            f"Heuristic win rate {win_rate:.1%} is below 55% threshold "
+        assert win_rate > 0.60, (
+            f"Heuristic win rate {win_rate:.1%} is below 60% threshold "
             f"({heuristic_wins}/{total})"
         )

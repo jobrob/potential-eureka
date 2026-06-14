@@ -12,3 +12,5 @@ build/
 *.pth
 runs/
 wandb/
+scripts/logs/*.log
+test_race.log

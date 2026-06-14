@@ -103,20 +103,23 @@ def phase_shift_gears(
         if heat_cost > 0:
             player.pay_heat(heat_cost)
 
+        gear_shift_data: dict = {
+            "old_gear": old_gear,
+            "new_gear": new_gear,
+            "heat_cost": heat_cost,
+        }
+        if heat_cost > 0:
+            gear_shift_data["heat_available"] = player.heat_available
         state.log_event(
             "gear_shift",
             player_id=pid,
-            data={
-                "old_gear": old_gear,
-                "new_gear": new_gear,
-                "heat_cost": heat_cost,
-            },
+            data=gear_shift_data,
         )
         events.append(
             GameEvent(
                 state.round_num, Phase.SHIFT_GEARS, pid,
                 "gear_shift",
-                {"old_gear": old_gear, "new_gear": new_gear, "heat_cost": heat_cost},
+                gear_shift_data,
             )
         )
 
@@ -165,7 +168,7 @@ def phase_play_cards(
             "play_cards",
             player_id=pid,
             data={
-                "cards": [c.id for c in cards],
+                "cards": [c.display_name for c in cards],
                 "cluttered": player.cluttered,
             },
         )
@@ -173,7 +176,7 @@ def phase_play_cards(
             GameEvent(
                 state.round_num, Phase.PLAY_CARDS, pid,
                 "play_cards",
-                {"cards": [c.id for c in cards], "cluttered": player.cluttered},
+                {"cards": [c.display_name for c in cards], "cluttered": player.cluttered},
             )
         )
 
@@ -222,9 +225,9 @@ def step_reveal_and_move(
                 if basic_card.card_type == CardType.SPEED:
                     player.cards_played.append(basic_card)
 
-            # Collect IDs of non-SPEED cards that were discarded during flipping
+            # Collect display names of non-SPEED cards that were discarded during flipping
             discarded = [
-                c.id for c in flipped if c.card_type != CardType.SPEED
+                c.display_name for c in flipped if c.card_type != CardType.SPEED
             ]
 
             state.log_event(
@@ -356,13 +359,13 @@ def step_react(
         state.log_event(
             "cooldown",
             player_id=player.player_id,
-            data={"count": len(cooled)},
+            data={"count": len(cooled), "heat_available": player.heat_available},
         )
         events.append(
             GameEvent(
                 state.round_num, Phase.REACT, player.player_id,
                 "cooldown",
-                {"count": len(cooled)},
+                {"count": len(cooled), "heat_available": player.heat_available},
             )
         )
 
@@ -391,13 +394,13 @@ def step_react(
         state.log_event(
             "boost",
             player_id=player.player_id,
-            data={"value": boost_value, "flipped_count": len(flipped)},
+            data={"value": boost_value, "flipped_count": len(flipped), "heat_available": player.heat_available},
         )
         events.append(
             GameEvent(
                 state.round_num, Phase.REACT, player.player_id,
                 "boost",
-                {"value": boost_value, "flipped_count": len(flipped)},
+                {"value": boost_value, "flipped_count": len(flipped), "heat_available": player.heat_available},
             )
         )
 
@@ -600,6 +603,7 @@ def step_check_corner(
                 "new_position": spin_position,
                 "stress_added": stress_count,
                 "heat_paid": remaining_heat,
+                "heat_available": player.heat_available,
             },
         )
         events.append(
@@ -611,6 +615,7 @@ def step_check_corner(
                     "new_position": spin_position,
                     "stress_added": stress_count,
                     "heat_paid": remaining_heat,
+                    "heat_available": player.heat_available,
                 },
             )
         )
@@ -625,6 +630,7 @@ def step_check_corner(
                 "corners": len(crossed_corners),
                 "speed": speed,
                 "heat_cost": total_heat_cost,
+                "heat_available": player.heat_available,
             },
         )
         events.append(
@@ -635,6 +641,7 @@ def step_check_corner(
                     "corners": len(crossed_corners),
                     "speed": speed,
                     "heat_cost": total_heat_cost,
+                    "heat_available": player.heat_available,
                 },
             )
         )
@@ -683,13 +690,13 @@ def step_discard(
     state.log_event(
         "discard",
         player_id=player.player_id,
-        data={"count": len(decision), "cards": [c.id for c in decision]},
+        data={"count": len(decision), "cards": [c.display_name for c in decision]},
     )
     events.append(
         GameEvent(
             state.round_num, Phase.DISCARD, player.player_id,
             "discard",
-            {"count": len(decision), "cards": [c.id for c in decision]},
+            {"count": len(decision), "cards": [c.display_name for c in decision]},
         )
     )
 
