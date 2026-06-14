@@ -47,7 +47,7 @@ class TestDeck:
         # Draw pile has 1, discard has 2 — drawing 3 should trigger reshuffle
         drawn2 = deck.draw(3)
         assert len(drawn2) == 3
-        assert deck.total_size == 3  # All cards still accounted for
+        assert deck.total_size == 0  # All 3 cards have been drawn out of the deck
 
     def test_draw_empty_deck(self):
         deck = Deck([])

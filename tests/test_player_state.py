@@ -13,7 +13,7 @@ class TestPlayerState:
         assert player.name == "Player 0"
         assert player.gear == 1
         assert len(player.hand) == 7
-        assert player.deck.draw_pile_size == 5  # 12 - 7 drawn
+        assert player.deck.draw_pile_size == 11  # 18 - 7 drawn (12 speed + 3 upgrade + 3 stress)
         assert player.heat_available == 6
         assert not player.spun_out
         assert not player.finished
@@ -44,7 +44,8 @@ class TestPlayerState:
 
     def test_cooldown(self):
         player = PlayerState.create(0)
-        # Manually add heat cards to hand to test cooldown
+        # Remove any heat cards that were randomly drawn, then add a known one
+        player.hand = [c for c in player.hand if c.card_type != CardType.HEAT]
         heat_card = Card(CardType.HEAT, 0, "test_heat")
         player.hand.append(heat_card)
         initial_heat_pool = player.heat_available
@@ -57,6 +58,7 @@ class TestPlayerState:
 
     def test_cooldown_no_heat_in_hand(self):
         player = PlayerState.create(0)
-        # Fresh hand should have no heat cards
+        # Remove any heat cards that may have been drawn into hand
+        player.hand = [c for c in player.hand if c.card_type != CardType.HEAT]
         cooled = player.cooldown(3)
         assert len(cooled) == 0

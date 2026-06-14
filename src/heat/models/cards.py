@@ -14,6 +14,7 @@ class CardType(Enum):
     SPEED = "speed"
     HEAT = "heat"
     STRESS = "stress"
+    UPGRADE = "upgrade"
 
 
 @dataclass(frozen=True)
@@ -117,5 +118,33 @@ def create_heat_cards(player_id: int, count: int = 6) -> list[Card]:
     """Create heat cards for a player's heat pool."""
     return [
         Card(CardType.HEAT, 0, f"p{player_id}_heat_{i}")
+        for i in range(count)
+    ]
+
+
+def create_starting_upgrade_cards(player_id: int) -> list[Card]:
+    """Create the 3 Starting Upgrade cards per the official rules.
+
+    Returns a list of 3 cards to be shuffled into the player's draw deck:
+    1. A 0-value upgrade card
+    2. A 5-value upgrade card
+    3. An extra Heat card
+
+    During stress/boost resolution, Upgrade cards are NOT Basic cards.
+    When flipped, they are discarded and flipping continues until a
+    Basic (SPEED type) card is found.
+    """
+    prefix = f"p{player_id}"
+    return [
+        Card(CardType.UPGRADE, 0, f"{prefix}_upg_0"),
+        Card(CardType.UPGRADE, 5, f"{prefix}_upg_5"),
+        Card(CardType.HEAT, 0, f"{prefix}_upg_heat"),
+    ]
+
+
+def create_stress_cards(player_id: int, count: int = 3) -> list[Card]:
+    """Create stress cards to be shuffled into a player's deck."""
+    return [
+        Card(CardType.STRESS, 0, f"p{player_id}_stress_{i}")
         for i in range(count)
     ]

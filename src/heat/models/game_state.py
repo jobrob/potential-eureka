@@ -63,6 +63,13 @@ class GameState:
     turn_order: list[int] = field(default_factory=list)
     event_log: list[GameEvent] = field(default_factory=list)
     logging_enabled: bool = True
+    starting_player_count: int = 0
+    _stress_counter: int = 0
+
+    def next_stress_id(self) -> int:
+        """Return a unique counter value for stress card IDs."""
+        self._stress_counter += 1
+        return self._stress_counter
 
     def __post_init__(self) -> None:
         if not self.turn_order:
@@ -147,4 +154,5 @@ class GameState:
             track=track,
             players=players,
             logging_enabled=logging_enabled,
+            starting_player_count=num_players,
         )

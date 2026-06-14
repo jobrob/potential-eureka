@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from heat.models.cards import Card, CardType, Deck, create_heat_cards, create_starting_deck
+from heat.models.cards import (
+    Card,
+    CardType,
+    Deck,
+    create_heat_cards,
+    create_starting_deck,
+    create_starting_upgrade_cards,
+    create_stress_cards,
+)
 
 
 @dataclass
@@ -38,6 +46,15 @@ class PlayerState:
     spun_out: bool = False
     finished: bool = False
     finish_order: int = 0
+    # Per-turn transient fields (cleared each round)
+    cards_played: list[Card] = field(default_factory=list)
+    boost_used_this_turn: bool = False
+    speed_from_cards: int = 0
+    speed_from_boost: int = 0
+    speed_from_adrenaline: int = 0
+    slipstream_moved: int = 0
+    cluttered: bool = False
+    turn_start_position: int = 0
 
     @classmethod
     def create(cls, player_id: int, name: str | None = None) -> PlayerState:
@@ -49,7 +66,10 @@ class PlayerState:
             name = f"Player {player_id}"
 
         speed_cards = create_starting_deck(player_id)
-        deck = Deck(speed_cards)
+        upgrade_cards = create_starting_upgrade_cards(player_id)
+        stress_cards = create_stress_cards(player_id)
+        all_deck_cards = speed_cards + upgrade_cards + stress_cards
+        deck = Deck(all_deck_cards)
         heat_pool = create_heat_cards(player_id)
 
         player = cls(
