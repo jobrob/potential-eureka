@@ -222,12 +222,18 @@ def step_reveal_and_move(
                 if basic_card.card_type == CardType.SPEED:
                     player.cards_played.append(basic_card)
 
+            # Collect IDs of non-SPEED cards that were discarded during flipping
+            discarded = [
+                c.id for c in flipped if c.card_type != CardType.SPEED
+            ]
+
             state.log_event(
                 "stress_resolved",
                 player_id=player.player_id,
                 data={
                     "value": value,
                     "flipped_count": len(flipped),
+                    "discarded": discarded,
                 },
             )
 
@@ -713,6 +719,7 @@ def step_replenish(
 
     # Draw to hand size
     cards_needed = rules.HAND_SIZE - len(player.hand)
+    drawn: list[Card] = []
     if cards_needed > 0:
         drawn = player.deck.draw(cards_needed)
         player.hand.extend(drawn)
@@ -726,16 +733,23 @@ def step_replenish(
     player.cluttered = False
     player.turn_start_position = 0
 
+    drawn_repr = [repr(c) for c in drawn]
     state.log_event(
         "replenish",
         player_id=player.player_id,
-        data={"hand_size": len(player.hand)},
+        data={
+            "hand_size": len(player.hand),
+            "drawn": drawn_repr,
+        },
     )
     events.append(
         GameEvent(
             state.round_num, Phase.REPLENISH, player.player_id,
             "replenish",
-            {"hand_size": len(player.hand)},
+            {
+                "hand_size": len(player.hand),
+                "drawn": drawn_repr,
+            },
         )
     )
 

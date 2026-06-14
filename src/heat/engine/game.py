@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from heat.models.cards import Card, CardType
-from heat.models.game_state import GameEvent, GameState
+from heat.models.game_state import GameEvent, GameState, Phase
 from heat.models.player_state import PlayerState
 from heat.models.track import Track
 from heat.engine import rules
@@ -207,6 +207,39 @@ class Game:
             player = self._state.get_player(pid)
             if player.finished:
                 continue
+
+            # Log turn start context
+            if self._state.logging_enabled:
+                next_corner_dist = None
+                next_corner_limit = None
+                for corner in self._state.track.corners:
+                    dist = (corner.start - player.position) % self._state.track.length
+                    if dist == 0:
+                        dist = self._state.track.length  # already at/past this corner
+                    if next_corner_dist is None or dist < next_corner_dist:
+                        next_corner_dist = dist
+                        next_corner_limit = corner.speed_limit
+
+                hand_repr = [repr(c) for c in player.hand]
+                turn_start_data = {
+                    "hand": hand_repr,
+                    "hand_size": len(player.hand),
+                    "gear": player.gear,
+                    "heat_available": player.heat_available,
+                    "position": player.position,
+                    "next_corner_dist": next_corner_dist,
+                    "next_corner_speed_limit": next_corner_limit,
+                }
+                self._state.log_event(
+                    "turn_start",
+                    player_id=player.player_id,
+                    data=turn_start_data,
+                )
+                events.append(GameEvent(
+                    self._state.round_num, Phase.REVEAL_AND_MOVE,
+                    player.player_id, "turn_start",
+                    turn_start_data,
+                ))
 
             # CLUTTERED HAND CHECK: If the player had a cluttered hand,
             # their car does not move. Set gear to 1, skip steps 3-8,
