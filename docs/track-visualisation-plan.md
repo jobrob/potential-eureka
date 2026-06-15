@@ -65,19 +65,7 @@ For each corner in `track.corners`, find the spaces it covers and render them as
 Normal spaces on horizontal edges: `──5──6──7──`
 Normal spaces on vertical edges: one per row with the space number
 
-### Step 3: Player markers
-
-For each player, look up their space's grid position and place their marker symbol there. If two players share a space, show both symbols side by side.
-
-Marker assignment:
-- Player 0: ■ (or first letter of name)
-- Player 1: ●
-- Player 2: ▲
-- Player 3: ◆
-- Player 4: ★
-- Player 5: ◇
-
-### Step 4: Rendering
+### Step 3: Rendering
 
 Build a 2D character grid (list of lists), then:
 1. Draw the rectangle edges (─ for horizontal, │ for vertical)
@@ -87,7 +75,7 @@ Build a 2D character grid (list of lists), then:
 5. Add legend and track info header
 6. Convert grid to string
 
-### Step 5: Integration with viewer
+### Step 4: Integration with viewer
 
 Add a `render_track(state: GameState) -> str` function that produces the visualisation.
 
