@@ -8,6 +8,7 @@ draw from the deck). The engine and agents both depend on this module.
 from __future__ import annotations
 
 import itertools
+from dataclasses import dataclass
 
 from heat.models.cards import Card, CardType, Deck
 from heat.models.player_state import PlayerState
@@ -550,3 +551,76 @@ def resolve_blocked_position(
 
     # Shouldn't happen, but fallback to target
     return pos
+
+
+# ---------------------------------------------------------------------------
+# 20. Unified legal-action enumeration (decision-point API)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReactOptions:
+    """Legal React action envelope for one player at the React decision.
+
+    Mirrors exactly what ``Game._collect_react_decision`` computes inline so
+    a Gym env and the agent protocol agree on the React action space.
+
+    Attributes:
+        max_cooldown: Gear-based cooldown amount. The +1 adrenaline cooldown
+            is NOT included here; it is applied later inside ``step_react``.
+        can_boost: True if the player has heat to pay and hasn't boosted.
+        has_adrenaline: True if the player is eligible for adrenaline.
+    """
+
+    max_cooldown: int
+    can_boost: bool
+    has_adrenaline: bool
+
+
+def legal_react_options(
+    player: PlayerState,
+    active_players: list[PlayerState],
+    starting_player_count: int,
+) -> ReactOptions:
+    """Return the legal React options for ``player`` at the React decision.
+
+    Pure extraction of the inline logic in ``Game._collect_react_decision``;
+    no behavior change. ``max_cooldown`` is gear-only (the adrenaline +1 is
+    applied later in ``step_react``).
+    """
+    return ReactOptions(
+        max_cooldown=cooldown_amount(player.gear),
+        can_boost=(
+            player.heat_available > 0 and not player.boost_used_this_turn
+        ),
+        has_adrenaline=adrenaline_eligible(
+            player, active_players, starting_player_count
+        ),
+    )
+
+
+def legal_slipstream(
+    player: PlayerState,
+    active_players: list[PlayerState],
+    track: Track,
+) -> bool:
+    """Return whether ``player`` may take slipstream at this decision point.
+
+    Thin pass-through to :func:`slipstream_eligible`, provided as the single
+    named decision-point entry the env queries.
+    """
+    return slipstream_eligible(player, active_players, track)
+
+
+def legal_discards(player: PlayerState) -> list[Card]:
+    """Return the Speed/Upgrade cards eligible for voluntary discard.
+
+    Pure extraction of the inline filter in ``Game.run_round`` (and the rule
+    ``step_discard`` re-validates the same set). Heat and Stress cards are
+    never voluntarily discardable.
+    """
+    return [
+        c
+        for c in player.hand
+        if c.card_type in (CardType.SPEED, CardType.UPGRADE)
+    ]

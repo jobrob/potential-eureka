@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -54,6 +55,9 @@ class GameState:
         turn_order: Player IDs in current turn order (leader last for slipstream).
         event_log: Full history of game events (toggleable for performance).
         logging_enabled: Whether to record events in the log.
+        rng: The canonical RNG for this game. Owned by GameState and bound
+            into each player's Deck so shuffles are reproducible and isolated
+            per game (rather than relying on the module-global random).
     """
 
     track: Track
@@ -64,6 +68,7 @@ class GameState:
     event_log: list[GameEvent] = field(default_factory=list)
     logging_enabled: bool = True
     starting_player_count: int = 0
+    rng: random.Random = field(default_factory=random.Random)
     _stress_counter: int = 0
 
     def next_stress_id(self) -> int:
@@ -129,6 +134,52 @@ class GameState:
         self.turn_order = [p.player_id for p in ordered]
         return self.turn_order
 
+    def clone(
+        self,
+        *,
+        copy_event_log: bool = False,
+        reseed: int | None = None,
+    ) -> GameState:
+        """Return a faithful deep-ish copy of this game state.
+
+        RNG policy (the explicit interaction with item A):
+          - ``reseed`` is None (default): the clone gets its OWN rng forked
+            deterministically from this state's rng via
+            ``random.Random(self.rng.random())``. This makes the clone
+            independent (mutating one stream never touches the other) AND
+            reproducible (forking the same parent rng twice yields the same
+            child stream). The parent's rng is advanced by one draw.
+          - ``reseed`` is an int: the clone's rng is ``random.Random(reseed)``,
+            for callers (e.g. ``env.reset()``) that want an explicit fresh seed.
+
+        Cloned player decks are bound to the clone's rng.
+
+        ``Track`` is immutable race configuration and is SHARED (not copied).
+
+        ``event_log`` is NOT copied by default (it is large, append-only replay
+        data a lookahead/rollout clone does not need). When ``copy_event_log``
+        is True the list is shallow-copied (GameEvents are treated as immutable
+        records and shared).
+        """
+        new_rng = (
+            random.Random(reseed)
+            if reseed is not None
+            else random.Random(self.rng.random())
+        )
+        new = GameState(
+            track=self.track,
+            players=[p.clone(new_rng) for p in self.players],
+            round_num=self.round_num,
+            current_phase=self.current_phase,
+            turn_order=list(self.turn_order),
+            event_log=list(self.event_log) if copy_event_log else [],
+            logging_enabled=self.logging_enabled,
+            starting_player_count=self.starting_player_count,
+            rng=new_rng,
+        )
+        new._stress_counter = self._stress_counter
+        return new
+
     @classmethod
     def create(
         cls,
@@ -136,15 +187,40 @@ class GameState:
         num_players: int,
         player_names: list[str] | None = None,
         logging_enabled: bool = True,
+        seed: int | None = None,
     ) -> GameState:
-        """Create a new game with players placed at start positions."""
+        """Create a new game with players placed at start positions.
+
+        RNG policy:
+          - ``seed`` is an int: the game RNG is ``random.Random(seed)`` and
+            the whole game (deck order, initial hands, in-game reshuffles)
+            is a deterministic function of that seed alone.
+          - ``seed`` is None (default): the game RNG is forked from the
+            CURRENT global ``random`` state via ``random.Random(
+            random.random())``. This preserves backward compatibility with
+            callers/tests that seed the global ``random`` module before
+            constructing a game (e.g. ``random.seed(999); Game(...)``): the
+            global stream deterministically seeds the game RNG. New code
+            should pass an explicit ``seed`` and never rely on global state.
+        """
         if player_names and len(player_names) != num_players:
             raise ValueError("player_names length must match num_players")
+
+        if seed is not None:
+            rng = random.Random(seed)
+        else:
+            # Fork from the global random state for back-compat with the
+            # legacy "seed the global module then build a Game" pattern.
+            rng = random.Random(random.random())
 
         players: list[PlayerState] = []
         for i in range(num_players):
             name = player_names[i] if player_names else None
-            player = PlayerState.create(i, name)
+            # Build the deck without drawing the hand yet; attach the game
+            # RNG (re-shuffling) so deck order is seed-determined, THEN draw.
+            player = PlayerState.create(i, name, draw_hand=False)
+            player.deck.attach_rng(rng)
+            player.hand = player.deck.draw(7)
             # Place at starting position
             if i < len(track.start_positions):
                 player.position = track.start_positions[i]
@@ -155,4 +231,5 @@ class GameState:
             players=players,
             logging_enabled=logging_enabled,
             starting_player_count=num_players,
+            rng=rng,
         )

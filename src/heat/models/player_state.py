@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 
 from heat.models.cards import (
@@ -62,10 +63,26 @@ class PlayerState:
     turn_start_lap: int = 0
 
     @classmethod
-    def create(cls, player_id: int, name: str | None = None) -> PlayerState:
+    def create(
+        cls,
+        player_id: int,
+        name: str | None = None,
+        rng: random.Random | None = None,
+        draw_hand: bool = True,
+    ) -> PlayerState:
         """Create a new player with a standard starting deck and heat pool.
 
-        Draws an initial hand of 7 cards.
+        Args:
+            player_id: 0-based player identifier.
+            name: Optional display name.
+            rng: Optional RNG to bind the deck to. When None, the deck uses
+                its own throwaway local stream; callers that own a shared
+                RNG (e.g. ``GameState.create``) should pass it here so deck
+                order is a deterministic function of the game seed.
+            draw_hand: When True (default), draw the initial 7-card hand
+                immediately. ``GameState.create`` sets this False so it can
+                attach the game RNG and re-shuffle BEFORE the hand is drawn,
+                keeping hands seed-determined.
         """
         if name is None:
             name = f"Player {player_id}"
@@ -74,7 +91,7 @@ class PlayerState:
         upgrade_cards = create_starting_upgrade_cards(player_id)
         stress_cards = create_stress_cards(player_id)
         all_deck_cards = speed_cards + upgrade_cards + stress_cards
-        deck = Deck(all_deck_cards)
+        deck = Deck(all_deck_cards, rng=rng)
         heat_pool = create_heat_cards(player_id)
 
         player = cls(
@@ -83,9 +100,45 @@ class PlayerState:
             deck=deck,
             heat_pool=heat_pool,
         )
-        # Draw initial hand of 7 cards
-        player.hand = player.deck.draw(7)
+        if draw_hand:
+            # Draw initial hand of 7 cards
+            player.hand = player.deck.draw(7)
         return player
+
+    def clone(self, rng: random.Random | None = None) -> PlayerState:
+        """Return a faithful deep-ish copy of this player.
+
+        New lists are created for ``hand``, ``heat_pool``, ``cooldown_pool``,
+        and ``cards_played`` so mutating the clone never aliases the source.
+        ``Card`` objects are frozen and shared safely. The deck is cloned and
+        bound to the supplied ``rng`` (normally the cloned ``GameState``'s rng).
+
+        ALL per-turn transient fields are copied (not reset): a clone taken
+        mid-turn must be a faithful resume point for lookahead/rollout.
+        """
+        return PlayerState(
+            player_id=self.player_id,
+            name=self.name,
+            deck=self.deck.clone(rng),
+            hand=list(self.hand),
+            gear=self.gear,
+            position=self.position,
+            lap=self.lap,
+            heat_pool=list(self.heat_pool),
+            cooldown_pool=list(self.cooldown_pool),
+            spun_out=self.spun_out,
+            finished=self.finished,
+            finish_order=self.finish_order,
+            cards_played=list(self.cards_played),
+            boost_used_this_turn=self.boost_used_this_turn,
+            speed_from_cards=self.speed_from_cards,
+            speed_from_boost=self.speed_from_boost,
+            speed_from_adrenaline=self.speed_from_adrenaline,
+            slipstream_moved=self.slipstream_moved,
+            cluttered=self.cluttered,
+            turn_start_position=self.turn_start_position,
+            turn_start_lap=self.turn_start_lap,
+        )
 
     @property
     def speed_cards_in_hand(self) -> list[Card]:

@@ -47,10 +47,33 @@ class Card:
 class Deck:
     """A deck with draw pile, discard pile, and automatic reshuffling."""
 
-    def __init__(self, cards: list[Card] | None = None) -> None:
+    def __init__(
+        self,
+        cards: list[Card] | None = None,
+        rng: random.Random | None = None,
+    ) -> None:
+        self._rng: random.Random = rng if rng is not None else random.Random()
         self._draw_pile: list[Card] = list(cards) if cards else []
         self._discard_pile: list[Card] = []
-        random.shuffle(self._draw_pile)
+        self._rng.shuffle(self._draw_pile)
+
+    def attach_rng(self, rng: random.Random, reshuffle: bool = True) -> None:
+        """Re-bind this deck to a shared RNG.
+
+        If ``reshuffle`` is True, re-shuffle the draw pile from the new
+        stream so deck order is a deterministic function of the supplied
+        RNG (e.g. the game seed) rather than the pre-attach local stream.
+
+        Because ``random.shuffle`` permutes the *current* list order, the
+        draw pile is first restored to a canonical (id-sorted) order before
+        shuffling. This guarantees the post-attach order depends only on the
+        attached RNG and the deck's contents -- never on the throwaway local
+        stream used when the deck was first constructed.
+        """
+        self._rng = rng
+        if reshuffle:
+            self._draw_pile.sort(key=lambda c: c.id)
+            rng.shuffle(self._draw_pile)
 
     @property
     def draw_pile_size(self) -> int:
@@ -63,6 +86,32 @@ class Deck:
     @property
     def total_size(self) -> int:
         return len(self._draw_pile) + len(self._discard_pile)
+
+    @property
+    def draw_pile(self) -> tuple[Card, ...]:
+        """Read-only snapshot of the draw pile (bottom..top)."""
+        return tuple(self._draw_pile)
+
+    @property
+    def discard_pile(self) -> tuple[Card, ...]:
+        """Read-only snapshot of the discard pile."""
+        return tuple(self._discard_pile)
+
+    def clone(self, rng: random.Random | None = None) -> Deck:
+        """Return a deep-ish copy of this deck.
+
+        New pile lists are created, but the ``Card`` objects are frozen and
+        therefore shared safely (no need to copy them).
+
+        RNG policy: the caller supplies the clone's RNG (normally the cloned
+        ``GameState``'s rng). If None, the clone gets a fresh, independent
+        ``random.Random()`` so the two decks never share a stream.
+        """
+        new: Deck = Deck.__new__(Deck)
+        new._draw_pile = list(self._draw_pile)
+        new._discard_pile = list(self._discard_pile)
+        new._rng = rng if rng is not None else random.Random()
+        return new
 
     def draw(self, count: int = 1) -> list[Card]:
         """Draw cards from the draw pile, reshuffling discard if needed."""
@@ -83,13 +132,13 @@ class Deck:
     def add_to_draw_pile(self, cards: list[Card]) -> None:
         """Add cards directly to the draw pile (e.g., heat cards entering the deck)."""
         self._draw_pile.extend(cards)
-        random.shuffle(self._draw_pile)
+        self._rng.shuffle(self._draw_pile)
 
     def _reshuffle(self) -> None:
         """Shuffle the discard pile into the draw pile."""
         self._draw_pile.extend(self._discard_pile)
         self._discard_pile.clear()
-        random.shuffle(self._draw_pile)
+        self._rng.shuffle(self._draw_pile)
 
     def __iter__(self) -> Iterator[Card]:
         """Iterate over all cards (draw pile + discard pile)."""

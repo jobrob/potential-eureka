@@ -9,23 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from heat.models.cards import Card, CardType
-from heat.models.game_state import GameEvent, GameState, Phase
-from heat.models.player_state import PlayerState
+from heat.models.cards import Card
+from heat.models.game_state import GameEvent, GameState
 from heat.models.track import Track
 from heat.engine import rules
-from heat.engine.phases import (
-    ReactDecision,
-    phase_play_cards,
-    phase_shift_gears,
-    step_adrenaline,
-    step_check_corner,
-    step_discard,
-    step_react,
-    step_replenish,
-    step_reveal_and_move,
-    step_slipstream,
-)
+from heat.engine.driver import Decision, DecisionKind, run_round_driver
+from heat.engine.phases import ReactDecision
 
 MAX_ROUNDS: int = 200
 
@@ -136,6 +125,7 @@ class Game:
         agents: list[Agent],
         player_names: list[str] | None = None,
         logging_enabled: bool = True,
+        seed: int | None = None,
     ) -> None:
         num_players = len(agents)
         self._state = GameState.create(
@@ -143,6 +133,7 @@ class Game:
             num_players,
             player_names=player_names,
             logging_enabled=logging_enabled,
+            seed=seed,
         )
         # Map player_id -> Agent for O(1) lookup
         self._agents: dict[int, Agent] = {
@@ -184,202 +175,72 @@ class Game:
     def run_round(self) -> list[GameEvent]:
         """Run a single round of the game.
 
+        Reimplemented as a thin pump over ``run_round_driver``: the driver
+        runs the round and pauses at each agent decision point, and
+        ``_answer`` dispatches to the matching ``Agent.choose_*`` method.
+        Behavior is identical to the previous monolithic loop.
+
         Returns the list of events generated during this round.
         """
-        events: list[GameEvent] = []
-
-        # === SIMULTANEOUS STEPS (all players at once) ===
-
-        # 0. Recompute turn order based on current positions
-        self._state.compute_turn_order()
-
-        # 1. SHIFT GEARS (simultaneous)
-        gear_decisions = self._collect_gear_decisions()
-        events += phase_shift_gears(self._state, gear_decisions)
-
-        # Capture each active player's hand BEFORE playing cards
-        pre_play_hands: dict[int, list[str]] = {}
-        if self._state.logging_enabled:
-            for player in self._state.active_players:
-                pre_play_hands[player.player_id] = [c.display_name for c in player.hand]
-
-        # 2. PLAY CARDS (simultaneous)
-        card_decisions = self._collect_card_decisions()
-        events += phase_play_cards(self._state, card_decisions)
-
-        # === PER-PLAYER SEQUENTIAL STEPS (front-to-back) ===
-
-        for pid in list(self._state.turn_order):  # copy since order is stable
-            player = self._state.get_player(pid)
-            if player.finished:
-                continue
-
-            # Log turn start context
-            if self._state.logging_enabled:
-                next_corner, dist = rules.distance_to_next_corner(
-                    self._state.track, player.position,
-                )
-                # Preserve original semantics: no corners -> None distance.
-                if next_corner is None:
-                    next_corner_dist = None
-                    next_corner_limit = None
-                else:
-                    next_corner_dist = dist
-                    next_corner_limit = next_corner.speed_limit
-
-                hand_repr = pre_play_hands.get(pid, [c.display_name for c in player.hand])
-                turn_start_data = {
-                    "hand": hand_repr,
-                    "hand_size": len(hand_repr),
-                    "gear": player.gear,
-                    "heat_available": player.heat_available,
-                    "position": player.position,
-                    "next_corner_dist": next_corner_dist,
-                    "next_corner_speed_limit": next_corner_limit,
-                }
-                self._state.log_event(
-                    "turn_start",
-                    player_id=player.player_id,
-                    data=turn_start_data,
-                )
-                events.append(GameEvent(
-                    self._state.round_num, Phase.REVEAL_AND_MOVE,
-                    player.player_id, "turn_start",
-                    turn_start_data,
-                ))
-
-            # CLUTTERED HAND CHECK: If the player had a cluttered hand,
-            # their car does not move. Set gear to 1, skip steps 3-8,
-            # go straight to replenish.
-            if player.cluttered:
-                player.gear = 1
-                events += step_replenish(self._state, player)
-                continue
-
-            # Step 3: REVEAL & MOVE
-            events += step_reveal_and_move(self._state, player)
-            if player.finished:
-                events += step_replenish(self._state, player)
-                continue
-
-            # Step 4: ADRENALINE (automatic)
-            events += step_adrenaline(self._state, player)
-
-            # Step 5: REACT (agent decision)
-            react_decision = self._collect_react_decision(player)
-            events += step_react(self._state, player, react_decision)
-            if player.finished:
-                events += step_replenish(self._state, player)
-                continue
-
-            # Step 6: SLIPSTREAM (agent decision if eligible)
-            if rules.slipstream_eligible(
-                player,
-                list(self._state.active_players),
-                self._state.track,
-            ):
-                take_slip = self._agents[pid].choose_slipstream(
-                    self._state, pid
-                )
-                events += step_slipstream(self._state, player, take_slip)
-
-            # Step 7: CHECK CORNER
-            events += step_check_corner(self._state, player)
-
-            # Step 8: DISCARD (agent decision)
-            discardable = [
-                c
-                for c in player.hand
-                if c.card_type in (CardType.SPEED, CardType.UPGRADE)
-            ]
-            if discardable:
-                to_discard = self._agents[pid].choose_discard(
-                    self._state, pid, discardable
-                )
-                events += step_discard(self._state, player, to_discard)
-
-            # Step 9: REPLENISH
-            events += step_replenish(self._state, player)
-
-        # === END OF ROUND ===
-
-        # Clear spun_out flags for next round
-        for player in self._state.active_players:
-            player.spun_out = False
-
-        # Advance round counter
-        self._state.round_num += 1
-
-        return events
+        gen = run_round_driver(self._state)
+        try:
+            decision = next(gen)
+            while True:
+                action = self._answer(decision)
+                decision = gen.send(action)
+        except StopIteration as stop:
+            return stop.value or []
 
     # ------------------------------------------------------------------
-    # Decision collection methods
+    # Decision dispatch (push -> pull bridge to the Agent protocol)
     # ------------------------------------------------------------------
 
-    def _collect_gear_decisions(self) -> dict[int, tuple[int, int]]:
-        """Query each active agent for their gear choice."""
-        decisions: dict[int, tuple[int, int]] = {}
-        for player in self._state.active_players:
-            pid = player.player_id
-            if player.spun_out:
-                decisions[pid] = (1, 0)  # Forced to gear 1, no cost
-            else:
-                legal = rules.legal_gear_shifts(
-                    player.gear, player.heat_available
-                )
-                chosen = self._agents[pid].choose_gear(
-                    self._state, pid, legal
-                )
-                if chosen not in legal:
-                    raise ValueError(
-                        f"Agent {pid} chose illegal gear shift {chosen}"
-                    )
-                decisions[pid] = chosen
-        return decisions
+    def _answer(self, decision: Decision) -> object:
+        """Dispatch a driver Decision to the owning agent's choose_* method.
 
-    def _collect_card_decisions(self) -> dict[int, tuple[Card, ...]]:
-        """Query each active agent for their card play choice."""
-        decisions: dict[int, tuple[Card, ...]] = {}
-        for player in self._state.active_players:
-            pid = player.player_id
-            legal = rules.legal_card_plays(player.hand, player.gear)
-            chosen = self._agents[pid].choose_cards(
-                self._state, pid, legal
-            )
-            if chosen not in legal:
+        Each branch passes exactly the arguments the pre-refactor inline loop
+        passed, so agent behavior is unchanged.
+        """
+        pid = decision.player_id
+        agent = self._agents[pid]
+        kind = decision.kind
+
+        if kind == DecisionKind.GEAR:
+            legal_gears: list[tuple[int, int]] = decision.legal  # type: ignore[assignment]
+            chosen = agent.choose_gear(self._state, pid, legal_gears)
+            if chosen not in legal_gears:
                 raise ValueError(
-                    f"Agent {pid} chose illegal card play"
+                    f"Agent {pid} chose illegal gear shift {chosen}"
                 )
-            # Detect cluttered hand
-            if rules.is_cluttered_hand(player.hand, player.gear):
-                player.cluttered = True
-            decisions[pid] = chosen
-        return decisions
+            return chosen
 
-    def _collect_react_decision(self, player: PlayerState) -> ReactDecision:
-        """Query an agent for their React decision."""
-        pid = player.player_id
-        gear_cooldown = rules.cooldown_amount(player.gear)
-        has_adrenaline = rules.adrenaline_eligible(
-            player,
-            list(self._state.active_players),
-            self._state.starting_player_count,
-        )
+        if kind == DecisionKind.CARDS:
+            legal_plays: list[tuple[Card, ...]] = decision.legal  # type: ignore[assignment]
+            chosen_cards = agent.choose_cards(self._state, pid, legal_plays)
+            if chosen_cards not in legal_plays:
+                raise ValueError(f"Agent {pid} chose illegal card play")
+            return chosen_cards
 
-        # Max cooldown = gear-based + 1 if adrenaline cooldown is available
-        max_cooldown = gear_cooldown  # adrenaline adds to this if used
+        if kind == DecisionKind.REACT:
+            options: rules.ReactOptions = decision.legal  # type: ignore[assignment]
+            # max_cooldown is gear-based; the +1 adrenaline cooldown (if used)
+            # is still applied later inside step_react.
+            return agent.choose_react(
+                self._state,
+                pid,
+                max_cooldown=options.max_cooldown,
+                can_boost=options.can_boost,
+                has_adrenaline=options.has_adrenaline,
+            )
 
-        can_boost = (
-            player.heat_available > 0 and not player.boost_used_this_turn
-        )
+        if kind == DecisionKind.SLIPSTREAM:
+            return agent.choose_slipstream(self._state, pid)
 
-        return self._agents[pid].choose_react(
-            self._state,
-            pid,
-            max_cooldown=max_cooldown,
-            can_boost=can_boost,
-            has_adrenaline=has_adrenaline,
-        )
+        if kind == DecisionKind.DISCARD:
+            discardable: list[Card] = decision.legal  # type: ignore[assignment]
+            return agent.choose_discard(self._state, pid, discardable)
+
+        raise ValueError(f"Unknown decision kind {kind}")
 
     def _force_finish_remaining(self) -> None:
         """Force-finish all remaining players for MAX_ROUNDS safety."""

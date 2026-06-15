@@ -196,6 +196,12 @@ def run_single_game(
     """
     game_seed = _derive_game_seed(base_seed, game_index)
 
+    # Migration (Sprint 5, Step A3): deck shuffling now uses the per-game RNG
+    # owned by GameState, threaded via ``Game(seed=...)`` below, instead of the
+    # module-global ``random``. The global seed is retained transitionally so
+    # any remaining global-RNG consumers (e.g. agents that fall back to it) stay
+    # deterministic; it can be removed once the engine no longer touches the
+    # global module at all.
     if game_seed is not None:
         random.seed(game_seed)
 
@@ -209,7 +215,7 @@ def run_single_game(
         )
         agents.append(factory(player_id, per_player_seed))
 
-    game = Game(track, agents, logging_enabled=False)
+    game = Game(track, agents, logging_enabled=False, seed=game_seed)
     result = game.run()
 
     player_outcomes: list[PlayerOutcome] = []
