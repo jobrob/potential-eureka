@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Iterator
 
@@ -41,15 +41,7 @@ class Card:
         return self.card_type.value
 
     def __repr__(self) -> str:
-        if self.card_type == CardType.SPEED:
-            return str(self.value)
-        elif self.card_type == CardType.HEAT:
-            return "Heat"
-        elif self.card_type == CardType.STRESS:
-            return "Stress"
-        elif self.card_type == CardType.UPGRADE:
-            return f"Upgrade({self.value})"
-        return self.card_type.value
+        return self.display_name
 
 
 class Deck:

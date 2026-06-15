@@ -32,6 +32,10 @@ class PlayerState:
         spun_out: Whether the player spun out this round.
         finished: Whether the player has crossed the finish line.
         finish_order: Position the player finished in (0 = not finished).
+        turn_start_position: Space index at the start of this turn (used
+            for corner checking).
+        turn_start_lap: Lap number at the start of this turn (used with
+            turn_start_position to compute lap-aware spaces moved).
     """
 
     player_id: int
@@ -55,6 +59,7 @@ class PlayerState:
     slipstream_moved: int = 0
     cluttered: bool = False
     turn_start_position: int = 0
+    turn_start_lap: int = 0
 
     @classmethod
     def create(cls, player_id: int, name: str | None = None) -> PlayerState:

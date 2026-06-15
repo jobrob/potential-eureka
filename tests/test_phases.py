@@ -98,6 +98,10 @@ def _make_player(
     )
     if hand is not None:
         player.hand = list(hand)
+    # Mirror production: turn_start_lap is captured alongside the position
+    # at turn start. Tests that set turn_start_position should share the
+    # same lap baseline unless they explicitly override it.
+    player.turn_start_lap = lap
     return player
 
 
@@ -401,6 +405,19 @@ class TestStepRevealAndMove:
         step_reveal_and_move(state, player)
         assert player.lap == 2
         assert player.position == 2  # (8 + 4) % 10 = 2
+
+    def test_single_move_crosses_two_laps(self) -> None:
+        """A single move >= 2*length credits two laps, not one."""
+        track = _make_track(length=5, laps=5)
+        player = _make_player(0, position=1, lap=1)
+        # 1 + 11 = 12 spaces -> 12 // 5 = 2 laps; ends at (1+11) % 5 = 2.
+        player.cards_played = [_speed(11, 0)]
+        state = _make_game_state(track, [player])
+
+        step_reveal_and_move(state, player)
+        assert player.position == 2
+        assert player.lap == 3  # started lap 1, +2 laps
+        assert player.finished is False
 
     def test_finish_detected(self) -> None:
         """Player should be marked as finished on final lap crossing."""
@@ -871,6 +888,27 @@ class TestStepCheckCorner:
 
         events = step_check_corner(state, player)
         assert len(events) == 0
+
+    def test_full_lap_charges_corner(self) -> None:
+        """An exact full-lap move (ends on the start space) must still
+        charge the corners crossed on that lap."""
+        corner = Corner(start=4, end=6, speed_limit=3)
+        track = _make_track(length=10, corners=[corner], laps=3)
+        # Player started this turn at position 0 on lap 1, moved a full
+        # lap (10 spaces) and is now back at position 0 on lap 2.
+        player = _make_player(0, position=0, lap=2, gear=2, heat_pool_size=6)
+        player.turn_start_position = 0
+        player.turn_start_lap = 1
+        player.speed_from_cards = 5  # over limit 3 by 2
+        player.speed_from_boost = 0
+        player.speed_from_adrenaline = 0
+        player.slipstream_moved = 0
+        state = _make_game_state(track, [player])
+
+        events = step_check_corner(state, player)
+        # Corner must be charged: 5 - 3 = 2 heat.
+        assert player.heat_available == 4
+        assert len(events) == 1
 
     def test_multiple_corners(self) -> None:
         """Multiple corners crossed should sum heat costs."""

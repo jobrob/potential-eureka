@@ -199,6 +199,7 @@ def corners_crossed(
     start_pos: int,
     end_pos: int,
     track: Track,
+    spaces_moved: int | None = None,
 ) -> list[Corner]:
     """Return all corners the player moved through or into.
 
@@ -207,28 +208,83 @@ def corners_crossed(
     The start_pos itself is excluded (the player was already there).
 
     Handles wrap-around for multi-lap tracks.
+
+    ``spaces_moved`` is the actual number of spaces the player advanced
+    this turn (lap-aware). It is required to disambiguate the case where
+    ``end_pos == start_pos``: that can mean either "did not move" (0
+    spaces) or "moved exactly one or more full laps" (>= track.length
+    spaces), which lands back on the same space but DOES cross every
+    corner on the lap. When ``spaces_moved`` is None it is inferred from
+    the shortest forward path (legacy behaviour, which cannot detect a
+    full-lap landing on the start space).
     """
     length = track.length
 
-    # Build the set of positions traversed (excluding start)
-    if end_pos > start_pos:
+    if length == 0:
+        return []
+
+    # Infer spaces moved from positions if not supplied. This cannot
+    # distinguish a full-lap move (end == start) from no movement.
+    if spaces_moved is None:
+        spaces_moved = (end_pos - start_pos) % length
+
+    if spaces_moved <= 0:
+        # No movement
+        return []
+
+    # Build the set of positions traversed (excluding start). Walk the
+    # path forward space-by-space so a full-lap (or multi-lap) move
+    # correctly includes every corner, even when it lands on start_pos.
+    if spaces_moved >= length:
+        # One or more full laps: every space on the track is traversed.
+        traversed_positions = range(length)
+    elif end_pos > start_pos:
         # Normal forward movement (no wrap)
         traversed_positions = range(start_pos + 1, end_pos + 1)
-    elif end_pos < start_pos:
+    else:
         # Wrap-around: crossed the finish line
         traversed_positions = list(range(start_pos + 1, length)) + list(
             range(0, end_pos + 1)
         )
-    else:
-        # No movement
-        return []
 
+    traversed = set(traversed_positions)
     result: list[Corner] = []
     for corner in track.corners:
         corner_positions = set(range(corner.start, corner.end + 1))
-        if corner_positions.intersection(traversed_positions):
+        if corner_positions.intersection(traversed):
             result.append(corner)
     return result
+
+
+def distance_to_next_corner(
+    track: Track,
+    position: int,
+) -> tuple[Corner | None, int]:
+    """Return the nearest corner ahead and the distance to its start.
+
+    Distance is measured from ``position`` to ``corner.start`` going
+    forward, wrapping around the track. A corner whose start coincides
+    with ``position`` is treated as a FULL lap away (distance ==
+    ``track.length``), since the player is already standing on it; the
+    next time they reach that corner is one lap later. This matches the
+    convention used in turn-start logging and the standings display.
+
+    Returns ``(corner, distance)``. If the track has no corners, returns
+    ``(None, track.length)``.
+    """
+    best_corner: Corner | None = None
+    best_dist: int | None = None
+    length = track.length
+    for corner in track.corners:
+        dist = (corner.start - position) % length
+        if dist == 0:
+            dist = length  # already at/past this corner this lap
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_corner = corner
+    if best_dist is None:
+        return None, length
+    return best_corner, best_dist
 
 
 # ---------------------------------------------------------------------------
@@ -361,8 +417,11 @@ def adrenaline_eligible(
     if len(active) <= 1:
         return False
 
-    # Sort active players: worst position first (lowest lap, then lowest position)
-    ranked = sorted(active, key=lambda p: (p.lap, p.position))
+    # Sort active players: worst position first (lowest lap, then lowest
+    # position). player_id is a final tiebreak so the recipient is
+    # deterministic when trailing players are tied, matching the ordering
+    # convention used by compute_turn_order.
+    ranked = sorted(active, key=lambda p: (p.lap, p.position, p.player_id))
 
     # Determine how many trailing players get adrenaline
     if starting_player_count >= 5:
@@ -388,6 +447,11 @@ def calculate_move_position(
 
     Returns (new_position, crossed_finish_line).
     Position wraps modulo track.length for multi-lap tracks.
+
+    Note: ``crossed_finish_line`` is a boolean and does NOT capture how
+    many laps a single large move completes. Callers that credit laps
+    should use :func:`laps_completed_by_move` to handle a single move
+    that spans two or more laps (speed >= 2 * track.length).
     """
     raw_pos = current_pos + speed
     if raw_pos >= track.length:
@@ -395,6 +459,24 @@ def calculate_move_position(
         new_pos = raw_pos % track.length
         return new_pos, True
     return raw_pos, False
+
+
+def laps_completed_by_move(
+    current_pos: int,
+    speed: int,
+    track: Track,
+) -> int:
+    """Return how many laps a single move of ``speed`` spaces completes.
+
+    A lap is completed each time the player's path crosses the finish
+    line (position wraps past ``track.length``). Equals
+    ``(current_pos + speed) // track.length``. A single move of
+    ``speed >= 2 * track.length`` therefore credits two or more laps,
+    where naive ``+= 1`` logic would credit only one.
+    """
+    if track.length == 0:
+        return 0
+    return (current_pos + speed) // track.length
 
 
 # ---------------------------------------------------------------------------

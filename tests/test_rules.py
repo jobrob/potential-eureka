@@ -28,6 +28,8 @@ from heat.engine.rules import (
     cooldown_amount,
     adrenaline_eligible,
     calculate_move_position,
+    laps_completed_by_move,
+    distance_to_next_corner,
     check_finished,
     corner_speed_for_check,
     resolve_blocked_position,
@@ -561,6 +563,73 @@ class TestCornersCrossed:
         result = corners_crossed(4, 4, track)
         assert result == []
 
+    def test_exact_full_lap_lands_on_start(self) -> None:
+        # Speed equals track length: the player moves a full lap and lands
+        # back on the start space (end_pos == start_pos). Every corner on
+        # the lap MUST still be charged, not silently skipped.
+        track = _make_track(10, corners=[Corner(4, 6, 3)])
+        result = corners_crossed(0, 0, track, spaces_moved=10)
+        assert len(result) == 1
+        assert result[0] == Corner(4, 6, 3)
+
+    def test_exact_full_lap_all_corners(self) -> None:
+        # A full lap crosses every corner on the track.
+        track = _make_track(
+            10, corners=[Corner(2, 3, 3), Corner(7, 8, 4)]
+        )
+        result = corners_crossed(5, 5, track, spaces_moved=10)
+        assert len(result) == 2
+
+    def test_multi_lap_single_move(self) -> None:
+        # A single move of more than one lap (spaces_moved > length) still
+        # crosses every corner on the path exactly the same as one lap.
+        track = _make_track(
+            10, corners=[Corner(2, 3, 3), Corner(7, 8, 4)]
+        )
+        # Start at 1, move 23 spaces -> lands at (1+23)%10 = 4, two+ laps.
+        result = corners_crossed(1, 4, track, spaces_moved=23)
+        assert len(result) == 2
+
+    def test_spaces_moved_zero_no_corners(self) -> None:
+        # Explicit spaces_moved of 0 means no movement -> no corners.
+        track = _make_track(10, corners=[Corner(4, 6, 3)])
+        result = corners_crossed(0, 0, track, spaces_moved=0)
+        assert result == []
+
+
+# ===========================================================================
+# Tests: distance_to_next_corner
+# ===========================================================================
+
+class TestDistanceToNextCorner:
+    def test_basic_distance(self) -> None:
+        track = _make_track(10, corners=[Corner(4, 6, 3)])
+        corner, dist = distance_to_next_corner(track, 1)
+        assert corner == Corner(4, 6, 3)
+        assert dist == 3
+
+    def test_picks_nearest_of_two(self) -> None:
+        track = _make_track(
+            10, corners=[Corner(2, 3, 3), Corner(7, 8, 4)]
+        )
+        corner, dist = distance_to_next_corner(track, 5)
+        assert corner == Corner(7, 8, 4)
+        assert dist == 2
+
+    def test_on_corner_is_full_lap_away(self) -> None:
+        # Standing on a corner start: the next time you reach it is a
+        # full lap later, so distance == track.length (not 0).
+        track = _make_track(10, corners=[Corner(4, 6, 3)])
+        corner, dist = distance_to_next_corner(track, 4)
+        assert corner == Corner(4, 6, 3)
+        assert dist == 10
+
+    def test_no_corners(self) -> None:
+        track = _make_track(10, corners=[])
+        corner, dist = distance_to_next_corner(track, 3)
+        assert corner is None
+        assert dist == 10
+
 
 # ===========================================================================
 # Tests: check_spin_out
@@ -791,6 +860,22 @@ class TestAdrenalineEligible:
         assert adrenaline_eligible(p2, players, 3) is False   # middle
         assert adrenaline_eligible(p1, players, 3) is False   # leader
 
+    def test_tie_broken_by_player_id_deterministically(self) -> None:
+        # Two trailing players tied on (lap, position). With 3 players
+        # started only ONE gets adrenaline; the tiebreak must be the lower
+        # player_id, regardless of the order players are passed in.
+        leader = _make_player(0, position=15, lap=1)
+        tied_low_id = _make_player(1, position=5, lap=1)
+        tied_high_id = _make_player(2, position=5, lap=1)
+
+        for players in (
+            [leader, tied_low_id, tied_high_id],
+            [tied_high_id, tied_low_id, leader],
+        ):
+            assert adrenaline_eligible(tied_low_id, players, 3) is True
+            assert adrenaline_eligible(tied_high_id, players, 3) is False
+            assert adrenaline_eligible(leader, players, 3) is False
+
 
 # ===========================================================================
 # Tests: calculate_move_position
@@ -826,6 +911,34 @@ class TestCalculateMovePosition:
         new_pos, crossed = calculate_move_position(5, 12, track, 1)
         assert new_pos == 7  # (5 + 12) % 10 = 7
         assert crossed is True
+
+
+# ===========================================================================
+# Tests: laps_completed_by_move
+# ===========================================================================
+
+class TestLapsCompletedByMove:
+    def test_no_lap(self) -> None:
+        track = _make_track(10)
+        assert laps_completed_by_move(2, 5, track) == 0
+
+    def test_single_lap(self) -> None:
+        track = _make_track(10)
+        assert laps_completed_by_move(5, 8, track) == 1  # 13 // 10
+
+    def test_exact_lap(self) -> None:
+        track = _make_track(10)
+        assert laps_completed_by_move(0, 10, track) == 1
+
+    def test_two_laps_single_move(self) -> None:
+        # Tiny track, one big move crosses the finish line twice.
+        track = _make_track(5)
+        # 1 + 11 = 12 spaces total -> 12 // 5 = 2 laps credited.
+        assert laps_completed_by_move(1, 11, track) == 2
+
+    def test_three_laps_single_move(self) -> None:
+        track = _make_track(4)
+        assert laps_completed_by_move(0, 13, track) == 3  # 13 // 4
 
 
 # ===========================================================================

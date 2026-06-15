@@ -216,15 +216,16 @@ class Game:
 
             # Log turn start context
             if self._state.logging_enabled:
-                next_corner_dist = None
-                next_corner_limit = None
-                for corner in self._state.track.corners:
-                    dist = (corner.start - player.position) % self._state.track.length
-                    if dist == 0:
-                        dist = self._state.track.length  # already at/past this corner
-                    if next_corner_dist is None or dist < next_corner_dist:
-                        next_corner_dist = dist
-                        next_corner_limit = corner.speed_limit
+                next_corner, dist = rules.distance_to_next_corner(
+                    self._state.track, player.position,
+                )
+                # Preserve original semantics: no corners -> None distance.
+                if next_corner is None:
+                    next_corner_dist = None
+                    next_corner_limit = None
+                else:
+                    next_corner_dist = dist
+                    next_corner_limit = next_corner.speed_limit
 
                 hand_repr = pre_play_hands.get(pid, [c.display_name for c in player.hand])
                 turn_start_data = {

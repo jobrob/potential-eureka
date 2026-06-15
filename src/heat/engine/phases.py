@@ -43,6 +43,41 @@ class ReactDecision:
 
 
 # ---------------------------------------------------------------------------
+# Movement helpers
+# ---------------------------------------------------------------------------
+
+
+def _mark_finished(state: GameState, player: PlayerState) -> None:
+    """Mark a player as finished and assign their finish order.
+
+    Finish order is 1-based and assigned in the sequence players finish
+    (the count of already-finished players plus this one).
+    """
+    player.finished = True
+    finished_count = len([p for p in state.players if p.finished])
+    player.finish_order = finished_count
+
+
+def _credit_movement(
+    state: GameState,
+    player: PlayerState,
+    pre_move_pos: int,
+    spaces: int,
+) -> None:
+    """Credit laps for a move of ``spaces`` spaces from ``pre_move_pos``.
+
+    A single move may cross the finish line more than once (when
+    ``spaces >= 2 * track.length``); each crossing credits a lap. After
+    crediting, checks whether the player has finished the race.
+    """
+    laps = rules.laps_completed_by_move(pre_move_pos, spaces, state.track)
+    if laps > 0:
+        player.lap += laps
+        if rules.check_finished(player, state.track):
+            _mark_finished(state, player)
+
+
+# ---------------------------------------------------------------------------
 # Simultaneous phases
 # ---------------------------------------------------------------------------
 
@@ -206,8 +241,9 @@ def step_reveal_and_move(
     events: list[GameEvent] = []
     state.current_phase = Phase.REVEAL_AND_MOVE
 
-    # Save start-of-turn position for corner checking later
+    # Save start-of-turn position and lap for corner checking later
     player.turn_start_position = player.position
+    player.turn_start_lap = player.lap
 
     # Calculate base speed from non-stress cards
     total_speed = rules.calculate_speed(tuple(player.cards_played))
@@ -243,6 +279,7 @@ def step_reveal_and_move(
     player.speed_from_cards = total_speed
 
     # Calculate new position
+    pre_move_pos = player.position
     new_pos, crossed = rules.calculate_move_position(
         player.position, total_speed, state.track, player.lap,
     )
@@ -252,13 +289,9 @@ def step_reveal_and_move(
     )
     player.position = new_pos
 
-    if crossed:
-        player.lap += 1
-        if rules.check_finished(player, state.track):
-            player.finished = True
-            # Assign finish order
-            finished_count = len([p for p in state.players if p.finished])
-            player.finish_order = finished_count
+    # Credit laps based on the requested move (handles a single move that
+    # spans two or more laps) and check for finish.
+    _credit_movement(state, player, pre_move_pos, total_speed)
 
     state.log_event(
         "reveal_and_move",
@@ -428,6 +461,7 @@ def step_react(
     # --- Move forward by boost + adrenaline speed ---
     extra_movement = boost_value + adrenaline_speed
     if extra_movement > 0:
+        pre_move_pos = player.position
         new_pos, crossed = rules.calculate_move_position(
             player.position, extra_movement, state.track, player.lap,
         )
@@ -436,12 +470,7 @@ def step_react(
         )
         player.position = new_pos
 
-        if crossed:
-            player.lap += 1
-            if rules.check_finished(player, state.track):
-                player.finished = True
-                finished_count = len([p for p in state.players if p.finished])
-                player.finish_order = finished_count
+        _credit_movement(state, player, pre_move_pos, extra_movement)
 
     return events
 
@@ -478,6 +507,7 @@ def step_slipstream(
         return events
 
     # Move +2
+    pre_move_pos = player.position
     new_pos, crossed = rules.calculate_move_position(
         player.position, 2, state.track, player.lap,
     )
@@ -487,12 +517,9 @@ def step_slipstream(
     player.position = new_pos
     player.slipstream_moved = 2
 
-    if crossed:
-        player.lap += 1
-        if rules.check_finished(player, state.track):
-            player.finished = True
-            finished_count = len([p for p in state.players if p.finished])
-            player.finish_order = finished_count
+    # Slipstream cannot cross the finish line (guarded above), but credit
+    # via the shared helper for consistency.
+    _credit_movement(state, player, pre_move_pos, 2)
 
     state.log_event(
         "slipstream",
@@ -530,9 +557,18 @@ def step_check_corner(
     if player.finished:
         return events
 
-    # Find all corners crossed from turn start to current position
+    # Find all corners crossed from turn start to current position.
+    # Compute the lap-aware spaces moved so a full-lap (or multi-lap)
+    # move that lands back on the start space still charges every corner.
+    spaces_moved = (
+        (player.lap - player.turn_start_lap) * state.track.length
+        + (player.position - player.turn_start_position)
+    )
     crossed_corners = rules.corners_crossed(
-        player.turn_start_position, player.position, state.track,
+        player.turn_start_position,
+        player.position,
+        state.track,
+        spaces_moved=spaces_moved,
     )
 
     if not crossed_corners:

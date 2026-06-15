@@ -8,6 +8,7 @@ from heat.models.cards import Card, CardType, Deck
 from heat.models.player_state import PlayerState
 from heat.models.track import Corner, Space, Track
 from heat.models.game_state import GameState
+from heat.engine import rules
 from heat.engine.phases import ReactDecision
 from heat.engine.game import Agent, Game, GameResult, MAX_ROUNDS
 from heat.agents.random_agent import RandomAgent
@@ -294,20 +295,26 @@ class TestClutteredHand:
         game = Game(track, agents)
 
         player = game.state.get_player(0)
+        original_position = player.position
         # Replace hand: 6 heat + 1 speed, gear=3 needs 3 playable
         player.hand = [
             Card(CardType.HEAT, 0, f"clog_{i}") for i in range(6)
         ] + [Card(CardType.SPEED, 3, "clog_spd_0")]
         player.gear = 3
 
-        # Run the collect phase to check cluttered is detected
-        # We just run a round and verify behavior
         game.run_round()
 
-        # After replenish, cluttered is cleared, but gear should have
-        # been set to 1 during the round
-        # Verify player didn't move far (cluttered means no card movement)
-        # The key check is no crash occurred
+        # A cluttered hand means the car does not move this round: the
+        # movement steps are skipped and the player goes straight to
+        # replenish. Concrete invariants after the round:
+        # 1. Position is unchanged (no card movement, no slipstream).
+        assert player.position == original_position
+        # 2. Gear was forced to 1 during cluttered handling and stays there.
+        assert player.gear == 1
+        # 3. The cluttered transient flag is cleared during replenish.
+        assert player.cluttered is False
+        # 4. The hand is replenished back up to the standard hand size.
+        assert len(player.hand) == rules.HAND_SIZE
 
 
 class TestMultiplePlayersFinish:

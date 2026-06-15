@@ -94,7 +94,7 @@ class GameState:
 
     @property
     def is_game_over(self) -> bool:
-        """Game ends when all players finish or only one remains."""
+        """Game ends only when every player has finished the race."""
         return all(p.finished for p in self.players)
 
     def get_player(self, player_id: int) -> PlayerState:
