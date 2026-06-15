@@ -1,0 +1,383 @@
+"""Batch simulation runner for the HEAT board game.
+
+Runs many games headlessly (with ``logging_enabled=False`` for speed) and
+returns a flat, fully-picklable list of :class:`GameOutcome` records. Supports
+both a sequential path and a parallel path backed by
+:class:`concurrent.futures.ProcessPoolExecutor`.
+
+The runner takes agent *factories* (callables returning fresh agents), never
+reused agent instances: seeded agents carry per-game RNG state, so reusing an
+instance across games would continue its stream rather than reset it.
+
+Determinism is execution-order-independent. With a fixed ``seed``, each game's
+outcome is keyed only on its ``game_index`` (not on which worker ran it), so
+sequential and parallel runs produce identical per-game results.
+
+Usage:
+    >>> from heat.tracks.loader import load_track_by_name
+    >>> from heat.simulation.runner import run_batch, random_agent_factory
+    >>> track = load_track_by_name("usa")
+    >>> factories = [random_agent_factory(), random_agent_factory()]
+    >>> outcomes = run_batch(track, factories, num_games=10, seed=42)
+    >>> len(outcomes)
+    10
+
+Picklability note: under ``parallel=True`` the worker and the agent factories
+are pickled to child processes (Windows uses ``spawn``). Factories must be
+top-level callables or :func:`functools.partial` of top-level constructors.
+Lambdas / local closures are *not* picklable; passing one triggers a
+transparent fallback to the sequential path (with a warning). Callers that
+intentionally use lambdas should pass ``parallel=False``.
+"""
+
+from __future__ import annotations
+
+import functools
+import logging
+import pickle
+import random
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import Callable, Sequence
+
+from heat.agents.heuristic_agent import HeuristicAgent
+from heat.agents.random_agent import RandomAgent
+from heat.engine.game import Agent, Game
+from heat.models.track import Track
+
+logger = logging.getLogger(__name__)
+
+# A factory takes (player_id, seed) and returns a fresh agent instance.
+AgentFactory = Callable[[int, "int | None"], Agent]
+
+# Stride between consecutive games' base seeds; large enough that per-player
+# seed offsets (player_id) never overlap between adjacent games.
+_GAME_SEED_STRIDE = 1000
+
+
+# ----------------------------------------------------------------------
+# Result data structures (primitives/tuples only -> fully picklable)
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PlayerOutcome:
+    """Per-player result of a single game.
+
+    Attributes:
+        player_id: Seat index (0-based).
+        name: Player display name.
+        agent_type: ``agent.__class__.__name__`` of the seat's agent.
+        finish_position: 1-based rank (1 = winner).
+        final_lap: Lap number at game end.
+        final_position: Track space index at game end.
+        heat_remaining: Heat available in the pool at game end (0..6).
+    """
+
+    player_id: int
+    name: str
+    agent_type: str
+    finish_position: int
+    final_lap: int
+    final_position: int
+    heat_remaining: int
+
+
+@dataclass(frozen=True)
+class GameOutcome:
+    """Result of a single completed game.
+
+    Attributes:
+        game_index: 0-based index of this game within the batch.
+        seed: The derived per-game base seed used, or ``None`` if unseeded.
+        num_players: Number of seats in the game.
+        winner_id: Player id of the winner (``finish_order[0]``).
+        winner_name: Winner's display name.
+        finish_order: Player ids best-to-worst.
+        total_rounds: Rounds played.
+        players: Per-player outcomes, ordered by ``player_id``.
+    """
+
+    game_index: int
+    seed: int | None
+    num_players: int
+    winner_id: int
+    winner_name: str
+    finish_order: tuple[int, ...]
+    total_rounds: int
+    players: tuple[PlayerOutcome, ...]
+
+
+# ----------------------------------------------------------------------
+# Picklable agent factories
+# ----------------------------------------------------------------------
+
+
+def _make_random(player_id: int, seed: int | None, name: str | None) -> Agent:
+    """Top-level constructor for a seeded :class:`RandomAgent`."""
+    agent_name = name if name is not None else f"Random-{player_id}"
+    return RandomAgent(seed=seed, name=agent_name)
+
+
+def _make_heuristic(player_id: int, seed: int | None, name: str | None) -> Agent:
+    """Top-level constructor for a :class:`HeuristicAgent` (ignores ``seed``)."""
+    agent_name = name if name is not None else f"Heuristic-{player_id}"
+    return HeuristicAgent(name=agent_name)
+
+
+def random_agent_factory(name: str | None = None) -> AgentFactory:
+    """Return a picklable factory producing seeded :class:`RandomAgent`s."""
+    return functools.partial(_make_random, name=name)
+
+
+def heuristic_agent_factory(name: str | None = None) -> AgentFactory:
+    """Return a picklable factory producing :class:`HeuristicAgent`s."""
+    return functools.partial(_make_heuristic, name=name)
+
+
+# ----------------------------------------------------------------------
+# Seeding helpers
+# ----------------------------------------------------------------------
+
+
+def _derive_game_seed(base_seed: int | None, game_index: int) -> int | None:
+    """Derive a per-game base seed from the batch seed and game index."""
+    if base_seed is None:
+        return None
+    return base_seed + game_index * _GAME_SEED_STRIDE
+
+
+def _first_unpicklable(
+    track: Track, agent_factories: Sequence[AgentFactory]
+) -> str | None:
+    """Return a label for the first unpicklable worker arg, or ``None``.
+
+    Used as a pre-flight check before spawning a process pool, since spawn
+    surfaces pickling failures only asynchronously (and after partial work).
+    """
+    candidates = [("track", track)]
+    candidates += [
+        (f"agent_factories[{i}]", f) for i, f in enumerate(agent_factories)
+    ]
+    for label, obj in candidates:
+        try:
+            pickle.dumps(obj)
+        except (TypeError, AttributeError, pickle.PicklingError):
+            return label
+    return None
+
+
+# ----------------------------------------------------------------------
+# Worker (top-level / importable for ProcessPoolExecutor)
+# ----------------------------------------------------------------------
+
+
+def run_single_game(
+    track: Track,
+    agent_factories: Sequence[AgentFactory],
+    game_index: int,
+    base_seed: int | None,
+    laps: int | None = None,
+) -> GameOutcome:
+    """Run one game and return its :class:`GameOutcome`.
+
+    Top-level and picklable so it can be dispatched to a worker process.
+
+    Determinism: when ``base_seed`` is not ``None``, the global ``random``
+    module is seeded with the derived per-game seed (the engine and some
+    agents use the global RNG), and each factory receives a per-player
+    derived seed. Both depend only on ``game_index``, so the result is
+    independent of which process/order ran it.
+
+    The ``laps`` override mutates the passed ``track`` in place. Under
+    ``ProcessPoolExecutor`` each worker receives its own pickled copy, so the
+    mutation is process-local; in the sequential path the caller's track is
+    mutated (consistent with ``scripts/run_race.py`` semantics).
+    """
+    game_seed = _derive_game_seed(base_seed, game_index)
+
+    if game_seed is not None:
+        random.seed(game_seed)
+
+    if laps is not None:
+        track.laps = laps
+
+    agents: list[Agent] = []
+    for player_id, factory in enumerate(agent_factories):
+        per_player_seed = (
+            game_seed + player_id if game_seed is not None else None
+        )
+        agents.append(factory(player_id, per_player_seed))
+
+    game = Game(track, agents, logging_enabled=False)
+    result = game.run()
+
+    player_outcomes: list[PlayerOutcome] = []
+    for player in game.state.players:
+        pid = player.player_id
+        player_outcomes.append(
+            PlayerOutcome(
+                player_id=pid,
+                name=player.name,
+                agent_type=type(agents[pid]).__name__,
+                finish_position=player.finish_order,
+                final_lap=player.lap,
+                final_position=player.position,
+                heat_remaining=player.heat_available,
+            )
+        )
+    # Order by player_id for stable, deterministic output.
+    player_outcomes.sort(key=lambda po: po.player_id)
+
+    finish_order = tuple(result.finish_order)
+    winner_id = finish_order[0]
+    winner_name = game.state.get_player(winner_id).name
+
+    return GameOutcome(
+        game_index=game_index,
+        seed=game_seed,
+        num_players=len(agents),
+        winner_id=winner_id,
+        winner_name=winner_name,
+        finish_order=finish_order,
+        total_rounds=result.total_rounds,
+        players=tuple(player_outcomes),
+    )
+
+
+# ----------------------------------------------------------------------
+# Batch driver
+# ----------------------------------------------------------------------
+
+
+def _run_sequential(
+    track: Track,
+    agent_factories: Sequence[AgentFactory],
+    num_games: int,
+    base_seed: int | None,
+    laps: int | None,
+    progress: bool,
+) -> list[GameOutcome]:
+    """Run all games sequentially in this process."""
+    indices: Sequence[int] = range(num_games)
+    indices = _maybe_progress(indices, total=num_games, enabled=progress)
+    return [
+        run_single_game(track, agent_factories, i, base_seed, laps)
+        for i in indices
+    ]
+
+
+def _run_parallel(
+    track: Track,
+    agent_factories: Sequence[AgentFactory],
+    num_games: int,
+    base_seed: int | None,
+    laps: int | None,
+    max_workers: int | None,
+    progress: bool,
+) -> list[GameOutcome]:
+    """Run games across worker processes, re-sorting results by game_index."""
+    outcomes: list[GameOutcome] = []
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(
+                run_single_game, track, agent_factories, i, base_seed, laps
+            )
+            for i in range(num_games)
+        ]
+        completed = _maybe_progress(
+            as_completed(futures), total=num_games, enabled=progress
+        )
+        for future in completed:
+            outcomes.append(future.result())
+    # Futures complete out of order; restore game_index ordering.
+    outcomes.sort(key=lambda o: o.game_index)
+    return outcomes
+
+
+def _maybe_progress(iterable, total: int, enabled: bool):
+    """Wrap an iterable in a tqdm progress bar if requested and available."""
+    if not enabled:
+        return iterable
+    try:
+        from tqdm import tqdm  # type: ignore
+    except ImportError:  # pragma: no cover - tqdm is optional
+        logger.warning("tqdm not installed; progress bar disabled.")
+        return iterable
+    return tqdm(iterable, total=total)
+
+
+def run_batch(
+    track: Track,
+    agent_factories: Sequence[AgentFactory],
+    num_games: int,
+    *,
+    parallel: bool = True,
+    max_workers: int | None = None,
+    seed: int | None = None,
+    laps: int | None = None,
+    progress: bool = False,
+) -> list[GameOutcome]:
+    """Run ``num_games`` games and return outcomes ordered by ``game_index``.
+
+    Args:
+        track: The track to race on (``laps`` may be overridden via ``laps``).
+        agent_factories: One picklable factory per seat (1..6).
+        num_games: Number of games to run (>= 1).
+        parallel: Use a process pool. Forced off when ``num_games == 1``.
+        max_workers: Worker count for the process pool (``None`` = default).
+        seed: Base seed for deterministic, execution-order-independent runs.
+        laps: Optional per-game laps override (applied process-locally).
+        progress: Show a ``tqdm`` progress bar if ``tqdm`` is installed.
+
+    Returns:
+        A list of :class:`GameOutcome`, one per game, ordered by ``game_index``.
+
+    Raises:
+        ValueError: if the factory count is not in 1..6, or ``num_games < 1``.
+
+    Notes:
+        If parallel execution fails to pickle the worker/factories (e.g. a
+        lambda factory), the runner logs a warning and falls back to the
+        sequential path so the batch still completes.
+    """
+    n = len(agent_factories)
+    if not (1 <= n <= 6):
+        raise ValueError(f"Need 1..6 agent factories, got {n}")
+    if num_games < 1:
+        raise ValueError(f"num_games must be >= 1, got {num_games}")
+
+    # Single game always runs sequentially (no executor overhead/benefit).
+    if not parallel or num_games == 1:
+        return _run_sequential(
+            track, agent_factories, num_games, seed, laps, progress
+        )
+
+    # Pre-flight picklability check. Under spawn the executor only raises a
+    # pickling error asynchronously (from future.result()), by which point
+    # some games may already have run. Detecting it up front lets us fall
+    # back cleanly to a from-scratch sequential run with no partial work.
+    unpicklable = _first_unpicklable(track, agent_factories)
+    if unpicklable is not None:
+        logger.warning(
+            "Parallel execution disabled: %s is not picklable; falling back "
+            "to sequential. Use top-level/partial factories for parallelism.",
+            unpicklable,
+        )
+        return _run_sequential(
+            track, agent_factories, num_games, seed, laps, progress
+        )
+
+    try:
+        return _run_parallel(
+            track, agent_factories, num_games, seed, laps, max_workers, progress
+        )
+    except (TypeError, AttributeError, pickle.PicklingError) as exc:
+        logger.warning(
+            "Parallel execution failed to pickle (%s); falling back to "
+            "sequential. Use top-level/partial factories for parallelism.",
+            exc,
+        )
+        return _run_sequential(
+            track, agent_factories, num_games, seed, laps, progress
+        )

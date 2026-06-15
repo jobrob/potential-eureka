@@ -21,6 +21,9 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (e.g. subprocess smoke tests)",
+]
 
 [tool.mypy]
 python_version = "3.10"
