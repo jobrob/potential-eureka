@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ml = ["torch", "gymnasium", "stable-baselines3", "tensorboard"]
+ml = ["torch", "gymnasium", "stable-baselines3", "sb3-contrib", "tensorboard"]
 dev = ["pytest", "pytest-cov", "mypy", "ruff"]
 
 [tool.setuptools.packages.find]
