@@ -357,3 +357,104 @@ class TestForcedDecisions:
             assert steps <= 5000
         assert terminated or truncated
         assert emptied_once
+
+
+# ---------------------------------------------------------------------------
+# Sprint 6A: generated tracks + per-episode track sampling
+# ---------------------------------------------------------------------------
+
+
+class TestGeneratedTrackObsInvariant:
+    """The OBS_DIM=72 contract is track-agnostic: a *generated* track must
+    still encode to a (72,) float32 vector in [-1, 1] with NO codec change.
+    This is the single most important Sprint 6A invariant (roadmap §3)."""
+
+    def test_encode_observation_on_generated_tracks(self) -> None:
+        from heat.ml.features import encode_observation
+        from heat.tracks.generator import generate_track
+
+        for seed in range(40):
+            track = generate_track(seed)
+            env = HeatEnv(track=track, num_players=4)
+            obs, _info = env.reset(seed=seed)
+            # At reset.
+            assert obs.shape == (OBS_DIM,)
+            assert obs.dtype == np.float32
+            assert np.all(obs >= -1.0) and np.all(obs <= 1.0)
+            # Directly via encode_observation against the live decision too.
+            direct = encode_observation(env.state, env.learner_id, env._decision)
+            assert direct.shape == (OBS_DIM,)
+            assert direct.dtype == np.float32
+            assert np.all(direct >= -1.0) and np.all(direct <= 1.0)
+
+    def test_obs_bounds_hold_mid_episode(self) -> None:
+        """Bounds must hold after the track lookahead is non-trivial (cars have
+        advanced toward / through corners), not just at reset."""
+        from heat.tracks.generator import generate_track
+
+        rng = random.Random(0)
+        for seed in range(10):
+            env = HeatEnv(track=generate_track(seed), num_players=4)
+            obs, _ = env.reset(seed=seed)
+            terminated = truncated = False
+            steps = 0
+            while not (terminated or truncated):
+                legal = np.flatnonzero(env.action_masks())
+                action = int(legal[rng.randrange(len(legal))])
+                obs, _r, terminated, truncated, _i = env.step(action)
+                assert obs.shape == (OBS_DIM,)
+                assert obs.dtype == np.float32
+                assert np.all(obs >= -1.0) and np.all(obs <= 1.0)
+                steps += 1
+                assert steps <= 5000
+            assert terminated or truncated
+
+
+class TestTrackSamplerEnv:
+    """A HeatEnv built with a track *sampler* draws a per-episode track from the
+    reset seed while preserving the env's seed-determinism contract."""
+
+    def test_sampler_env_resets_and_terminates(self) -> None:
+        from heat.tracks.generator import track_sampler
+
+        env = HeatEnv(track=track_sampler(), num_players=3)
+        _rew, finish, _steps, term, _trunc = _rollout(env, seed=0)
+        assert term
+        assert sorted(finish) == [0, 1, 2]
+
+    def test_sampler_env_same_seed_same_track_and_obs(self) -> None:
+        from heat.tracks.generator import track_sampler
+
+        env = HeatEnv(track=track_sampler(), num_players=3)
+        obs1, _ = env.reset(seed=11)
+        track1 = env.track
+        obs2, _ = env.reset(seed=11)
+        track2 = env.track
+        # Same seed -> same drawn track ...
+        assert track1.corners == track2.corners
+        assert track1.start_positions == track2.start_positions
+        assert track1.length == track2.length
+        # ... and the same first observation (end-to-end determinism).
+        np.testing.assert_array_equal(obs1, obs2)
+
+    def test_sampler_env_different_seeds_draw_different_tracks(self) -> None:
+        from heat.tracks.generator import track_sampler
+
+        env = HeatEnv(track=track_sampler(), num_players=3)
+        layouts = set()
+        for seed in range(12):
+            env.reset(seed=seed)
+            layouts.add(
+                (env.track.length, tuple((c.start, c.end) for c in env.track.corners))
+            )
+        assert len(layouts) > 1
+
+    def test_fixed_track_path_unchanged(self) -> None:
+        """Back-compat: a non-callable track keeps the fixed-track behavior --
+        the same track object every episode, no sampling."""
+        track = _track()
+        env = HeatEnv(track=track, num_players=3)
+        env.reset(seed=1)
+        assert env.track is track
+        env.reset(seed=2)
+        assert env.track is track

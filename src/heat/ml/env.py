@@ -64,6 +64,14 @@ from heat.ml.spaces import ACTION_DIM, OBS_DIM, step_reward
 #: state — useful for vectorized envs).
 OpponentSpec = BaseAgent | Callable[[], BaseAgent]
 
+#: A track source is either a fixed :class:`Track` (the original behavior: the
+#: same track every episode) or a sampler ``sampler(seed) -> Track`` called
+#: once per :meth:`HeatEnv.reset` to draw a per-episode track. A seed-derived
+#: sampler (see :func:`heat.tracks.generator.track_sampler`) keeps the env's
+#: "same seed -> same episode" contract intact, since the track becomes a
+#: deterministic function of the episode seed.
+TrackSource = Track | Callable[[int | None], Track]
+
 #: Sentinel distinguishing "no forced action" from a legitimate forced action
 #: whose value is falsy (e.g. SLIPSTREAM ``False`` or the empty CARDS play
 #: ``()``), so ``_forced_action`` can return those without ambiguity.
@@ -79,7 +87,11 @@ class HeatEnv(gym.Env):
     """Single-learning-seat Gymnasium environment over the HEAT engine.
 
     Args:
-        track: the race track. Defaults to the USA track if omitted.
+        track: the track *source*. Either a fixed :class:`Track` (reused every
+            episode — the original behavior) or a sampler ``callable(seed) ->
+            Track`` invoked once per :meth:`reset` to draw a per-episode track
+            (see :func:`heat.tracks.generator.track_sampler`). Defaults to the
+            fixed USA track if omitted.
         num_players: total seats (learner + opponents). Must be >= 2 and
             <= ``spaces.MAX_PLAYERS``.
         opponents: policies for the non-learner seats. Either a single
@@ -93,7 +105,7 @@ class HeatEnv(gym.Env):
 
     def __init__(
         self,
-        track: Track | None = None,
+        track: TrackSource | None = None,
         num_players: int = 4,
         opponents: OpponentSpec | Sequence[OpponentSpec] | None = None,
         learner_id: int = 0,
@@ -109,7 +121,16 @@ class HeatEnv(gym.Env):
                 f"learner_id {learner_id} out of range for {num_players} players"
             )
 
-        self.track: Track = track if track is not None else _default_track()
+        # A callable ``track`` is a per-episode sampler; anything else is a fixed
+        # Track reused every reset (back-compat). When a sampler is supplied we
+        # eagerly draw one track for ``self.track`` so the env is fully formed
+        # before the first reset (e.g. callers reading ``env.track`` early).
+        if callable(track) and not isinstance(track, Track):
+            self._track_source: Callable[[int | None], Track] | None = track
+            self.track: Track = track(None)
+        else:
+            self._track_source = None
+            self.track = track if track is not None else _default_track()
         self.num_players = num_players
         self.learner_id = learner_id
         self._opponent_specs = self._normalize_opponents(opponents, num_players)
@@ -181,6 +202,13 @@ class HeatEnv(gym.Env):
         impossible). ``info`` carries ``action_mask``.
         """
         super().reset(seed=seed)
+
+        # Per-episode track sampling (opt-in): a sampler source draws a track
+        # from the episode seed, so the track is a deterministic function of it
+        # and "same seed -> same episode" still holds. A fixed track source
+        # leaves self.track unchanged (original behavior).
+        if self._track_source is not None:
+            self.track = self._track_source(seed)
 
         self.state = GameState.create(
             self.track, self.num_players, seed=seed
