@@ -42,6 +42,7 @@ from typing import Callable, Sequence
 
 from heat.agents.heuristic_agent import HeuristicAgent
 from heat.agents.random_agent import RandomAgent
+from heat.agents.strong_heuristic import StrongHeuristicAgent
 from heat.engine.game import Agent, Game
 from heat.models.track import Track
 
@@ -125,6 +126,31 @@ def _make_heuristic(player_id: int, seed: int | None, name: str | None) -> Agent
     return HeuristicAgent(name=agent_name)
 
 
+def _make_strong_heuristic(
+    player_id: int,
+    seed: int | None,
+    name: str | None,
+    strength: int,
+    heat_price: float | None,
+    use_seed: bool,
+) -> Agent:
+    """Top-level constructor for a :class:`StrongHeuristicAgent`.
+
+    The agent is deterministic given the state; ``seed`` is only used for
+    equal-value tie-breaks, and only when ``use_seed`` is True (so the default
+    factory stays fully deterministic and order-independent under
+    ``run_batch``). When enabled, the per-player derived seed is threaded
+    through so a seeded batch is reproducible.
+    """
+    agent_name = name if name is not None else f"StrongHeuristic-{player_id}"
+    return StrongHeuristicAgent(
+        name=agent_name,
+        strength=strength,
+        heat_price=heat_price,
+        seed=seed if use_seed else None,
+    )
+
+
 def random_agent_factory(name: str | None = None) -> AgentFactory:
     """Return a picklable factory producing seeded :class:`RandomAgent`s."""
     return functools.partial(_make_random, name=name)
@@ -133,6 +159,35 @@ def random_agent_factory(name: str | None = None) -> AgentFactory:
 def heuristic_agent_factory(name: str | None = None) -> AgentFactory:
     """Return a picklable factory producing :class:`HeuristicAgent`s."""
     return functools.partial(_make_heuristic, name=name)
+
+
+def strong_heuristic_agent_factory(
+    name: str | None = None,
+    *,
+    strength: int = 2,
+    heat_price: float | None = None,
+    use_seed: bool = False,
+) -> AgentFactory:
+    """Return a picklable factory producing :class:`StrongHeuristicAgent`s.
+
+    Mirrors :func:`heuristic_agent_factory`: a top-level ``functools.partial``
+    (no lambdas/closures) so it pickles cleanly for ``run_batch(parallel=True)``.
+
+    Args:
+        name: Optional fixed display name (else ``StrongHeuristic-{id}``).
+        strength: Difficulty rung 0..3 (see :class:`StrongHeuristicAgent`).
+        heat_price: Optional override of the shadow price of heat in spaces.
+        use_seed: If True, thread the per-player derived seed into the agent
+            for equal-value tie-breaking. Off by default to keep the agent
+            fully deterministic regardless of seat order.
+    """
+    return functools.partial(
+        _make_strong_heuristic,
+        name=name,
+        strength=strength,
+        heat_price=heat_price,
+        use_seed=use_seed,
+    )
 
 
 # ----------------------------------------------------------------------
