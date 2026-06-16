@@ -25,6 +25,7 @@ Design notes
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 import gymnasium as gym
@@ -84,8 +85,75 @@ class PPOConfig:
     # --- bookkeeping ---
     seed: int | None = None
     verbose: int = 0
-    device: str = "cpu"  # engine is the bottleneck, not the net (§5c)
+    #: Device request. ``"auto"`` picks CUDA when available else CPU; ``"cuda"``
+    #: falls back to CPU (with a warning) on a CPU-only box; ``"cpu"`` forces CPU.
+    #: Resolved by :func:`resolve_device` in :func:`build_model` (§6C Part 1).
+    device: str = "auto"
     tensorboard_log: str | None = None
+    #: Number of parallel envs for the (vectorized) training loop. 1 == a single
+    #: env (DummyVecEnv); >1 uses SubprocVecEnv for true CPU parallelism (§6C).
+    n_envs: int = 1
+
+
+#: Named network-size profiles (§6C Part 1 "larger net"). ``small`` is the
+#: Sprint-5 default (cheap, used by tests); ``large`` is the capstone profile
+#: that becomes worth its cost once ``n_envs`` raises rollout throughput and a
+#: GPU is in play. Each maps to ``(net_arch, features_extractor_hidden,
+#: features_dim)``.
+NET_PROFILES: dict[str, tuple[list[int], list[int], int]] = {
+    "small": ([256, 256], [256, 256], 128),
+    "large": ([512, 512], [512, 512], 256),
+}
+
+
+def net_profile_config(profile: str, base: PPOConfig | None = None) -> PPOConfig:
+    """Return a copy of ``base`` (or a fresh ``PPOConfig``) with the net sizes of
+    the named ``profile`` applied (§6C Part 1).
+
+    Raises ``ValueError`` for an unknown profile name.
+    """
+    if profile not in NET_PROFILES:
+        raise ValueError(
+            f"unknown net profile {profile!r}; choose from {sorted(NET_PROFILES)}"
+        )
+    from dataclasses import replace
+
+    net_arch, fe_hidden, fe_dim = NET_PROFILES[profile]
+    cfg = base if base is not None else PPOConfig()
+    return replace(
+        cfg,
+        net_arch=list(net_arch),
+        features_extractor_hidden=list(fe_hidden),
+        features_dim=fe_dim,
+    )
+
+
+def resolve_device(requested: str) -> str:
+    """Resolve a requested device to a concrete one, never crashing on CPU boxes.
+
+    * ``"auto"`` -> ``"cuda"`` if ``torch.cuda.is_available()`` else ``"cpu"``.
+    * ``"cuda"`` -> ``"cuda"`` if available else ``"cpu"`` (warns, does not raise),
+      so the ``[ml]`` extra stays usable on a CPU-only machine (§6C Part 1).
+    * ``"cpu"`` (or anything else) -> ``"cpu"``.
+    """
+    req = (requested or "cpu").lower()
+    if req == "cpu":
+        return "cpu"
+    cuda_ok = torch.cuda.is_available()
+    if req == "auto":
+        return "cuda" if cuda_ok else "cpu"
+    if req == "cuda":
+        if cuda_ok:
+            return "cuda"
+        warnings.warn(
+            "device='cuda' requested but CUDA is unavailable; falling back to "
+            "CPU. Install a +cuXXX torch wheel to use the GPU (see pyproject).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return "cpu"
+    # Unknown request: be conservative.
+    return "cpu"
 
 
 def apply_shaping_config(config: PPOConfig) -> None:
@@ -186,7 +254,7 @@ def build_model(env: gym.Env, config: PPOConfig | None = None) -> MaskablePPO:
         policy_kwargs=policy_kwargs,
         seed=config.seed,
         verbose=config.verbose,
-        device=config.device,
+        device=resolve_device(config.device),
         tensorboard_log=config.tensorboard_log,
     )
     return model

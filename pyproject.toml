@@ -13,6 +13,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The default [ml] extra is CPU-only and must stay so (CPU-only machines must
+# keep working). For GPU training (Sprint 6C, only worth it with vectorized
+# envs + the large net profile), install a CUDA torch wheel separately, e.g.:
+#   pip install --index-url https://download.pytorch.org/whl/cu124 torch
+# then `pip install -e ".[ml]"`. resolve_device("cuda") falls back to CPU with
+# a warning when no GPU/CUDA wheel is present, so this stays optional.
 ml = ["torch", "gymnasium", "stable-baselines3", "sb3-contrib", "tensorboard"]
 dev = ["pytest", "pytest-cov", "mypy", "ruff"]
 
