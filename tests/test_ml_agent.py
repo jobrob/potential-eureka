@@ -204,6 +204,69 @@ class _LegalitySpy(MLAgent):
         return result
 
 
+# ---------------------------------------------------------------------------
+# VecNormalize at inference (§2.6) + back-compat
+# ---------------------------------------------------------------------------
+
+
+def test_mlagent_no_vecnorm_sidecar_uses_raw_obs(tmp_path) -> None:
+    """A checkpoint with no .vecnorm.pkl behaves exactly as Sprint 5 (raw obs)."""
+    ckpt = str(tmp_path / "plain_model")
+    _write_meta(ckpt, _good_meta())  # legacy meta: no "normalize" block
+
+    agent = MLAgent(ckpt)
+    agent._load_vecnorm()  # called inside _get_model; safe to call directly
+    assert agent._vecnorm is None
+    assert agent._norm_obs is False
+
+
+def test_mlagent_loads_and_applies_obs_normalization(tmp_path) -> None:
+    """When norm_obs=True and a stats file exists, obs are normalized pre-predict.
+
+    Builds the artifacts directly (a real obs-normalized training run is slow):
+    a matching meta with ``normalize.norm_obs=True`` and a saved ``VecNormalize``
+    whose obs_rms has a known mean/var. ``_load_vecnorm`` must load it and
+    ``normalize_obs`` must shift the observation by that mean/var.
+    """
+    import numpy as np
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+    from heat.ml.env import HeatEnv
+    from heat.ml.training import vecnorm_path_for
+
+    ckpt = str(tmp_path / "norm_model")
+    meta = _good_meta()
+    meta["normalize"] = {"norm_obs": True, "norm_reward": True, "clip_reward": 10.0}
+    _write_meta(ckpt, meta)
+
+    # Build + warm a VecNormalize so obs_rms holds non-trivial running stats.
+    venv = VecNormalize(
+        DummyVecEnv([lambda: HeatEnv(num_players=2)]),
+        norm_obs=True,
+        norm_reward=True,
+    )
+    venv.reset()
+    for _ in range(5):
+        masks = venv.env_method("action_masks")
+        actions = [int(np.flatnonzero(m)[0]) for m in masks]
+        venv.step(np.asarray(actions))
+    venv.save(vecnorm_path_for(ckpt))
+    venv.close()
+
+    agent = MLAgent(ckpt)
+    agent._load_vecnorm()
+    assert agent._norm_obs is True
+    assert agent._vecnorm is not None
+    # Inference stats are frozen and reward-norm disabled.
+    assert agent._vecnorm.training is False
+    assert agent._vecnorm.norm_reward is False
+
+    raw = np.zeros(spaces.OBS_DIM, dtype=np.float32)
+    normed = agent._vecnorm.normalize_obs(raw)
+    # Normalization shifts by the (non-zero) running mean -> output differs.
+    assert not np.allclose(normed, raw)
+
+
 @pytest.mark.slow
 def test_mlagent_plays_full_game_and_only_legal(tiny_checkpoint) -> None:
     """A full game with MLAgent in seat 0 vs HeuristicAgent completes, and every
