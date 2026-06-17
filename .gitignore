@@ -14,3 +14,6 @@ runs/
 wandb/
 scripts/logs/*.log
 test_race.log
+*.log
+checkpoints/
+.claude/
