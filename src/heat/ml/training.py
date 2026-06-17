@@ -51,7 +51,8 @@ from heat.models.game_state import GameState
 from heat.models.track import Track
 from heat.ml import spaces
 from heat.ml.action_codec import decode_action, legal_action_mask
-from heat.ml.env import HeatEnv, _default_track
+from heat.ml.env import HeatEnv, TrackSource, _default_track
+from heat.tracks.generator import TrackGenParams, TrackSampler, generate_track
 from heat.ml.features import encode_observation
 from heat.ml.league import League, LeagueEntry
 from heat.ml.model import (
@@ -578,12 +579,49 @@ def smoke_train(
     return model, saved
 
 
+#: Fixed seeds for the held-out generated tracks the eval gate scores against
+#: when training on generated tracks. Held constant so the gate is comparable
+#: across chunks (and distinct enough from typical training episode seeds that
+#: it is a generalization signal, not a memorized-track score).
+_HOLDOUT_TRACK_SEEDS: tuple[int, ...] = (90_000_001, 90_000_002, 90_000_003)
+
+
+def _resolve_track_source(track: TrackSource | None, seed: int) -> TrackSource:
+    """Resolve the training track source.
+
+    ``None`` (the default) -> a :class:`TrackSampler` that draws a fresh
+    generated track every episode (training on procedurally generated tracks is
+    now the default, §6A). A fixed :class:`Track` pins one specific track; an
+    already-built sampler callable is passed through unchanged.
+    """
+    if track is None:
+        return TrackSampler(base_seed=seed)
+    return track
+
+
+def _track_label(track_source: TrackSource) -> str:
+    """Checkpoint-metadata label for a track source (samplers are 'generated')."""
+    return track_source.name if isinstance(track_source, Track) else "generated"
+
+
+def _gate_tracks(track_source: TrackSource) -> list[Track]:
+    """The track(s) the eval gate scores on for a given training source.
+
+    A fixed track gates on itself; generated-track training gates on a fixed
+    held-out set so the gate measures cross-track generalization with a stable,
+    reproducible signal.
+    """
+    if isinstance(track_source, Track):
+        return [track_source]
+    return [generate_track(s, name=f"holdout-{s}") for s in _HOLDOUT_TRACK_SEEDS]
+
+
 def _gate_score(
     model: MaskablePPO,
     *,
     curriculum: CurriculumConfig,
     num_players: int,
-    track: Track | None,
+    track: TrackSource | None,
     seed: int,
     vec_env: VecEnv | None = None,
     normalize: dict | None = None,
@@ -604,6 +642,11 @@ def _gate_score(
 
     from heat.ml.evaluate import evaluate_ml
 
+    gate_tracks = _gate_tracks(track) if track is not None else _gate_tracks(
+        TrackSampler(base_seed=seed)
+    )
+    per_track_games = max(1, curriculum.gate_games // len(gate_tracks))
+
     with tempfile.TemporaryDirectory() as tmp:
         gate_path = os.path.join(tmp, "gate_model")
         # Save with a contract sidecar so MLAgent's tripwire is satisfied; pass
@@ -611,23 +654,27 @@ def _gate_score(
         save_checkpoint(
             model,
             gate_path,
-            track_name=(track.name if track is not None else _default_track().name),
+            track_name=_track_label(track) if track is not None else "generated",
             num_players=num_players,
             normalize=normalize,
             vec_env=vec_env,
         )
-        per_agent = evaluate_ml(
-            gate_path,
-            num_games=curriculum.gate_games,
-            num_players=num_players,
-            track=track,
-            seed=seed,
-            parallel=False,
-        )
-    ml_stats = per_agent.get("MLAgent")
-    if ml_stats is None:
-        return 0.0
-    return float(ml_stats.win_rate)
+        # Average the win-rate over the gate track(s): a single fixed track for a
+        # pinned run, or the held-out generated set for generated-track training.
+        rates: list[float] = []
+        for i, gt in enumerate(gate_tracks):
+            per_agent = evaluate_ml(
+                gate_path,
+                num_games=per_track_games,
+                num_players=num_players,
+                track=gt,
+                seed=seed + i,
+                parallel=False,
+            )
+            ml_stats = per_agent.get("MLAgent")
+            rates.append(float(ml_stats.win_rate) if ml_stats is not None else 0.0)
+
+    return sum(rates) / len(rates) if rates else 0.0
 
 
 def train_self_play(
@@ -635,7 +682,7 @@ def train_self_play(
     curriculum: CurriculumConfig | None = None,
     *,
     num_players: int = 4,
-    track: Track | None = None,
+    track: TrackSource | None = None,
     learner_id: int = 0,
     gate_fn=None,
 ) -> tuple[MaskablePPO, str]:
@@ -653,6 +700,10 @@ def train_self_play(
     not the (possibly collapsed) final model.
 
     Args:
+        track: the track *source*. ``None`` (default) trains on **procedurally
+            generated tracks** -- a fresh one per episode via :class:`TrackSampler`
+            (§6A) -- and gates on a held-out generated set. Pass a fixed
+            :class:`~heat.models.track.Track` to pin one specific track instead.
         gate_fn: optional override for the eval gate (``model -> float``); used
             by tests to inject a deterministic score sequence. Defaults to a
             win-rate gate over :func:`heat.ml.evaluate.evaluate_ml` (§2.1
@@ -666,11 +717,14 @@ def train_self_play(
     os.makedirs(curriculum.checkpoint_dir, exist_ok=True)
     seed = config.seed if config.seed is not None else 0
 
+    # Default to generated tracks (a sampler); a fixed Track pins one track.
+    track_source = _resolve_track_source(track, seed)
+
     best_path = os.path.join(curriculum.checkpoint_dir, curriculum.run_name)
     final_path = os.path.join(
         curriculum.checkpoint_dir, f"{curriculum.run_name}_final"
     )
-    track_name = track.name if track is not None else _default_track().name
+    track_name = _track_label(track_source)
     norm_meta = _normalize_meta(curriculum)
 
     def _gate(m: MaskablePPO, venv: VecEnv | None = None) -> float:
@@ -680,7 +734,7 @@ def train_self_play(
             m,
             curriculum=curriculum,
             num_players=num_players,
-            track=track,
+            track=track_source,
             seed=seed,
             vec_env=venv,
             normalize=norm_meta,
@@ -706,7 +760,7 @@ def train_self_play(
         num_players, use_strong=curriculum.use_strong_heuristic_opponents
     )
     venv = _build_vec_env(
-        track=track,
+        track=track_source,
         num_players=num_players,
         opponents=scripted,
         learner_id=learner_id,
@@ -826,7 +880,7 @@ def train_self_play(
 
         # Rebuild the (vec) env on the new mix, preserving VecNormalize stats.
         new_venv = _build_vec_env(
-            track=track,
+            track=track_source,
             num_players=num_players,
             opponents=opponents,
             learner_id=learner_id,
@@ -898,7 +952,10 @@ def train_self_play(
                         learner_path,
                         opp_path,
                         num_games=curriculum.league_eval_games,
-                        track=track,
+                        # PFSP bookkeeping needs a concrete track; use a fixed
+                        # representative (the pinned track, or a held-out
+                        # generated one) so the win-rate signal is comparable.
+                        track=_gate_tracks(track_source)[0],
                         seed=seed + 7000 + chunk_idx * 97 + j,
                     )
                     league.record_win_rate(

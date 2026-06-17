@@ -20,6 +20,11 @@ Key 6C features exposed:
 * **TensorBoard** (``--tensorboard-log``): PPO's built-in scalars plus the
   ``eval/gate_score`` each gate run, so a collapse is visible live.
 
+By default training runs on **procedurally generated tracks** (a fresh random
+track each episode, §6A), gated on a held-out generated set, so the policy
+learns to race in general rather than memorizing one layout. Pass ``--track
+<name>`` to pin a single fixed track instead.
+
 Usage (from the repo root)::
 
     PYTHONPATH=src python scripts/train_ml.py \\
@@ -27,6 +32,7 @@ Usage (from the repo root)::
         --n-envs 8 --vec subproc --device auto --net-profile large \\
         --normalize-reward --shaping-weight-start 0.02 \\
         --run-name heat_ppo --seed 0 --tensorboard-log runs/heat
+        # add --track usa to pin one track instead of generated tracks
 """
 
 from __future__ import annotations
@@ -109,7 +115,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--players", type=int, default=4,
                         help="Seats per game, 2..6 (default: 4).")
     parser.add_argument("--track", default=None,
-                        help="Track name (default: the env default, usa).")
+                        help="Pin a specific track by name (e.g. 'usa'). Default: "
+                             "None = train on procedurally generated random tracks "
+                             "(a fresh track per episode; gated on a held-out set).")
     parser.add_argument("--run-name", default="heat_ppo",
                         help="Base checkpoint name (default: heat_ppo).")
     parser.add_argument("--checkpoint-dir", default="checkpoints",

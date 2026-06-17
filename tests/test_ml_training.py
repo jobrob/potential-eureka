@@ -41,7 +41,12 @@ from heat.ml.training import (
     save_checkpoint,
     train_self_play,
     vecnorm_path_for,
+    _resolve_track_source,
+    _track_label,
+    _gate_tracks,
 )
+from heat.tracks.generator import TrackSampler
+from heat.tracks.loader import load_track_by_name
 from heat.ml.vec import make_vec_env
 from heat.ml import spaces
 
@@ -357,3 +362,35 @@ def test_normalized_run_round_trips_vecnorm_stats(tmp_path) -> None:
     vn = VecNormalize.load(stats_path, venv=dummy)
     assert vn.ret_rms is not None
     assert np.isfinite(vn.ret_rms.var)
+
+
+# ---------------------------------------------------------------------------
+# Track source: generated-by-default training (§6A integration)
+# ---------------------------------------------------------------------------
+
+
+class TestTrackSource:
+    def test_default_is_generated_sampler(self) -> None:
+        """No track -> a generated-track sampler (the new default)."""
+        src = _resolve_track_source(None, seed=0)
+        assert isinstance(src, TrackSampler)
+        assert _track_label(src) == "generated"
+
+    def test_fixed_track_is_preserved(self) -> None:
+        """A pinned Track passes through unchanged and keeps its name."""
+        usa = load_track_by_name("usa")
+        src = _resolve_track_source(usa, seed=0)
+        assert src is usa
+        assert _track_label(src) == usa.name
+
+    def test_gate_tracks_for_generated_are_fixed_holdout(self) -> None:
+        """Generated training gates on a stable, reproducible held-out set."""
+        src = _resolve_track_source(None, seed=0)
+        a = [t.name for t in _gate_tracks(src)]
+        b = [t.name for t in _gate_tracks(src)]
+        assert a == b and len(a) >= 1
+        assert all(name.startswith("holdout-") for name in a)
+
+    def test_gate_tracks_for_fixed_is_itself(self) -> None:
+        usa = load_track_by_name("usa")
+        assert [t.name for t in _gate_tracks(usa)] == [usa.name]

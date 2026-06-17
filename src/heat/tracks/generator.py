@@ -248,18 +248,17 @@ def generate_track(
     )
 
 
-def track_sampler(
-    params: TrackGenParams | None = None,
-    *,
-    base_seed: int = 0,
-) -> Callable[[int | None], Track]:
-    """Return a ``sampler(seed) -> Track`` for per-episode track sampling.
+class TrackSampler:
+    """Picklable ``sampler(seed) -> Track`` for per-episode track generation.
 
-    The sampler derives the track seed from the episode ``seed`` (and
-    ``base_seed``) so a generated track is a deterministic function of the
-    episode seed: ``reset(seed)`` reproduces BOTH the track AND the deck shuffle.
-    When the env passes ``seed=None`` (unseeded reset), the sampler draws a fresh
-    track seed from its own private RNG so successive resets vary.
+    A top-level class (not a closure) so it survives ``SubprocVecEnv`` ``spawn``
+    pickling on Windows -- the env's ``track`` source is shipped to each worker,
+    and a closure cannot be pickled. Seed derivation is identical to the closure
+    form: a generated track is a deterministic function of the episode seed, so
+    ``reset(seed)`` reproduces BOTH the track AND the deck shuffle. When the env
+    passes ``seed=None`` (unseeded reset), a private RNG draws a fresh track seed
+    so successive resets vary. ``random.Random`` pickles its state, so a pickled
+    sampler resumes its fallback stream consistently in each worker.
 
     Args:
         params: generation bounds, forwarded to :func:`generate_track`.
@@ -267,15 +266,38 @@ def track_sampler(
             workers / samplers cover disjoint track streams from the same
             episode seeds).
     """
-    params = params or TrackGenParams()
-    fallback_rng = random.Random(base_seed)
 
-    def sampler(seed: int | None) -> Track:
+    def __init__(
+        self, params: TrackGenParams | None = None, *, base_seed: int = 0
+    ) -> None:
+        self.params = params or TrackGenParams()
+        self.base_seed = base_seed
+        self._fallback_rng = random.Random(base_seed)
+
+    def __call__(self, seed: int | None) -> Track:
         if seed is None:
-            track_seed = fallback_rng.randrange(2**31)
+            track_seed = self._fallback_rng.randrange(2**31)
         else:
             # Combine episode seed with base_seed deterministically.
-            track_seed = (int(seed) + base_seed) % (2**31)
-        return generate_track(track_seed, params)
+            track_seed = (int(seed) + self.base_seed) % (2**31)
+        return generate_track(track_seed, self.params)
 
-    return sampler
+
+def track_sampler(
+    params: TrackGenParams | None = None,
+    *,
+    base_seed: int = 0,
+) -> Callable[[int | None], Track]:
+    """Return a picklable ``sampler(seed) -> Track`` for per-episode sampling.
+
+    Thin constructor for :class:`TrackSampler` (kept for call-site stability).
+    The returned object is callable exactly like the old closure form but also
+    pickles across process boundaries.
+
+    Args:
+        params: generation bounds, forwarded to :func:`generate_track`.
+        base_seed: offset mixed into the derived seed (lets distinct vec-env
+            workers / samplers cover disjoint track streams from the same
+            episode seeds).
+    """
+    return TrackSampler(params, base_seed=base_seed)

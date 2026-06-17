@@ -20,6 +20,7 @@ import pytest
 from heat.ml.spaces import MAX_PLAYERS
 from heat.tracks.generator import (
     TrackGenParams,
+    TrackSampler,
     generate_track,
     track_sampler,
 )
@@ -187,3 +188,19 @@ class TestTrackSampler:
             or a.length != b.length
         )
         assert differs
+
+    def test_track_sampler_returns_picklable_class(self) -> None:
+        assert isinstance(track_sampler(), TrackSampler)
+
+    def test_sampler_picklable_and_consistent_after_pickle(self) -> None:
+        # The sampler crosses the SubprocVecEnv (spawn) process boundary, so it
+        # must pickle and reproduce the same seeded tracks afterwards.
+        import pickle
+
+        sampler = TrackSampler(base_seed=3)
+        restored = pickle.loads(pickle.dumps(sampler))
+        a = sampler(42)
+        b = restored(42)
+        assert a.corners == b.corners
+        assert a.start_positions == b.start_positions
+        assert a.length == b.length
