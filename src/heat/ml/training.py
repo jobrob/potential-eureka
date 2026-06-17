@@ -52,6 +52,7 @@ from heat.ml import spaces
 from heat.ml.action_codec import decode_action, legal_action_mask
 from heat.ml.env import HeatEnv, _default_track
 from heat.ml.features import encode_observation
+from heat.ml.league import League, LeagueEntry
 from heat.ml.model import (
     PPOConfig,
     apply_shaping_config,
@@ -373,6 +374,35 @@ class CurriculumConfig:
     #: Relative drop below ``best_score`` that triggers a reload (when enabled).
     regression_tol: float = 0.5
 
+    # --- §6D opponent league + PFSP ---
+    #: Use the :class:`heat.ml.league.League` (retention + PFSP sampling) to fill
+    #: the Phase-2 snapshot seats instead of the FIFO ``_mixed_opponent_pool``
+    #: pool. When ``False`` (default) Phase 2 keeps the 6C FIFO behavior exactly,
+    #: so 6D is strictly opt-in and 6C runs are byte-for-byte unchanged.
+    use_league: bool = False
+    #: League capacity (entries retained; the best anchor counts but is never
+    #: evicted). Modest by design to bound disk + sampling cost (was FIFO 3).
+    league_capacity: int = 8
+    #: PFSP weighting family: ``"even"``/``"variance"`` (``wr*(1-wr)``, the stable
+    #: default -- close matchups) or ``"hard"`` (``(1-wr)^p`` -- current losses).
+    league_pfsp_mode: str = "even"
+    #: Exponent ``p`` in the ``"hard"`` PFSP variant.
+    league_pfsp_exponent: float = 2.0
+    #: Per-entry sample-probability clamps (after normalization); guards against a
+    #: single opponent dominating (``p_max``) or being starved (``p_min``).
+    league_p_min: float = 0.0
+    league_p_max: float = 1.0
+    #: Games vs an entry before its observed win-rate is trusted over the neutral
+    #: 0.5 prior (so a brand-new snapshot is sampled enough to be estimated).
+    league_min_games: int = 1
+    #: Retention value blend: strength (gate_score) vs diversity (recency band).
+    league_strength_weight: float = 1.0
+    league_diversity_weight: float = 1.0
+    #: Games the inline league bookkeeping eval plays per sampled opponent each
+    #: chunk to estimate ``learner_win_rate_vs_i``. Kept SMALL -- this is
+    #: bookkeeping for the PFSP weights, not the safety gate.
+    league_eval_games: int = 4
+
 
 def _scripted_opponents(num_players: int) -> list[type[BaseAgent]]:
     """Phase-1 opponent factories: mostly HeuristicAgent, one RandomAgent."""
@@ -683,6 +713,26 @@ def train_self_play(
     snap_idx = 0
     chunk_idx = 0
 
+    # §6D opponent league + PFSP. The League lives ONLY in this (main) training
+    # process; workers receive picklable snapshot *paths* via _SnapshotFactory,
+    # never the live League (the design's process-boundary risk mitigation). When
+    # ``use_league`` is False the FIFO 6C path is taken unchanged. The PFSP draw
+    # uses a dedicated seeded RNG so opponent selection is reproducible (gate).
+    league: League | None = None
+    league_rng: np.random.Generator | None = None
+    if curriculum.use_league:
+        league = League(
+            capacity=curriculum.league_capacity,
+            pfsp_mode=curriculum.league_pfsp_mode,
+            pfsp_exponent=curriculum.league_pfsp_exponent,
+            p_min=curriculum.league_p_min,
+            p_max=curriculum.league_p_max,
+            min_games=curriculum.league_min_games,
+            strength_weight=curriculum.league_strength_weight,
+            diversity_weight=curriculum.league_diversity_weight,
+        )
+        league_rng = np.random.default_rng(seed)
+
     while remaining > 0:
         # Freeze the current policy and register it as a (stochastic) opponent.
         snap_path = os.path.join(
@@ -697,9 +747,23 @@ def train_self_play(
             ppo_config=config,
             vec_env=venv,
         )
-        snapshot_paths.append(snap_path)
-        if len(snapshot_paths) > curriculum.max_snapshots:
-            snapshot_paths.pop(0)  # FIFO cap
+        if league is not None:
+            # §6D: register the new snapshot in the league (gate_score = current
+            # best as a strength proxy), retain by keep-strong-and-diverse rather
+            # than FIFO, and always anchor the current best.
+            league.add(
+                LeagueEntry(
+                    path=snap_path,
+                    snapshot_index=snap_idx,
+                    gate_score=best_score,
+                )
+            )
+            league.set_anchor(snap_path)
+            league.retain()
+        else:
+            snapshot_paths.append(snap_path)
+            if len(snapshot_paths) > curriculum.max_snapshots:
+                snapshot_paths.pop(0)  # FIFO cap
         snap_idx += 1
 
         # §2.4 opponent-mix ramp: snapshot fraction grows 0 -> snapshot_mix
@@ -714,12 +778,23 @@ def train_self_play(
             * progress
         )
 
-        opponents = _mixed_opponent_pool(
-            num_players,
-            snapshot_paths,
-            mix,
-            deterministic=curriculum.snapshot_deterministic,
-        )
+        sampled_paths: list[str] = []
+        if league is not None:
+            assert league_rng is not None
+            opponents, sampled_paths = _league_opponent_pool(
+                num_players,
+                league,
+                mix,
+                league_rng,
+                deterministic=curriculum.snapshot_deterministic,
+            )
+        else:
+            opponents = _mixed_opponent_pool(
+                num_players,
+                snapshot_paths,
+                mix,
+                deterministic=curriculum.snapshot_deterministic,
+            )
 
         # Rebuild the (vec) env on the new mix, preserving VecNormalize stats.
         new_venv = _build_vec_env(
@@ -767,6 +842,40 @@ def train_self_play(
             # Recovery option (§2.1): reload the best policy weights so a
             # collapsing Phase 2 continues from strength rather than from rubble.
             model.set_parameters(best_path, device=resolve_device(config.device))
+
+        # §6D win-rate bookkeeping (PREFERRED eval-based attribution): between
+        # learn chunks, run a SMALL deterministic head-to-head of the current
+        # learner against each league member it just faced, and fold the estimate
+        # back into the league so the PFSP weights are data-driven. This is
+        # bookkeeping (kept small via ``league_eval_games``), not the safety gate.
+        # The learner is written to a temp checkpoint so the existing path-pickled
+        # eval harness (head_to_head + ml_agent_factory) can load it; the live
+        # League never leaves this process.
+        if league is not None and sampled_paths:
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as tmp:
+                learner_path = os.path.join(tmp, "league_learner")
+                save_checkpoint(
+                    model,
+                    learner_path,
+                    track_name=track_name,
+                    num_players=num_players,
+                    seed=seed,
+                    normalize=norm_meta,
+                    vec_env=venv,
+                )
+                for j, opp_path in enumerate(dict.fromkeys(sampled_paths)):
+                    wr = _estimate_learner_win_rate(
+                        learner_path,
+                        opp_path,
+                        num_games=curriculum.league_eval_games,
+                        track=track,
+                        seed=seed + 7000 + chunk_idx * 97 + j,
+                    )
+                    league.record_win_rate(
+                        opp_path, wr, curriculum.league_eval_games
+                    )
 
     # The (possibly collapsed) final model goes to a SEPARATE path — never the
     # canonical best_path.
@@ -837,3 +946,90 @@ def _mixed_opponent_pool(
         specs.append(_SnapshotFactory(path, deterministic=deterministic))
     specs.extend(HeuristicAgent for _ in range(n_opp - n_snap))
     return specs
+
+
+# ---------------------------------------------------------------------------
+# Sprint 6D: league-driven opponent pool + win-rate attribution
+# ---------------------------------------------------------------------------
+
+
+def _n_snapshot_seats(num_players: int, snapshot_mix: float, pool_size: int) -> int:
+    """Number of opponent seats drawn from the snapshot pool (matches §2.4 ramp).
+
+    Mirrors :func:`_mixed_opponent_pool`'s seat split so the league fills exactly
+    the same number of snapshot seats the FIFO path would, keeping the 6C
+    opponent-mix ramp semantics intact.
+    """
+    n_opp = num_players - 1
+    if pool_size <= 0:
+        return 0
+    return min(n_opp, int(round(n_opp * snapshot_mix)))
+
+
+def _league_opponent_pool(
+    num_players: int,
+    league: "League",
+    snapshot_mix: float,
+    rng: "np.random.Generator",
+    *,
+    deterministic: bool = False,
+) -> tuple[list, list[str]]:
+    """Build the Phase-2 opponent specs with snapshot seats chosen by the league.
+
+    The same seat count as :func:`_mixed_opponent_pool` (so the §2.4 ramp is
+    preserved) is filled by :meth:`League.sample` (PFSP priority) rather than by
+    index cycling; the remaining seats stay scripted ``HeuristicAgent`` so the
+    pool is never all self-copies. Snapshot seats are :class:`_SnapshotFactory`
+    instances bound to a **path** (picklable across ``SubprocVecEnv`` spawn) and
+    sample (``deterministic=False``, §2.2) by default.
+
+    Returns ``(specs, sampled_paths)`` -- the sampled paths are returned so the
+    caller can attribute results back to the originating league entry (the live
+    League never crosses the process boundary; only paths do).
+    """
+    n_opp = num_players - 1
+    n_snap = _n_snapshot_seats(num_players, snapshot_mix, len(league))
+
+    sampled_paths = league.sample(n_snap, rng)
+    specs: list = [
+        _SnapshotFactory(path, deterministic=deterministic) for path in sampled_paths
+    ]
+    specs.extend(HeuristicAgent for _ in range(n_opp - len(sampled_paths)))
+    return specs, sampled_paths
+
+
+def _estimate_learner_win_rate(
+    learner_path: str,
+    opponent_path: str,
+    *,
+    num_games: int,
+    track: Track | None,
+    seed: int,
+) -> float:
+    """Seat-neutral learner-vs-opponent win-rate via :func:`evaluate.head_to_head`.
+
+    The chosen win-rate-attribution strategy (§"Win-rate bookkeeping"): rather
+    than instrumenting the vectorized env workers to surface per-game outcomes
+    (invasive -- the env build assigns opponent paths per seat), run a SMALL
+    deterministic evaluation of the current learner against each sampled league
+    member between ``learn`` chunks and fold the estimate into the league. This
+    keeps the live :class:`League` single-source-of-truth in the main process
+    and reuses the existing 6B eval harness.
+
+    ``head_to_head`` runs half the games with the learner in the front seat and
+    half in the back, averaging out the known front-seat positional advantage so
+    the win-rate is a real skill signal, not a seat artifact.
+    """
+    from heat.ml.evaluate import head_to_head, ml_agent_factory
+
+    stats = head_to_head(
+        ml_agent_factory(learner_path),
+        ml_agent_factory(opponent_path),
+        label_a="learner",
+        label_b="opponent",
+        num_games=num_games,
+        track=track,
+        seed=seed,
+        parallel=False,
+    )
+    return float(stats.a_win_rate)

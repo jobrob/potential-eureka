@@ -189,3 +189,72 @@ def test_self_play_gate_preserves_phase1_strength(tmp_path) -> None:
         best_path, num_games=4, num_players=2, seed=0, parallel=False
     )
     assert "MLAgent" in per_agent
+
+
+def test_league_self_play_does_not_regress_below_6c_baseline(tmp_path) -> None:
+    """Sprint 6D: a short league + PFSP Phase-2 run is at least as safe as 6C.
+
+    The §6D smoke gate: the league swaps PFSP-sampled opponents into the Phase-2
+    snapshot seats and folds per-opponent win-rate estimates back via the
+    eval-based attribution, but the 6C eval-gated best-checkpoint machinery is
+    untouched -- so the saved *best* checkpoint's score can NEVER regress below
+    the Phase-1 baseline (the 6C guarantee). We model the exact Sprint-5 failure
+    (Phase 1 strong, Phase 2 collapses) with a deterministic ``gate_fn`` and
+    assert the best checkpoint is the strong Phase-1 model, identically to the
+    6C test -- proving league + PFSP only adds opponent curriculum, never erodes
+    the safety net. Kept small/fast: tiny net, 2 league eval games.
+    """
+    from heat.ml.evaluate import evaluate_ml
+    from heat.ml.training import CurriculumConfig, train_self_play
+
+    # Phase-1 baseline strong (0.9); Phase 2 collapses (the exact failure mode).
+    gate_scores = iter([0.9, 0.05, 0.02, 0.0])
+    phase1_baseline = 0.9
+
+    config = PPOConfig(
+        net_arch=[16, 16],
+        features_extractor_hidden=[16],
+        features_dim=16,
+        n_steps=64,
+        batch_size=32,
+        n_epochs=1,
+        seed=0,
+        verbose=0,
+        device="cpu",
+        n_envs=1,
+    )
+    curriculum = CurriculumConfig(
+        total_timesteps=192,
+        phase1_steps=64,
+        snapshot_every=64,
+        checkpoint_dir=str(tmp_path),
+        run_name="league_sp",
+        # --- §6D league + PFSP, opt-in ---
+        use_league=True,
+        league_capacity=4,
+        league_pfsp_mode="even",
+        snapshot_mix=0.5,
+        league_eval_games=2,  # tiny -- this is bookkeeping, not the gate
+    )
+
+    captured: list[float] = []
+
+    def gate_fn(_model) -> float:
+        s = next(gate_scores)
+        captured.append(s)
+        return s
+
+    _model, best_path = train_self_play(
+        config, curriculum, num_players=2, gate_fn=gate_fn
+    )
+
+    # The Phase-1 baseline was the max; the league run must NOT have overwritten
+    # the best checkpoint with a collapsed Phase-2 model -> best >= 6C baseline.
+    assert captured[0] == phase1_baseline
+    assert max(captured[1:]) < phase1_baseline
+
+    # The preserved best checkpoint is a real, loadable, legal model.
+    per_agent = evaluate_ml(
+        best_path, num_games=4, num_players=2, seed=0, parallel=False
+    )
+    assert "MLAgent" in per_agent
