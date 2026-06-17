@@ -42,6 +42,7 @@ from stable_baselines3.common.vec_env.base_vec_env import VecEnv
 from heat.agents.base import BaseAgent
 from heat.agents.heuristic_agent import HeuristicAgent
 from heat.agents.random_agent import RandomAgent
+from heat.agents.strong_heuristic import StrongHeuristicAgent
 from heat.engine import rules
 from heat.engine.driver import Decision, DecisionKind
 from heat.engine.phases import ReactDecision
@@ -403,11 +404,29 @@ class CurriculumConfig:
     #: bookkeeping for the PFSP weights, not the safety gate.
     league_eval_games: int = 4
 
+    # --- §6E strong-heuristic curriculum ---
+    #: Upgrade the Phase-1 (and scripted-seat) opponents from ``HeuristicAgent``
+    #: to the 6E :class:`~heat.agents.strong_heuristic.StrongHeuristicAgent`
+    #: strength bar. Off by default so existing runs are unchanged.
+    use_strong_heuristic_opponents: bool = False
 
-def _scripted_opponents(num_players: int) -> list[type[BaseAgent]]:
-    """Phase-1 opponent factories: mostly HeuristicAgent, one RandomAgent."""
+
+def _scripted_opponents(
+    num_players: int, *, use_strong: bool = False
+) -> list[type[BaseAgent]]:
+    """Phase-1 opponent factories.
+
+    Default pool is mostly :class:`HeuristicAgent` with one :class:`RandomAgent`
+    for exploration pressure. When ``use_strong`` (§6E), the heuristic seats are
+    upgraded to :class:`StrongHeuristicAgent` (the relative-objective strength
+    bar, default ``strength=2``) so the learner trains against a far harder
+    scripted curriculum; one ``RandomAgent`` seat is retained for exploration.
+    The entries are zero-arg callables (the class itself), matching how the env
+    instantiates non-snapshot opponent specs.
+    """
     n_opp = num_players - 1
-    pool: list[type[BaseAgent]] = [HeuristicAgent] * n_opp
+    base: type[BaseAgent] = StrongHeuristicAgent if use_strong else HeuristicAgent
+    pool: list[type[BaseAgent]] = [base] * n_opp
     if n_opp >= 1:
         pool[-1] = RandomAgent  # inject some exploration pressure
     return pool
@@ -683,7 +702,9 @@ def train_self_play(
 
     # --- Phase 1: scripted opponents ---
     apply_shaping_config(config)  # base shaping; the schedule overrides per-chunk
-    scripted = _scripted_opponents(num_players)
+    scripted = _scripted_opponents(
+        num_players, use_strong=curriculum.use_strong_heuristic_opponents
+    )
     venv = _build_vec_env(
         track=track,
         num_players=num_players,
@@ -778,6 +799,11 @@ def train_self_play(
             * progress
         )
 
+        scripted_cls: type[BaseAgent] = (
+            StrongHeuristicAgent
+            if curriculum.use_strong_heuristic_opponents
+            else HeuristicAgent
+        )
         sampled_paths: list[str] = []
         if league is not None:
             assert league_rng is not None
@@ -787,6 +813,7 @@ def train_self_play(
                 mix,
                 league_rng,
                 deterministic=curriculum.snapshot_deterministic,
+                scripted_cls=scripted_cls,
             )
         else:
             opponents = _mixed_opponent_pool(
@@ -794,6 +821,7 @@ def train_self_play(
                 snapshot_paths,
                 mix,
                 deterministic=curriculum.snapshot_deterministic,
+                scripted_cls=scripted_cls,
             )
 
         # Rebuild the (vec) env on the new mix, preserving VecNormalize stats.
@@ -925,6 +953,7 @@ def _mixed_opponent_pool(
     snapshot_mix: float,
     *,
     deterministic: bool = False,
+    scripted_cls: type[BaseAgent] = HeuristicAgent,
 ):
     """Build an opponent-spec list mixing scripted agents and frozen snapshots.
 
@@ -944,7 +973,7 @@ def _mixed_opponent_pool(
         # Spread across distinct snapshots (newest-first) for opponent variety.
         path = snapshot_paths[-(1 + (i % len(snapshot_paths)))]
         specs.append(_SnapshotFactory(path, deterministic=deterministic))
-    specs.extend(HeuristicAgent for _ in range(n_opp - n_snap))
+    specs.extend(scripted_cls for _ in range(n_opp - n_snap))
     return specs
 
 
@@ -973,6 +1002,7 @@ def _league_opponent_pool(
     rng: "np.random.Generator",
     *,
     deterministic: bool = False,
+    scripted_cls: type[BaseAgent] = HeuristicAgent,
 ) -> tuple[list, list[str]]:
     """Build the Phase-2 opponent specs with snapshot seats chosen by the league.
 
@@ -994,7 +1024,7 @@ def _league_opponent_pool(
     specs: list = [
         _SnapshotFactory(path, deterministic=deterministic) for path in sampled_paths
     ]
-    specs.extend(HeuristicAgent for _ in range(n_opp - len(sampled_paths)))
+    specs.extend(scripted_cls for _ in range(n_opp - len(sampled_paths)))
     return specs, sampled_paths
 
 

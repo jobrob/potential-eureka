@@ -44,7 +44,7 @@ def test_forward_pass_logits_shape() -> None:
     policy = model.policy
 
     batch = 5
-    obs = torch.zeros((batch, OBS_DIM), dtype=torch.float32)
+    obs = torch.zeros((batch, OBS_DIM), dtype=torch.float32, device=policy.device)
 
     features = policy.extract_features(obs)
     latent_pi, _ = policy.mlp_extractor(features)
@@ -60,7 +60,7 @@ def test_mask_application_zeros_illegal_probabilities() -> None:
     model = build_model(env, _tiny_config())
     policy = model.policy
 
-    obs = torch.zeros((1, OBS_DIM), dtype=torch.float32)
+    obs = torch.zeros((1, OBS_DIM), dtype=torch.float32, device=policy.device)
 
     # Build the (unmasked) categorical distribution, then apply a sparse mask.
     features = policy.extract_features(obs)
@@ -72,7 +72,7 @@ def test_mask_application_zeros_illegal_probabilities() -> None:
     mask[0, legal] = True
 
     distribution.apply_masking(mask)
-    probs = distribution.distribution.probs.detach().numpy()[0]
+    probs = distribution.distribution.probs.detach().cpu().numpy()[0]
 
     legal_set = set(legal)
     illegal = [i for i in range(ACTION_DIM) if i not in legal_set]

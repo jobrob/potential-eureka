@@ -56,6 +56,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--gate-games", type=int, default=20,
                         help="Games per inline eval-gate evaluation (default: 20).")
 
+    # --- §6D opponent league + PFSP ---
+    parser.add_argument("--use-league", action="store_true",
+                        help="Use the 6D PFSP opponent league for Phase-2 snapshot "
+                             "seats instead of the FIFO pool.")
+    parser.add_argument("--league-capacity", type=int, default=8,
+                        help="League pool capacity (entries retained; default: 8).")
+    parser.add_argument("--pfsp-mode", choices=["even", "variance", "hard"],
+                        default="even",
+                        help="PFSP weighting: even/variance (close games, default) "
+                             "or hard (current losses).")
+    parser.add_argument("--league-eval-games", type=int, default=4,
+                        help="Games per sampled opponent for PFSP win-rate "
+                             "bookkeeping each chunk (default: 4).")
+
+    # --- §6E strong-heuristic curriculum ---
+    parser.add_argument("--use-strong-opponents", action="store_true",
+                        help="Upgrade scripted opponents from HeuristicAgent to the "
+                             "6E StrongHeuristicAgent strength bar.")
+
     # --- throughput / hardware ---
     parser.add_argument("--n-envs", type=int, default=1,
                         help="Parallel envs; >1 uses SubprocVecEnv (default: 1).")
@@ -137,6 +156,11 @@ def build_configs(args: argparse.Namespace) -> tuple[PPOConfig, CurriculumConfig
         warmup_chunks=args.warmup_chunks,
         normalize_reward=args.normalize_reward,
         normalize_obs=args.normalize_obs,
+        use_league=args.use_league,
+        league_capacity=args.league_capacity,
+        league_pfsp_mode=args.pfsp_mode,
+        league_eval_games=args.league_eval_games,
+        use_strong_heuristic_opponents=args.use_strong_opponents,
     )
     return ppo, curriculum
 
