@@ -275,7 +275,9 @@ class HeatEnv(gym.Env):
         terminated, truncated = self._episode_flags()
         self._done = terminated or truncated
 
-        reward = step_reward(prev, self.state, self.learner_id, self._done)
+        reward = step_reward(
+            prev, self.state, self.learner_id, self._done, terminated=terminated
+        )
 
         obs = self._encode(decision)
         info = self._info(decision)

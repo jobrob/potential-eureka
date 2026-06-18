@@ -97,6 +97,17 @@ class PPOConfig:
     #: :data:`heat.ml.spaces.SHAPING_SPINOUT_CAP`.
     shaping_spinout_cap: float = 0.05
 
+    # --- reward MODE (Sprint 8C) ---
+    #: Reward mode: ``"race"`` (default; the existing terminal placement reward)
+    #: or ``"solo"`` (dense progress + a terminal finish bonus paid only on a real
+    #: finish). Pushed into :data:`heat.ml.spaces.REWARD_MODE` by
+    #: :func:`apply_shaping_config`. Default ``"race"`` keeps existing runs
+    #: byte-for-byte unchanged.
+    reward_mode: str = "race"
+    #: Terminal finish bonus used by ``"solo"`` reward mode. See
+    #: :data:`heat.ml.spaces.SOLO_FINISH_BONUS`.
+    solo_finish_bonus: float = 5.0
+
     # --- bookkeeping ---
     seed: int | None = None
     verbose: int = 0
@@ -185,6 +196,10 @@ def apply_shaping_config(config: PPOConfig) -> None:
     spaces.SHAPING_PROGRESS_COEF = config.shaping_progress_coef
     spaces.SHAPING_SPINOUT_WEIGHT = config.shaping_spinout_weight
     spaces.SHAPING_SPINOUT_CAP = config.shaping_spinout_cap
+    # Sprint 8C: the reward MODE (race/solo) + solo finish bonus also flow through
+    # the same process-global mutation path so workers compute the right reward.
+    spaces.REWARD_MODE = config.reward_mode
+    spaces.SOLO_FINISH_BONUS = config.solo_finish_bonus
 
 
 # ---------------------------------------------------------------------------

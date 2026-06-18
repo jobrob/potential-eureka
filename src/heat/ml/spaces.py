@@ -154,6 +154,21 @@ ACTION_DIM: int = DISCARD_OFFSET + DISCARD_SIZE  # 516
 # Reward (§3.3)
 # ---------------------------------------------------------------------------
 
+#: Reward mode (Sprint 8C). ``"race"`` (default) == the existing terminal
+#: placement reward; ``"solo"`` == dense progress (already on via
+#: ``SHAPING_WEIGHT``) + a terminal finish bonus paid ONLY when the lone car
+#: FINISHES (``terminated``), never when the episode truncates. Set from
+#: ``PPOConfig.reward_mode`` by :func:`heat.ml.model.apply_shaping_config`,
+#: mirroring the ``SHAPING_WEIGHT`` global pattern. Default ``"race"`` keeps every
+#: existing run byte-for-byte unchanged.
+REWARD_MODE: str = "race"
+
+#: Terminal finish bonus for solo mode (Sprint 8C), paid once when the lone car
+#: completes its laps (``terminated``). Positive-only -- no negative rewards
+#: anywhere in solo, so there is no "crash to end the episode early" exploit.
+#: Default matches the prototype's 5.0 (``experiments/proto_solo.py``).
+SOLO_FINISH_BONUS: float = 5.0
+
 #: Dense shaping weight. Defaulted to 0 so the first training run is pure-sparse
 #: (see §6.3). 5c may tune this via PPOConfig without editing 5b.
 SHAPING_WEIGHT: float = 0.0
@@ -211,23 +226,44 @@ def step_reward(
     curr: GameState,
     learner_id: int,
     done: bool,
+    *,
+    terminated: bool = False,
 ) -> float:
     """Reward for the learning seat between two driver steps.
 
-    Default policy (§3.3):
+    Default policy (§3.3, ``REWARD_MODE == "race"``):
       * Terminal (sparse): graded placement reward computed from
         ``curr.finished_players`` when ``done`` is True.
       * Dense shaping (optional, ``SHAPING_WEIGHT`` defaults to 0): lap-aware
         per-step progress of the learner. Kept tiny so it never dominates the
         win signal; off by default for the first run.
 
-    The shaping coefficients live as module-level constants so 5c can tune them
-    (via PPOConfig) without editing the 5b environment.
+    Solo policy (Sprint 8C, ``REWARD_MODE == "solo"``):
+      * Terminal: a fixed :data:`SOLO_FINISH_BONUS` paid ONLY when the episode
+        genuinely *terminates* (the lone car finished its laps), never on
+        truncation. ``_placement_reward`` returns 0 for the solo (``n <= 1``)
+        field, so the bonus is the whole terminal signal. No negative branch ->
+        no crash-to-end-the-episode exploit; speed is induced purely by
+        ``gamma < 1`` discounting the same bonus + progress earlier (§4.3).
+      * Dense progress: the same shaping term below, run with ``SHAPING_WEIGHT > 0``.
+
+    ``terminated`` defaults to ``False`` so any existing caller (race mode) is
+    byte-for-byte unchanged; only the solo branch reads it. The shaping
+    coefficients + ``REWARD_MODE`` live as module-level constants so 5c can tune
+    them (via PPOConfig) without editing the 5b environment.
     """
     reward = 0.0
 
     if done:
-        reward += _placement_reward(curr, learner_id)
+        if REWARD_MODE == "solo":
+            # Solo terminal: finish bonus ONLY on a real finish (terminated),
+            # never on truncation. _placement_reward returns 0 for n<=1, so the
+            # placement term contributes nothing -- the bonus is the whole
+            # terminal signal. No negative branch => no crash-to-end exploit.
+            if terminated:
+                reward += SOLO_FINISH_BONUS
+        else:
+            reward += _placement_reward(curr, learner_id)
 
     if SHAPING_WEIGHT != 0.0:
         prev_p = prev.get_player(learner_id)
@@ -237,6 +273,13 @@ def step_reward(
         prev_abs = prev_p.lap * length + prev_p.position
         curr_abs = curr_p.lap * length + curr_p.position
         progress = (curr_abs - prev_abs) / length
+        # Solo mode is positive-only (DoD a, §4.3): the engine can push a car
+        # BACKWARD (slipstream resolution / spinout), which would make the raw
+        # progress delta negative. Clamp it at 0 in solo so there is never a
+        # negative reward -- removing any incentive to crash/spin to stop
+        # accruing. Race mode keeps the signed progress unchanged.
+        if REWARD_MODE == "solo":
+            progress = max(0.0, progress)
         reward += SHAPING_WEIGHT * SHAPING_PROGRESS_COEF * progress
 
     # Optional bounded anti-spinout penalty (Idea 3); default-off (weight 0). The

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import itertools
 from typing import Mapping
 
 from heat.agents.ml_agent import MLAgent
@@ -548,3 +549,212 @@ def evaluate_cross_track(
         stats = aggregate_stats(outcomes, by="agent_type")
         result[track.name] = dict(stats.per_agent)
     return result
+
+
+# ----------------------------------------------------------------------
+# Sprint 8C: round-robin LEAGUE evaluator (free-for-all + rank-based ratings)
+# ----------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class LeagueLadder:
+    """Ratings over a pool of contenders from the league evaluator (§7.5).
+
+    Attributes:
+        ratings: ``label -> EloRating`` (always populated; rank-based ELO).
+        trueskill: ``label -> TrueSkillRating`` when TrueSkill ran, else ``None``.
+        pairwise: optional 2-player head-to-head table (``mode="pairwise"`` only).
+        outcomes: the relabelled per-game :class:`GameOutcome` list (8D forward-
+            compat seam, §7.5): ELO/TrueSkill are pure functions of this list, so
+            8D can persist it and recompute ratings without replaying races.
+            ``None`` by default to keep 8C small-N output light.
+    """
+
+    ratings: dict[str, EloRating]
+    trueskill: dict[str, TrueSkillRating] | None = None
+    pairwise: dict[tuple[str, str], HeadToHeadStats] | None = None
+    outcomes: list[GameOutcome] | None = None
+
+
+def _seat_rotations(labels: list[str], num_players: int) -> list[list[str]]:
+    """Cyclic seat rotations of ``labels`` for seat-order cancellation (§7.4).
+
+    Returns ``num_players`` rotations of the field so each contender occupies
+    every grid slot equally over the set (a Latin-square-style cancellation of
+    the front-seat advantage). Deterministic given the input order.
+    """
+    n = len(labels)
+    return [[labels[(i + r) % n] for i in range(n)] for r in range(num_players)]
+
+
+def _free_for_all_outcomes(
+    contenders: Mapping[str, AgentFactory],
+    *,
+    tracks: list[Track],
+    num_players: int,
+    games_per_matchup: int,
+    seed: int,
+    parallel: bool,
+) -> list[GameOutcome]:
+    """Play every size-``num_players`` field of distinct contenders (§7.3/7.4).
+
+    Enumerates the size-``num_players`` combinations of contender labels; each
+    field is played on every track, on each cyclic seat rotation (so seat order
+    cancels), relabelled by pool key, and stamped with a globally unique,
+    deterministic ``game_index`` so the combined list has a stable total order
+    for ELO / TrueSkill.
+    """
+    labels = sorted(contenders)
+    if len(labels) < num_players:
+        raise ValueError(
+            f"need >= {num_players} contenders for a {num_players}-player "
+            f"free-for-all, got {len(labels)}"
+        )
+
+    combined: list[GameOutcome] = []
+    games_per_rotation = max(1, games_per_matchup // num_players)
+    gindex = 0
+    field_idx = 0
+
+    for field in itertools.combinations(labels, num_players):
+        for t_idx, track in enumerate(tracks):
+            for r_idx, seating in enumerate(
+                _seat_rotations(list(field), num_players)
+            ):
+                seat_factories = [contenders[lbl] for lbl in seating]
+                seat_labels = {seat: lbl for seat, lbl in enumerate(seating)}
+                # Deterministic, collision-free per-(field, track, rotation) seed.
+                batch_seed = (
+                    seed
+                    + field_idx * 1_000_003
+                    + t_idx * 10_007
+                    + r_idx * 101
+                )
+                raw = run_batch(
+                    track,
+                    seat_factories,
+                    num_games=games_per_rotation,
+                    parallel=parallel,
+                    seed=batch_seed,
+                )
+                relabelled = _relabel_outcomes(raw, seat_labels)
+                for o in relabelled:
+                    combined.append(
+                        dataclasses.replace(o, game_index=gindex)
+                    )
+                    gindex += 1
+        field_idx += 1
+
+    return combined
+
+
+def evaluate_league(
+    contenders: Mapping[str, AgentFactory],
+    *,
+    tracks: list[Track],
+    num_players: int = 4,
+    games_per_matchup: int = 50,
+    mode: str = "free_for_all",
+    rating: str = "trueskill",
+    seed: int = 0,
+    parallel: bool = False,
+    # --- 8D additions (additive; defaults preserve 8C small-N behavior) ---
+    matchup_sampling: str = "exhaustive",
+    fields_per_contender: int | None = None,
+    games_per_field: int | None = None,
+) -> LeagueLadder:
+    """Round-robin a pool of checkpoints + reference heuristics; rank-based ratings.
+
+    ``free_for_all`` (default): enumerate size-``num_players`` combinations of the
+    contender labels, play each on rotated seatings (§7.4 -- seat order cancels),
+    relabel by pool key (:func:`_relabel_outcomes`), and feed the combined
+    outcomes to :func:`heat.simulation.stats.compute_elo` /
+    :func:`~heat.simulation.stats.compute_trueskill` (both already rank-based and
+    N-way). ``pairwise``: delegate to :func:`round_robin_elo`.
+
+    The rating math is a pure function of the seeded outcome list, so a fixed
+    ``(contenders, tracks, seed)`` yields byte-identical ratings (§7.5 / the
+    determinism test). ``contenders`` may mix :func:`ml_agent_factory` checkpoints
+    and :func:`heuristic_agent_factory` / :func:`strong_heuristic_agent_factory`
+    reference yardsticks -- all picklable.
+
+    Args:
+        contenders: ``label -> picklable factory`` (>= ``num_players`` in
+            free-for-all; >= 2 in pairwise).
+        tracks: fixed held-out track set (non-empty).
+        num_players: seats per free-for-all race (2..6).
+        games_per_matchup: games per field (split across the seat rotations).
+        mode: ``"free_for_all"`` (default) or ``"pairwise"``.
+        rating: ``"trueskill"`` (default headline) or ``"elo"`` (always computed).
+        seed: base seed (deterministic).
+        parallel: passed to ``run_batch`` (default ``False`` for MLAgent pools).
+        matchup_sampling: ``"exhaustive"`` (8C) or ``"sampled"`` (8D -- not yet
+            implemented; raises ``NotImplementedError``).
+        fields_per_contender / games_per_field: 8D sampled-mode knobs (unused in
+            8C; accepted so the API is stable for 8D).
+
+    Returns:
+        A :class:`LeagueLadder` with ELO ratings (always), optional TrueSkill,
+        an optional pairwise table (pairwise mode), and the relabelled outcomes.
+    """
+    if not tracks:
+        raise ValueError("evaluate_league needs at least one track")
+    if rating not in ("elo", "trueskill"):
+        raise ValueError(f"rating must be 'elo' or 'trueskill', got {rating!r}")
+    if matchup_sampling not in ("exhaustive", "sampled"):
+        raise ValueError(
+            f"matchup_sampling must be 'exhaustive' or 'sampled', "
+            f"got {matchup_sampling!r}"
+        )
+    if matchup_sampling == "sampled":
+        # 8D forward-compat seam (§7.5): the param + LeagueLadder.outcomes field
+        # exist now; the balanced field sampler is filled in by Sprint 8D.
+        raise NotImplementedError(
+            "matchup_sampling='sampled' is a Sprint 8D feature; use "
+            "'exhaustive' for the 8C small-N evaluator"
+        )
+
+    if mode == "pairwise":
+        rr = round_robin_elo(
+            contenders,
+            num_games_per_pair=games_per_matchup,
+            num_players=num_players,
+            tracks=tracks,
+            seed=seed,
+            rating=rating,
+            parallel=parallel,
+        )
+        return LeagueLadder(
+            ratings=rr.ratings,
+            trueskill=rr.trueskill,
+            pairwise=rr.pairwise,
+            outcomes=None,
+        )
+    if mode != "free_for_all":
+        raise ValueError(
+            f"mode must be 'free_for_all' or 'pairwise', got {mode!r}"
+        )
+    if not (2 <= num_players <= 6):
+        raise ValueError(f"num_players must be 2..6, got {num_players}")
+
+    outcomes = _free_for_all_outcomes(
+        contenders,
+        tracks=tracks,
+        num_players=num_players,
+        games_per_matchup=games_per_matchup,
+        seed=seed,
+        parallel=parallel,
+    )
+
+    ratings = compute_elo(outcomes, by="agent_type", bootstrap_seed=seed)
+    trueskill = (
+        compute_trueskill(outcomes, by="agent_type")
+        if rating == "trueskill"
+        else None
+    )
+    return LeagueLadder(
+        ratings=ratings,
+        trueskill=trueskill,
+        pairwise=None,
+        outcomes=outcomes,
+    )

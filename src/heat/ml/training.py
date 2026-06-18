@@ -592,6 +592,43 @@ def sprint_b_curriculum(
     )
 
 
+def sprint_8c_curriculum(
+    total_timesteps: int = 1_600_000,
+    *,
+    run_name: str = "heat_ppo_sprint8C",
+    checkpoint_dir: str = "checkpoints",
+) -> CurriculumConfig:
+    """The Sprint 8C "solo pretrain + opponent curriculum" preset (§8.1).
+
+    Built on :func:`sprint_a_curriculum` (so the trustworthy Wilson-LB gate +
+    seat randomization are inherited) with the TRACK curriculum demoted to
+    default-off -- the validated recipe ramps the OPPONENT axis instead
+    (``docs/ml-learnings-solo-pretrain.md``). The solo phase + opponent ramp are
+    expressed as a :class:`TrainingPhase` list (see :func:`default_8c_phases`),
+    passed to :func:`train_self_play` via ``phases=``; this preset carries the
+    gate/seat/normalization levers those phases run under.
+
+    ``total_timesteps`` is informational here (the phase list owns the per-stage
+    budgets); it sets the sidecar metadata + the Phase-1-heavy ``phase1_steps``
+    default inherited from Sprint A.
+    """
+    cfg = sprint_a_curriculum(
+        total_timesteps,
+        run_name=run_name,
+        checkpoint_dir=checkpoint_dir,
+    )
+    return dataclasses.replace(
+        cfg,
+        use_track_curriculum=False,  # demoted (net-negative per learnings)
+        randomize_seat=True,  # the proven Sprint-A win, kept
+        use_strong_heuristic_opponents=True,
+        broaden_phase1_mix=True,
+        gate_use_wilson_lb=True,
+        normalize_obs=False,  # Idea 15 recorded constraint
+        normalize_reward=False,
+    )
+
+
 def _scripted_opponents(
     num_players: int, *, use_strong: bool = False, broaden_mix: bool = False
 ) -> list:
@@ -620,6 +657,112 @@ def _scripted_opponents(
     if n_opp >= 1:
         pool[-1] = RandomAgent  # inject some exploration pressure
     return pool
+
+
+def _mixed_strength_pool(num_players: int) -> list:
+    """A "mixed" opponent rung between weak and the broadened strong pool (8C).
+
+    Cycles the template ``[Strong(2), Heuristic, Random]`` to fill exactly
+    ``num_players - 1`` seats -- one rung of strong pressure, one weak heuristic,
+    and exploration -- so the learner ramps through an intermediate difficulty
+    before the full broadened-strong pool. Every entry is a zero-arg picklable
+    callable (a class or :class:`_StrongHeuristicFactory`), so the pool survives
+    ``SubprocVecEnv`` spawn unchanged.
+    """
+    n_opp = num_players - 1
+    template: list = [
+        _StrongHeuristicFactory(2),
+        HeuristicAgent,
+        RandomAgent,
+    ]
+    return [template[i % len(template)] for i in range(n_opp)]
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8C: opponent-curriculum schedule + multi-phase training plan
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OpponentStage:
+    """One opponent-curriculum stage: a pool spec + a step budget (Sprint 8C).
+
+    ``pool_kind`` is one of ``"weak"`` / ``"mixed"`` / ``"strong"``; ``steps`` is
+    the learn budget for the stage. Frozen + hashable (plain ``str``/``int``) so
+    it pickles into ``SubprocVecEnv`` workers cleanly.
+    """
+
+    pool_kind: str
+    steps: int
+
+
+@dataclass(frozen=True)
+class OpponentSchedule:
+    """Weak -> mixed -> strong opponent ramp across staged vec-env rebuilds (8C).
+
+    Generalizes Sprint B's ``CurriculumSchedule`` from the track axis to the
+    OPPONENT axis (the axis ``docs/ml-learnings-solo-pretrain.md`` proved
+    matters). Each stage names a pool kind, resolved to picklable opponent
+    factories by :meth:`pool_for`. Frozen + hashable; the pools it produces are
+    lists of zero-arg picklable factories so they survive ``SubprocVecEnv`` spawn
+    (only the resolved list, never the live schedule, crosses the boundary).
+    """
+
+    stages: tuple[OpponentStage, ...]
+
+    def pool_for(self, num_players: int, stage: int) -> list:
+        """Resolve the opponent factory list for ``stage`` (clamped to range).
+
+        Out-of-range indices clamp to the final stage so a phase list with more
+        opponent phases than schedule stages still resolves to the hardest pool.
+        """
+        if not self.stages:
+            raise ValueError("OpponentSchedule has no stages")
+        idx = max(0, min(stage, len(self.stages) - 1))
+        kind = self.stages[idx].pool_kind
+        if kind == "weak":
+            # 2x HeuristicAgent + Random (the proto's "weak").
+            return _scripted_opponents(num_players, use_strong=False)
+        if kind == "strong":
+            # Broadened strong pool (Strong3/Strong2/Heuristic/Random).
+            return _scripted_opponents(
+                num_players, use_strong=True, broaden_mix=True
+            )
+        if kind == "mixed":
+            # Half-strong / half-weak rung between weak and strong.
+            return _mixed_strength_pool(num_players)
+        raise ValueError(f"unknown opponent stage kind {kind!r}")
+
+
+@dataclass(frozen=True)
+class TrainingPhase:
+    """One stage of the 8C recipe (solo pretrain or an opponent-curriculum rung).
+
+    A frozen dataclass of primitives so the whole phase list pickles trivially.
+    ``pool_kind`` is ``None`` for the solo phase (which has no opponents) and one
+    of ``"weak"``/``"mixed"``/``"strong"`` for the opponent phases.
+    """
+
+    name: str
+    num_players: int
+    reward_mode: str
+    gamma: float
+    shaping_weight: float
+    steps: int
+    pool_kind: str | None
+
+
+#: The default 8C phase list (the validated recipe + the explicit mixed rung).
+#: Solo runs at gamma 0.99 (the §4.3 speed gradient); the race phases at 0.999.
+#: Per-stage step budgets are PLACEHOLDERS the run tunes (§6.1/§10).
+def default_8c_phases(num_players: int = 4) -> list[TrainingPhase]:
+    """Return the default solo -> weak -> mixed -> strong phase list (§6.1)."""
+    return [
+        TrainingPhase("solo", 1, "solo", 0.99, 1.0, 300_000, None),
+        TrainingPhase("weak", num_players, "race", 0.999, 0.05, 300_000, "weak"),
+        TrainingPhase("mixed", num_players, "race", 0.999, 0.05, 400_000, "mixed"),
+        TrainingPhase("strong", num_players, "race", 0.999, 0.05, 600_000, "strong"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -661,12 +804,18 @@ def _build_vec_env(
     curriculum: CurriculumConfig,
     shaping_weight: float,
     seed: int,
+    reward_mode: str | None = None,
+    solo_finish_bonus: float | None = None,
 ) -> VecEnv:
     """Build the (optionally normalized) vec env for one training phase.
 
     Wraps :func:`heat.ml.vec.make_vec_env` and, when the curriculum enables it,
     a fresh ``VecNormalize`` (§2.6). The caller is responsible for transferring
     running stats across phases via :func:`_swap_vec_env`.
+
+    ``reward_mode`` / ``solo_finish_bonus`` (Sprint 8C) override the values taken
+    from ``config`` when set, so a solo phase can build a solo-reward env while a
+    race phase uses the race reward, without mutating the shared ``PPOConfig``.
     """
     venv = make_vec_env(
         track=track,
@@ -680,6 +829,12 @@ def _build_vec_env(
         shaping_progress_coef=config.shaping_progress_coef,
         shaping_spinout_weight=config.shaping_spinout_weight,
         shaping_spinout_cap=config.shaping_spinout_cap,
+        reward_mode=reward_mode if reward_mode is not None else config.reward_mode,
+        solo_finish_bonus=(
+            solo_finish_bonus
+            if solo_finish_bonus is not None
+            else config.solo_finish_bonus
+        ),
         randomize_seat=curriculum.randomize_seat,
     )
     if curriculum.normalize_reward or curriculum.normalize_obs:
@@ -1034,6 +1189,8 @@ def train_self_play(
     track: TrackSource | None = None,
     learner_id: int = 0,
     gate_fn=None,
+    warm_start_path: str | None = None,
+    phases: "list[TrainingPhase] | None" = None,
 ) -> tuple[MaskablePPO, str]:
     """Run the Phase 1 -> Phase 2 self-play curriculum with 6C stability (§6C).
 
@@ -1044,6 +1201,17 @@ def train_self_play(
     when the score strictly improves**, so a collapsing Phase 2 can never destroy
     the best model. The collapsed final policy is saved separately to
     ``run_name_final``.
+
+    **Sprint 8C** -- when ``phases`` is supplied, the run is driven by that ordered
+    :class:`TrainingPhase` list instead of the legacy Phase-1/Phase-2 split (see
+    :func:`_train_phases`): a solo pretrain phase followed by a weak->mixed->strong
+    opponent ramp, each phase running the same chunked Wilson-LB gate +
+    best-checkpoint preservation, with a per-phase gamma handoff (the model is
+    reloaded carrying weights with the phase's gamma, since SB3 bakes gamma at
+    construction). ``warm_start_path`` (8C) loads an existing checkpoint instead
+    of building fresh, so an externally-pretrained solo policy can seed the run.
+    Both default to the legacy behavior (``phases=None`` -> the 6C path;
+    ``warm_start_path=None`` -> ``build_model``), so existing runs are unchanged.
 
     Returns ``(model, best_checkpoint_path)`` — the best-evaluated checkpoint,
     not the (possibly collapsed) final model.
@@ -1062,6 +1230,20 @@ def train_self_play(
         config = PPOConfig()
     if curriculum is None:
         curriculum = CurriculumConfig()
+
+    # Sprint 8C: an explicit phase list drives the solo -> opponent-curriculum run
+    # through a separate, self-contained loop. Default (None) keeps the legacy 6C
+    # Phase-1/Phase-2 path below byte-for-byte unchanged.
+    if phases is not None:
+        return _train_phases(
+            phases,
+            config=config,
+            curriculum=curriculum,
+            track=track,
+            learner_id=learner_id,
+            gate_fn=gate_fn,
+            warm_start_path=warm_start_path,
+        )
 
     os.makedirs(curriculum.checkpoint_dir, exist_ok=True)
     seed = config.seed if config.seed is not None else 0
@@ -1131,7 +1313,15 @@ def train_self_play(
         shaping_weight=config.shaping_weight,
         seed=seed,
     )
-    model = build_model(venv, config)
+    # Sprint 8C: warm-start from an existing checkpoint (carrying weights) instead
+    # of building fresh, when a path is given. Reuses the gamma-carrying reload
+    # helper; falls back to build_model for the default (no warm start) case.
+    if warm_start_path is not None:
+        model = _load_model_with_gamma(
+            warm_start_path, venv, config, gamma=config.gamma
+        )
+    else:
+        model = build_model(venv, config)
 
     # Chunk Phase 1 into ``phase1_eval_every`` learn/gate iterations so a
     # Phase-1-heavy run (Idea 4) still preserves the BEST held-out checkpoint, not
@@ -1410,6 +1600,275 @@ def train_self_play(
         final_path,
         track_name=track_name,
         num_players=num_players,
+        seed=seed,
+        ppo_config=config,
+        curriculum_config=curriculum,
+        normalize=norm_meta,
+        vec_env=venv,
+    )
+
+    venv.close()
+    return model, best_path
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8C: multi-phase driver (solo pretrain + opponent curriculum)
+# ---------------------------------------------------------------------------
+
+
+def _load_model_with_gamma(
+    path: str, venv: VecEnv, config: PPOConfig, *, gamma: float
+) -> MaskablePPO:
+    """Load an SB3 checkpoint onto ``venv``, overriding its baked-in ``gamma``.
+
+    SB3 bakes ``gamma`` into the model at construction; ``set_env`` / ``learn`` do
+    NOT change it. Empirically (verified for this sb3-contrib version),
+    ``MaskablePPO.load(path, env=venv, custom_objects={"gamma": gamma})`` loads
+    the saved weights AND adopts the new ``gamma`` -- so a phase boundary that
+    needs a different discount (solo 0.99 -> race 0.999, §6.3) is handled by a
+    single reload that carries the weights forward. The shaping/reward-mode
+    globals are re-applied afterwards so this process computes the right reward.
+    """
+    model = MaskablePPO.load(
+        path,
+        env=venv,
+        device=resolve_device(config.device),
+        custom_objects={"gamma": gamma},
+    )
+    apply_shaping_config(config)
+    return model
+
+
+def _train_phases(
+    phases: "list[TrainingPhase]",
+    *,
+    config: PPOConfig,
+    curriculum: CurriculumConfig,
+    track: TrackSource | None,
+    learner_id: int,
+    gate_fn=None,
+    warm_start_path: str | None = None,
+) -> tuple[MaskablePPO, str]:
+    """Drive an ordered :class:`TrainingPhase` list (Sprint 8C; §5, §6).
+
+    Each phase runs the chunked learn/gate loop (reusing Sprint A's Wilson-LB
+    gate + best-checkpoint preservation): the env is (re)built for the phase's
+    opponent pool / reward mode / shaping, and -- because SB3 bakes ``gamma`` at
+    construction -- the model is RELOADED carrying weights with the phase's gamma
+    whenever it differs from the running model's (the §6.3/§10 gamma handoff,
+    resolved via :func:`_load_model_with_gamma`). ``best_score`` is a single
+    running scalar across ALL phases, so a collapsing later phase can never
+    overwrite a better earlier checkpoint.
+
+    Gate yardstick (§6.4/§10): the gate ALWAYS scores against the fixed final
+    strong 4-player target (a single coherent scale across the ramp). The SOLO
+    phase is NOT gated against that race yardstick (it is OOD -- a 1-player
+    time-trial policy scored in a 4-player race is meaningless, §10 last bullet);
+    the solo phase trains ungated and the race-yardstick gate starts at the first
+    opponent phase.
+
+    Returns ``(model, best_checkpoint_path)`` -- the best-evaluated checkpoint.
+    """
+    if not phases:
+        raise ValueError("_train_phases requires a non-empty phase list")
+
+    os.makedirs(curriculum.checkpoint_dir, exist_ok=True)
+    seed = config.seed if config.seed is not None else 0
+    # The opponent curriculum demotes the track curriculum to off; resolve the
+    # track source with curriculum=None so a plain generated-track sampler (or a
+    # pinned Track) is used regardless of the (legacy) track-curriculum flag.
+    track_source = _resolve_track_source(track, seed, curriculum=None)
+    track_name = _track_label(track_source)
+    norm_meta = _normalize_meta(curriculum)
+
+    best_path = os.path.join(curriculum.checkpoint_dir, curriculum.run_name)
+    final_path = os.path.join(
+        curriculum.checkpoint_dir, f"{curriculum.run_name}_final"
+    )
+
+    # The fixed final-strong yardstick (§6.4): gate every opponent phase against
+    # the LAST race phase's player count + the strong pool, so promote_score is a
+    # single comparable scale. Built from the last non-solo phase (fallback 4p).
+    race_phases = [p for p in phases if p.reward_mode != "solo"]
+    yardstick_players = race_phases[-1].num_players if race_phases else 4
+
+    def _gate(m: MaskablePPO, venv: VecEnv | None = None) -> GateResult:
+        if gate_fn is not None:
+            s = float(gate_fn(m))
+            return GateResult(
+                win_rate_strong=s,
+                win_rate_weak=s,
+                wilson_lb_strong=s,
+                games_strong=0,
+            )
+        # Always gate vs the fixed final-strong yardstick (§6.4), independent of
+        # the current phase's opponent pool.
+        return _gate_score(
+            m,
+            curriculum=curriculum,
+            num_players=yardstick_players,
+            track=track_source,
+            seed=seed,
+            vec_env=venv,
+            normalize=norm_meta,
+        )
+
+    def _save_best(m: MaskablePPO, venv: VecEnv) -> None:
+        save_checkpoint(
+            m,
+            best_path,
+            track_name=track_name,
+            num_players=yardstick_players,
+            seed=seed,
+            ppo_config=config,
+            curriculum_config=curriculum,
+            track_config={"track_name": track_name},
+            normalize=norm_meta,
+            vec_env=venv,
+        )
+
+    schedule = OpponentSchedule(
+        stages=tuple(
+            OpponentStage(p.pool_kind, p.steps)
+            for p in phases
+            if p.pool_kind is not None
+        )
+    )
+
+    best_score: float | None = None
+    model: MaskablePPO | None = None
+    venv: VecEnv | None = None
+    cur_gamma: float | None = None
+    first_learn = True  # reset_num_timesteps only on the very first learn (§11)
+    opp_stage_idx = 0  # index into the opponent schedule (solo phases skip it)
+
+    for phase_idx, phase in enumerate(phases):
+        # Resolve the phase's opponent pool. The solo phase has no opponents.
+        if phase.pool_kind is None:
+            opponents = None
+        else:
+            opponents = schedule.pool_for(phase.num_players, opp_stage_idx)
+            opp_stage_idx += 1
+
+        new_venv = _build_vec_env(
+            track=track_source,
+            num_players=phase.num_players,
+            opponents=opponents,
+            learner_id=learner_id if phase.num_players > learner_id else 0,
+            config=config,
+            curriculum=curriculum,
+            shaping_weight=phase.shaping_weight,
+            seed=seed + 1000 + phase_idx,
+            reward_mode=phase.reward_mode,
+            solo_finish_bonus=config.solo_finish_bonus,
+        )
+
+        if model is None:
+            # First phase: warm-start (carrying gamma) or build fresh.
+            if warm_start_path is not None:
+                model = _load_model_with_gamma(
+                    warm_start_path, new_venv, config, gamma=phase.gamma
+                )
+            else:
+                phase_cfg = dataclasses.replace(
+                    config,
+                    gamma=phase.gamma,
+                    reward_mode=phase.reward_mode,
+                    shaping_weight=phase.shaping_weight,
+                )
+                model = build_model(new_venv, phase_cfg)
+            venv = new_venv
+            cur_gamma = phase.gamma
+        elif phase.gamma != cur_gamma:
+            # Gamma boundary (§6.3): SB3 bakes gamma at construction, so reload
+            # the current weights with the new gamma onto the new env (carrying
+            # weights forward). Save the live weights to a temp checkpoint first.
+            assert venv is not None
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as tmp:
+                handoff = os.path.join(tmp, "phase_handoff")
+                model.save(handoff)
+                old_venv = venv
+                model = _load_model_with_gamma(
+                    handoff, new_venv, config, gamma=phase.gamma
+                )
+                # Carry VecNormalize stats across the reload, then drop old env.
+                if isinstance(old_venv, VecNormalize) and isinstance(
+                    new_venv, VecNormalize
+                ):
+                    if (
+                        "obs_rms" in old_venv.__dict__
+                        and "obs_rms" in new_venv.__dict__
+                    ):
+                        new_venv.obs_rms = old_venv.__dict__["obs_rms"]
+                    if (
+                        "ret_rms" in old_venv.__dict__
+                        and "ret_rms" in new_venv.__dict__
+                    ):
+                        new_venv.ret_rms = old_venv.__dict__["ret_rms"]
+                if old_venv is not new_venv:
+                    old_venv.close()
+                venv = new_venv
+            cur_gamma = phase.gamma
+        else:
+            # Same gamma: just swap the env (carries VecNormalize stats).
+            assert venv is not None
+            venv = _swap_vec_env(model, venv, new_venv)
+
+        # Re-apply the phase's reward/shaping globals in THIS process (the gate +
+        # any DummyVecEnv path read them here, not just spawned workers).
+        apply_shaping_config(
+            dataclasses.replace(
+                config,
+                reward_mode=phase.reward_mode,
+                shaping_weight=phase.shaping_weight,
+                solo_finish_bonus=config.solo_finish_bonus,
+            )
+        )
+
+        # Chunk the phase into learn/gate iterations (§6.1). The SOLO phase is
+        # ungated against the race yardstick (§10 last bullet): it trains in one
+        # uninterrupted block. Opponent phases gate after every chunk.
+        is_solo = phase.reward_mode == "solo"
+        chunk_steps = max(1, curriculum.phase1_eval_every)
+        remaining = phase.steps
+        while remaining > 0:
+            chunk = phase.steps if is_solo else min(chunk_steps, remaining)
+            model.learn(
+                total_timesteps=chunk,
+                progress_bar=False,
+                reset_num_timesteps=first_learn,
+            )
+            first_learn = False
+            remaining -= chunk
+
+            model.logger.record("phase/index", phase_idx)
+            if is_solo:
+                # No race-yardstick gate during solo; one block then move on.
+                break
+
+            result = _gate(model, venv)
+            model.logger.record("eval/gate_score", result.promote_score)
+            model.logger.record("eval/win_rate_strong", result.win_rate_strong)
+            model.logger.record("eval/win_rate_weak", result.win_rate_weak)
+            if best_score is None or result.promote_score > best_score:
+                best_score = result.promote_score
+                _save_best(model, venv)
+
+    assert model is not None and venv is not None
+
+    # Guarantee at least one best save (e.g. a solo-only phase list never gated).
+    if best_score is None:
+        best_score = _gate(model, venv).promote_score
+        _save_best(model, venv)
+
+    # The (possibly collapsed) final model goes to a SEPARATE path.
+    save_checkpoint(
+        model,
+        final_path,
+        track_name=track_name,
+        num_players=yardstick_players,
         seed=seed,
         ppo_config=config,
         curriculum_config=curriculum,

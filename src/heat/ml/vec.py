@@ -52,6 +52,8 @@ def heat_env_factory(
     shaping_progress_coef: float = 1.0,
     shaping_spinout_weight: float = 0.0,
     shaping_spinout_cap: float = 0.05,
+    reward_mode: str = "race",
+    solo_finish_bonus: float = 5.0,
     randomize_seat: bool = False,
 ) -> HeatEnv:
     """Build a fresh :class:`HeatEnv` for one (sub-)worker.
@@ -69,6 +71,10 @@ def heat_env_factory(
     spaces.SHAPING_PROGRESS_COEF = shaping_progress_coef
     spaces.SHAPING_SPINOUT_WEIGHT = shaping_spinout_weight
     spaces.SHAPING_SPINOUT_CAP = shaping_spinout_cap
+    # Sprint 8C: the reward MODE + solo finish bonus are plain str/float globals,
+    # re-applied per worker exactly like the shaping weights above.
+    spaces.REWARD_MODE = reward_mode
+    spaces.SOLO_FINISH_BONUS = solo_finish_bonus
 
     env = HeatEnv(
         track=track,
@@ -111,6 +117,8 @@ def make_vec_env(
     shaping_progress_coef: float = 1.0,
     shaping_spinout_weight: float = 0.0,
     shaping_spinout_cap: float = 0.05,
+    reward_mode: str = "race",
+    solo_finish_bonus: float = 5.0,
     randomize_seat: bool = False,
 ) -> VecEnv:
     """Build a vectorized HEAT env of ``n_envs`` sub-envs (§6C Part 1).
@@ -149,6 +157,8 @@ def make_vec_env(
             shaping_progress_coef=shaping_progress_coef,
             shaping_spinout_weight=shaping_spinout_weight,
             shaping_spinout_cap=shaping_spinout_cap,
+            reward_mode=reward_mode,
+            solo_finish_bonus=solo_finish_bonus,
             randomize_seat=randomize_seat,
         )
         for i in range(n_envs)

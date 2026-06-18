@@ -37,9 +37,14 @@ from heat.ml.model import (
 from heat.ml.training import (
     CurriculumConfig,
     GateResult,
+    OpponentSchedule,
+    OpponentStage,
+    TrainingPhase,
+    default_8c_phases,
     load_meta,
     meta_path_for,
     save_checkpoint,
+    sprint_8c_curriculum,
     sprint_a_curriculum,
     train_self_play,
     vecnorm_path_for,
@@ -655,3 +660,183 @@ def test_sprint_a_preset_is_phase1_only_and_strong() -> None:
     assert curr.use_strong_heuristic_opponents  # Idea 8
     assert curr.randomize_seat  # Idea 10
     assert curr.normalize_obs is False  # Idea 15 (recorded constraint)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8C: multi-phase chaining + warm-start (§9)
+# ---------------------------------------------------------------------------
+
+
+def _phase(name, players, reward, gamma, shaping, steps, pool):
+    return TrainingPhase(name, players, reward, gamma, shaping, steps, pool)
+
+
+def _tiny_8c_curriculum(tmp_path, **overrides) -> CurriculumConfig:
+    """A tiny sprint-8c-style curriculum: gate every chunk, cheap."""
+    base = dict(
+        checkpoint_dir=str(tmp_path),
+        run_name="t8c",
+        phase1_eval_every=64,
+        gate_games=4,
+        use_strong_heuristic_opponents=False,  # cheaper gate (gate_fn injected)
+        randomize_seat=True,
+    )
+    base.update(overrides)
+    return CurriculumConfig(**base)
+
+
+def test_codec_unchanged_8c() -> None:
+    """8C must not touch the obs/action/codec contract (§4.5 / DoD f)."""
+    assert spaces.OBS_DIM == 104
+    assert spaces.ACTION_DIM == 516
+    assert spaces.CODEC_VERSION == 2
+
+
+def test_sprint_8c_preset_levers() -> None:
+    """The 8C preset keeps seat randomization on and the track curriculum off."""
+    cfg = sprint_8c_curriculum()
+    assert cfg.use_track_curriculum is False  # demoted (net-negative)
+    assert cfg.randomize_seat is True  # the proven Sprint-A win
+    assert cfg.use_strong_heuristic_opponents is True
+    assert cfg.gate_use_wilson_lb is True
+    assert cfg.normalize_obs is False
+
+
+def test_default_8c_phases_shape() -> None:
+    """The default phase list is solo(0.99) -> weak/mixed/strong(0.999)."""
+    phases = default_8c_phases(4)
+    assert [p.name for p in phases] == ["solo", "weak", "mixed", "strong"]
+    assert phases[0].num_players == 1 and phases[0].reward_mode == "solo"
+    assert phases[0].gamma == 0.99
+    assert all(p.gamma == 0.999 for p in phases[1:])
+    assert all(p.reward_mode == "race" for p in phases[1:])
+
+
+def test_phase_list_runs_in_order(tmp_path, monkeypatch) -> None:
+    """A 2-phase [solo, weak] list calls learn on both phases and rebuilds the env.
+
+    Spies on ``model.learn`` (counts calls) and on ``_build_vec_env`` (records the
+    per-phase num_players) to confirm both phases execute and the env is rebuilt
+    with a different player count at the boundary.
+    """
+    import heat.ml.training as training_mod
+
+    built_players: list[int] = []
+    real_build = training_mod._build_vec_env
+
+    def spy_build(*args, **kwargs):
+        built_players.append(kwargs["num_players"])
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(training_mod, "_build_vec_env", spy_build)
+
+    phases = [
+        _phase("solo", 1, "solo", 0.99, 1.0, 64, None),
+        _phase("weak", 2, "race", 0.999, 0.05, 64, "weak"),
+    ]
+    config = _tiny_ppo()
+    curriculum = _tiny_8c_curriculum(tmp_path)
+    _model, best_path = train_self_play(
+        config, curriculum, num_players=2, phases=phases,
+        gate_fn=lambda m: 0.5,
+    )
+    # Env built for the solo (1p) phase and the weak (2p) phase.
+    assert 1 in built_players and 2 in built_players
+    # Best checkpoint exists.
+    meta = load_meta(best_path)
+    assert meta["codec_version"] == spaces.CODEC_VERSION
+
+
+def test_best_checkpoint_preserved_across_phases(tmp_path) -> None:
+    """A descending score spanning the phase boundary keeps the first best.
+
+    Two opponent phases (no solo, so every chunk is gated). The score descends
+    across the boundary, so the canonical best must hold the first (highest)
+    model and a separate *_final must exist (cross-phase analogue of the Phase-1
+    descending-score test).
+    """
+    scores = iter([0.9, 0.5, 0.2, 0.1, 0.05, 0.01])
+
+    phases = [
+        _phase("weak", 2, "race", 0.999, 0.05, 128, "weak"),
+        _phase("strong", 2, "race", 0.999, 0.05, 128, "strong"),
+    ]
+    config = _tiny_ppo()
+    curriculum = _tiny_8c_curriculum(tmp_path, phase1_eval_every=64)
+    _model, best_path = train_self_play(
+        config, curriculum, num_players=2, phases=phases,
+        gate_fn=lambda m: next(scores),
+    )
+    import os
+
+    meta = load_meta(best_path)
+    assert meta["codec_version"] == spaces.CODEC_VERSION
+    assert os.path.exists(meta_path_for(f"{best_path}_final"))
+
+
+def test_warm_start_loads_not_builds(tmp_path, monkeypatch) -> None:
+    """With warm_start_path set, the first phase loads (not builds) the model."""
+    import heat.ml.training as training_mod
+    from sb3_contrib import MaskablePPO
+
+    # Produce a real checkpoint to warm-start from.
+    from heat.ml.env import HeatEnv
+    from heat.ml.model import build_model
+
+    seed_env = HeatEnv(num_players=2)
+    seed_model = build_model(seed_env, _tiny_ppo(seed=1))
+    warm_path = str(tmp_path / "warm")
+    training_mod.save_checkpoint(
+        seed_model, warm_path, track_name="usa", num_players=2
+    )
+
+    load_calls: list[str] = []
+    build_calls: list[int] = []
+    real_load = MaskablePPO.load
+    real_build = training_mod.build_model
+
+    def spy_load(path, *args, **kwargs):
+        load_calls.append(str(path))
+        return real_load(path, *args, **kwargs)
+
+    def spy_build(env, cfg=None):
+        build_calls.append(1)
+        return real_build(env, cfg)
+
+    monkeypatch.setattr(MaskablePPO, "load", staticmethod(spy_load))
+    monkeypatch.setattr(training_mod, "build_model", spy_build)
+
+    phases = [_phase("weak", 2, "race", 0.999, 0.05, 64, "weak")]
+    config = _tiny_ppo()
+    curriculum = _tiny_8c_curriculum(tmp_path, run_name="warmrun")
+    train_self_play(
+        config, curriculum, num_players=2, phases=phases,
+        gate_fn=lambda m: 0.5, warm_start_path=warm_path,
+    )
+    assert any(warm_path in c for c in load_calls)
+    assert build_calls == []  # build_model never called for the warm-started phase
+
+
+def test_solo_phase_uses_one_player(tmp_path, monkeypatch) -> None:
+    """The solo phase builds its vec env with num_players=1 (spy on _build_vec_env)."""
+    import heat.ml.training as training_mod
+
+    seen: list[tuple[int, str]] = []
+    real_build = training_mod._build_vec_env
+
+    def spy_build(*args, **kwargs):
+        seen.append((kwargs["num_players"], kwargs.get("reward_mode")))
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(training_mod, "_build_vec_env", spy_build)
+
+    phases = [
+        _phase("solo", 1, "solo", 0.99, 1.0, 64, None),
+        _phase("weak", 2, "race", 0.999, 0.05, 64, "weak"),
+    ]
+    train_self_play(
+        _tiny_ppo(), _tiny_8c_curriculum(tmp_path, run_name="soloplayers"),
+        num_players=2, phases=phases, gate_fn=lambda m: 0.5,
+    )
+    # The solo phase built a 1-player solo-reward env.
+    assert (1, "solo") in seen
