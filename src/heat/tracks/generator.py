@@ -19,6 +19,7 @@ worker derives its own track from its own seed stream).
 
 from __future__ import annotations
 
+import dataclasses
 import random
 from dataclasses import dataclass
 from typing import Callable
@@ -301,3 +302,152 @@ def track_sampler(
             episode seeds).
     """
     return TrackSampler(params, base_seed=base_seed)
+
+
+# ---------------------------------------------------------------------------
+# Step-aware difficulty curriculum (Sprint B, Idea 2)
+# ---------------------------------------------------------------------------
+
+
+def easy_track_params() -> TrackGenParams:
+    """The "easy" curriculum endpoint: short, gentle, single-lap tracks.
+
+    Narrow distribution the curriculum starts from before widening to the full
+    default :class:`TrackGenParams` over the schedule horizon. ``length_range``
+    stays comfortably above ``MIN_TRACK_LENGTH`` (= 8) so every interpolated
+    range constructs and the generate-then-validate accept rate stays high.
+    """
+    return TrackGenParams(
+        length_range=(30, 40),
+        num_corners_range=(2, 3),
+        laps=1,
+        corner_len_range=(1, 1),
+        speed_limit_choices=(2, 3, 4),
+    )
+
+
+@dataclass(frozen=True)
+class CurriculumSchedule:
+    """Interpolate :class:`TrackGenParams` from ``easy`` to ``full`` over a step
+    horizon (Sprint B Idea 2).
+
+    ``frac = clip(step / horizon_steps, 0, 1)`` drives a linear interpolation of
+    the tunable bounds; integer range endpoints are rounded and ``laps`` steps up
+    at the rounded threshold. The non-interpolated fields are taken from
+    ``full`` (so e.g. ``speed_limit_choices`` snap to the full set once ramping
+    starts past 0 -- the easy gentler choices only apply exactly at step 0). The
+    schedule is a frozen dataclass of two frozen :class:`TrackGenParams`, so it
+    is hashable and picklable.
+
+    Each ``params_at`` result is a fresh ``TrackGenParams`` whose
+    ``__post_init__`` validates the interpolated bounds; the design keeps the
+    easy endpoint above ``MIN_TRACK_LENGTH`` and never inverts a range, so every
+    fraction yields a constructible, generatable params object.
+    """
+
+    easy: TrackGenParams
+    full: TrackGenParams
+    horizon_steps: int
+
+    def fraction_at(self, step: int) -> float:
+        """The clipped ramp fraction ``frac in [0, 1]`` for a global step."""
+        if self.horizon_steps <= 0:
+            return 1.0
+        return min(1.0, max(0.0, step / self.horizon_steps))
+
+    def params_at(self, step: int) -> TrackGenParams:
+        """The interpolated :class:`TrackGenParams` for a global training step.
+
+        At ``step <= 0`` returns the easy-equivalent bounds; at
+        ``step >= horizon_steps`` returns the full default; clamps beyond the
+        horizon. Integer ranges are rounded; ``laps`` steps up at its threshold.
+        """
+        frac = self.fraction_at(step)
+
+        def lerp_range(a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+            lo = round(a[0] + (b[0] - a[0]) * frac)
+            hi = round(a[1] + (b[1] - a[1]) * frac)
+            return (lo, hi)
+
+        laps = round(self.easy.laps + (self.full.laps - self.easy.laps) * frac)
+        return dataclasses.replace(
+            self.full,
+            length_range=lerp_range(self.easy.length_range, self.full.length_range),
+            num_corners_range=lerp_range(
+                self.easy.num_corners_range, self.full.num_corners_range
+            ),
+            corner_len_range=lerp_range(
+                self.easy.corner_len_range, self.full.corner_len_range
+            ),
+            laps=laps,
+        )
+
+
+def default_curriculum_schedule(horizon_steps: int) -> CurriculumSchedule:
+    """A :class:`CurriculumSchedule` from :func:`easy_track_params` to the full
+    default :class:`TrackGenParams` over ``horizon_steps``."""
+    return CurriculumSchedule(
+        easy=easy_track_params(),
+        full=TrackGenParams(),
+        horizon_steps=horizon_steps,
+    )
+
+
+class StepAwareTrackSampler:
+    """Picklable ``sampler(seed) -> Track`` whose difficulty follows a
+    :class:`CurriculumSchedule` and a mutable current-step counter (Sprint B
+    Idea 2).
+
+    A top-level class (no closures) so it survives ``SubprocVecEnv`` ``spawn``
+    pickling exactly like :class:`TrackSampler`. Each ``__call__`` rebuilds the
+    effective :class:`TrackGenParams` from ``schedule.params_at(self._step)``,
+    then derives a track seed identically to :class:`TrackSampler` (so
+    "same seed -> same track" holds *for a fixed step*).
+
+    Cross-process caveat: under ``SubprocVecEnv`` the sampler is pickled into the
+    workers, so :meth:`set_step` on the main-process object does NOT reach them.
+    The training loop therefore drives the curriculum by **rebuilding the vec env
+    at stage boundaries** with a fresh, step-pinned sampler (process-safe staged
+    rebuilds), rather than relying on a live counter crossing the process
+    boundary. ``set_step`` remains available for the single-process
+    (``DummyVecEnv``) path and for tests.
+
+    Args:
+        schedule: the easy->full difficulty schedule.
+        base_seed: offset mixed into the derived track seed (as in
+            :class:`TrackSampler`).
+        step: the initial global training step (pins the difficulty for staged
+            rebuilds; a fresh sampler per stage carries that stage's step).
+    """
+
+    def __init__(
+        self,
+        schedule: CurriculumSchedule,
+        *,
+        base_seed: int = 0,
+        step: int = 0,
+    ) -> None:
+        self.schedule = schedule
+        self.base_seed = base_seed
+        self._step = int(step)
+        self._fallback_rng = random.Random(base_seed)
+
+    def set_step(self, step: int) -> None:
+        """Update the current global training step (single-process path / tests).
+
+        Under ``SubprocVecEnv`` this does not reach pickled workers; the training
+        loop uses staged env rebuilds for process-safe curriculum progression.
+        """
+        self._step = int(step)
+
+    def params_at_current(self) -> TrackGenParams:
+        """The effective :class:`TrackGenParams` at the current step."""
+        return self.schedule.params_at(self._step)
+
+    def __call__(self, seed: int | None) -> Track:
+        params = self.schedule.params_at(self._step)
+        if seed is None:
+            track_seed = self._fallback_rng.randrange(2**31)
+        else:
+            track_seed = (int(seed) + self.base_seed) % (2**31)
+        return generate_track(track_seed, params)

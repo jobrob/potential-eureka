@@ -31,6 +31,7 @@ import functools
 from typing import Mapping
 
 from heat.agents.ml_agent import MLAgent
+from heat.agents.strong_heuristic import StrongHeuristicAgent
 from heat.engine.game import Agent
 from heat.models.track import Track
 from heat.simulation.runner import (
@@ -91,6 +92,43 @@ def ml_agent_factory(
     )
 
 
+def _make_strong_heuristic(
+    player_id: int,
+    seed: int | None,
+    name: str | None,
+    strength: int,
+) -> Agent:
+    """Top-level (picklable) constructor for a :class:`StrongHeuristicAgent`.
+
+    Mirrors :func:`_make_ml_agent` / ``runner._make_strong_heuristic``: a plain
+    top-level function (no lambda/closure) so the factory pickles into
+    ``ProcessPoolExecutor`` workers. The agent is deterministic given the state,
+    so ``seed`` is ignored here (the gate / eval is order-independent).
+    """
+    agent_name = name if name is not None else f"StrongHeuristic-{player_id}"
+    return StrongHeuristicAgent(name=agent_name, strength=strength)
+
+
+def strong_heuristic_agent_factory(
+    strength: int = 2,
+    name: str | None = None,
+) -> AgentFactory:
+    """Return a picklable factory producing :class:`StrongHeuristicAgent`s.
+
+    Mirrors :func:`heuristic_agent_factory`: the returned callable is a
+    :func:`functools.partial` of a top-level constructor (never a lambda), so it
+    pickles into ``run_batch(parallel=True)`` workers. ``strength`` defaults to
+    ``2`` -- the same default rung :func:`heat.ml.training._scripted_opponents`
+    instantiates the strong scripted pool at, so a gate built from this factory
+    scores against the opponent the learner actually trains against (Idea 8).
+    """
+    return functools.partial(
+        _make_strong_heuristic,
+        strength=strength,
+        name=name,
+    )
+
+
 def evaluate_ml(
     model_path: str,
     *,
@@ -101,11 +139,13 @@ def evaluate_ml(
     seed: int | None = 0,
     parallel: bool = False,
     progress: bool = False,
+    learner_seat: int = 0,
 ) -> dict[str, AgentStats]:
     """Evaluate a trained checkpoint vs an opponent over a batch of games.
 
-    Seat 0 is the :class:`MLAgent`; the remaining ``num_players - 1`` seats are
-    built from ``opponent_factory`` (default: :func:`heuristic_agent_factory`).
+    The :class:`MLAgent` sits at ``learner_seat`` (default seat 0); the remaining
+    ``num_players - 1`` seats are built from ``opponent_factory`` (default:
+    :func:`heuristic_agent_factory`).
 
     Args:
         model_path: Path to the SB3 checkpoint (``.zip``, with sidecar).
@@ -119,6 +159,10 @@ def evaluate_ml(
         parallel: Run games across worker processes. Defaults to ``False`` (§6.5
             -- per-worker SB3 model reload usually outweighs the speedup).
         progress: Show a ``tqdm`` progress bar if installed.
+        learner_seat: The seat the :class:`MLAgent` occupies (default 0). The
+            other seats are filled by ``opponent_factory``. Sweeping this over
+            ``range(num_players)`` measures whether the policy is seat-robust
+            (Idea 10) rather than overfit to the front seat.
 
     Returns:
         The ``per_agent`` mapping from :func:`aggregate_stats` (grouped by
@@ -127,6 +171,10 @@ def evaluate_ml(
     """
     if not (2 <= num_players <= 6):
         raise ValueError(f"num_players must be 2..6, got {num_players}")
+    if not (0 <= learner_seat < num_players):
+        raise ValueError(
+            f"learner_seat {learner_seat} out of range for {num_players} players"
+        )
 
     if opponent_factory is None:
         opponent_factory = heuristic_agent_factory()
@@ -136,8 +184,8 @@ def evaluate_ml(
     elif isinstance(track, str):
         track = load_track_by_name(track)
 
-    factories: list[AgentFactory] = [ml_agent_factory(model_path)]
-    factories += [opponent_factory] * (num_players - 1)
+    factories: list[AgentFactory] = [opponent_factory] * num_players
+    factories[learner_seat] = ml_agent_factory(model_path)
 
     outcomes: list[GameOutcome] = run_batch(
         track,

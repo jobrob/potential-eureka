@@ -52,7 +52,14 @@ from heat.models.track import Track
 from heat.ml import spaces
 from heat.ml.action_codec import decode_action, legal_action_mask
 from heat.ml.env import HeatEnv, TrackSource, _default_track
-from heat.tracks.generator import TrackGenParams, TrackSampler, generate_track
+from heat.tracks.generator import (
+    CurriculumSchedule,
+    StepAwareTrackSampler,
+    TrackGenParams,
+    TrackSampler,
+    default_curriculum_schedule,
+    generate_track,
+)
 from heat.ml.features import encode_observation
 from heat.ml.league import League, LeagueEntry
 from heat.ml.model import (
@@ -62,6 +69,7 @@ from heat.ml.model import (
     resolve_device,
 )
 from heat.ml.vec import make_vec_env
+from heat.simulation.stats import wilson_interval
 
 #: Suffix for the SB3 archive and the JSON sidecar.
 _META_SUFFIX = ".meta.json"
@@ -411,10 +419,182 @@ class CurriculumConfig:
     #: strength bar. Off by default so existing runs are unchanged.
     use_strong_heuristic_opponents: bool = False
 
+    # --- Sprint A: trustworthy & measurable run ---
+    #: Steps per Phase-1 learn/gate chunk (Idea 7). The held-out gate runs after
+    #: each chunk, so a Phase-1-heavy run (Idea 4: ``phase1_steps ==
+    #: total_timesteps``) still periodically preserves the BEST checkpoint rather
+    #: than keeping the (possibly regressed) final weights. Set so the periodic
+    #: eval does not dominate wall-clock -- tie it to ``gate_games``. A value of 0
+    #: or ``>= phase1_steps`` collapses Phase 1 to a single gate (the legacy
+    #: one-shot behavior).
+    phase1_eval_every: int = 50_000
+    #: When True, the promotion criterion is the Wilson LOWER bound of the pooled
+    #: held-out ``(wins, games)`` vs the trained-against opponent, not the point
+    #: estimate (Idea 9). When False the point estimate is used, keeping the
+    #: legacy behavior for old runs. ``True`` is the default so a lucky, low-game
+    #: checkpoint cannot displace a genuinely-better one.
+    gate_use_wilson_lb: bool = True
+    #: Randomize the learner's start seat each episode (Idea 10). Off by default so
+    #: existing fixed-seat runs are byte-for-byte unchanged. When on, the obs is
+    #: unchanged (opponents are encoded relatively) -- only the engine seat the
+    #: policy drives moves, removing the seat-0 overfit.
+    randomize_seat: bool = False
+    #: Broaden the Phase-1 strong-opponent pool (strengths 2 & 3 + heuristic +
+    #: random) for curriculum variety (Idea 6). Only takes effect together with
+    #: ``use_strong_heuristic_opponents``. Off by default.
+    broaden_phase1_mix: bool = False
+
+    # --- Sprint B: step-aware track-difficulty curriculum (Idea 2) ---
+    #: Enable the step-aware track-difficulty curriculum: training tracks start
+    #: from a narrow "easy" distribution (short, few corners, 1 lap) and widen to
+    #: the full generated distribution over ``curriculum_horizon_steps``. Off by
+    #: default so existing generated-track runs are byte-for-byte unchanged. Only
+    #: takes effect when ``track is None`` (generated-track training); a pinned
+    #: fixed Track is left untouched.
+    use_track_curriculum: bool = False
+    #: Steps over which difficulty ramps easy -> full (the schedule horizon).
+    curriculum_horizon_steps: int = 1_000_000
+    #: Curriculum shape: "linear" (continuous ramp, realised as fine-grained
+    #: staged rebuilds) or "staged" (a few discrete difficulty stages). Both are
+    #: implemented as process-safe staged vec-env rebuilds (see §9 resolution);
+    #: "linear" simply uses more stages.
+    curriculum_shape: str = "linear"
+    #: Number of stages when ``curriculum_shape == "staged"`` (and the stage count
+    #: cap for "linear"). The Phase-1 chunk loop rebuilds the training env with a
+    #: fresh step-pinned sampler at each stage boundary.
+    curriculum_stages: int = 4
+
+    # NOTE (Idea 15, recorded constraint -- NOT a knob to flip): keep
+    # ``normalize_obs = False``. The obs is already bounded to [-1, 1] by
+    # construction (features.py clipping) and the gate uses the real
+    # un-normalized win-rate, so observation normalization buys nothing and would
+    # only risk a train/inference normalization-stats mismatch.
+
+
+class _StrongHeuristicFactory:
+    """A picklable zero-arg builder for a :class:`StrongHeuristicAgent(strength)`.
+
+    Used in place of a lambda (which Windows ``spawn`` cannot pickle) when the
+    broadened Phase-1 pool (Idea 6) needs a strength-3 seat: the env instantiates
+    opponent specs by calling them with no args, but ``StrongHeuristicAgent``
+    takes ``strength`` as a keyword. Carrying it on a tiny top-level callable
+    keeps the spec picklable across a ``SubprocVecEnv`` boundary.
+    """
+
+    def __init__(self, strength: int) -> None:
+        self.strength = strength
+
+    def __call__(self) -> StrongHeuristicAgent:
+        return StrongHeuristicAgent(strength=self.strength)
+
+
+def _broadened_strong_pool(n_opp: int) -> list:
+    """A varied strong Phase-1 opponent pool of exactly ``n_opp`` entries (Idea 6).
+
+    Cycles the template ``[Strong(3), Strong(2), Heuristic, Random]`` to fill the
+    available opponent seats, so the learner faces a mix of difficulty rungs plus
+    exploration pressure rather than a single repeated class. Each entry is a
+    zero-arg picklable callable (a class or :class:`_StrongHeuristicFactory`).
+    """
+    template: list = [
+        _StrongHeuristicFactory(3),
+        _StrongHeuristicFactory(2),
+        HeuristicAgent,
+        RandomAgent,
+    ]
+    return [template[i % len(template)] for i in range(n_opp)]
+
+
+def sprint_a_curriculum(
+    total_timesteps: int = 2_000_000,
+    *,
+    run_name: str = "heat_ppo_sprintA",
+    checkpoint_dir: str = "checkpoints",
+) -> CurriculumConfig:
+    """The Sprint A "trustworthy & measurable run" curriculum preset (§5 task 8).
+
+    Bundles the Sprint-A levers into one launch config so the held-out gate is
+    honest before any long run / Sprint B:
+
+    * **Idea 4** -- Phase-1-heavy: ``phase1_steps == total_timesteps`` (Phase 2
+      skipped entirely), so the periodic Phase-1 gate (Idea 7) is the ONLY thing
+      preserving the best model.
+    * **Idea 9** -- ``gate_games`` raised to 120 (40 per held-out track) so the
+      Wilson lower bound is usable, with ``gate_use_wilson_lb=True``.
+    * **Idea 7** -- ``phase1_eval_every`` set to a sensible cadence relative to
+      the raised game count (tie cadence to cost, §8).
+    * **Idea 8 / 6** -- ``use_strong_heuristic_opponents=True`` (+ broadened mix)
+      so we gate against the opponent we train against.
+    * **Idea 10** -- ``randomize_seat=True`` to remove the seat-0 overfit.
+    * **Idea 15** -- ``normalize_obs=False`` (recorded constraint, kept off).
+
+    The non-zero ``shaping_weight`` lives on the :class:`PPOConfig` (it is a
+    model/env knob, applied by ``apply_shaping_config``), so the run script pairs
+    this with ``PPOConfig(shaping_weight=...)``.
+    """
+    return CurriculumConfig(
+        total_timesteps=total_timesteps,
+        phase1_steps=total_timesteps,  # Idea 4: Phase-1-only run
+        checkpoint_dir=checkpoint_dir,
+        run_name=run_name,
+        # Idea 7: periodic Phase-1 gate cadence (tie to the raised gate_games).
+        phase1_eval_every=100_000,
+        # Idea 9: enough games for a usable Wilson LB (40 / held-out track).
+        gate_games=120,
+        gate_use_wilson_lb=True,
+        # Idea 8 / 6: gate against (and broaden) the trained-against opponent.
+        use_strong_heuristic_opponents=True,
+        broaden_phase1_mix=True,
+        # Idea 10: remove the seat-0 overfit.
+        randomize_seat=True,
+        # Idea 15 (recorded constraint): keep observation normalization OFF.
+        normalize_obs=False,
+        normalize_reward=False,
+    )
+
+
+def sprint_b_curriculum(
+    total_timesteps: int = 2_000_000,
+    *,
+    run_name: str = "heat_ppo_sprintB",
+    checkpoint_dir: str = "checkpoints",
+    curriculum_stages: int = 4,
+) -> CurriculumConfig:
+    """The Sprint B "cheap whole-track obs + curriculum baseline" preset.
+
+    Builds on :func:`sprint_a_curriculum`: keeps the Sprint-A trustworthy gate
+    (strong opponents, Wilson LB, seat randomization, Phase-1-heavy chunked
+    learn/gate loop) and adds the Sprint B step-aware track-difficulty curriculum
+    (Idea 2) on top of the Option-A whole-track obs (which is automatic via the
+    v2 codec -- no flag needed). The curriculum horizon is tied to
+    ``total_timesteps`` so difficulty ramps easy -> full across (essentially) the
+    whole Phase-1-only run.
+
+    Per the Sprint B spec:
+      * Option-A obs: automatic (CODEC_VERSION == 2; OBS_DIM == 104).
+      * Curriculum: ON (``use_track_curriculum=True``), horizon == total steps.
+      * Sprint-A trustworthy gate: ON (inherited).
+      * ``normalize_obs=False`` (Idea 15 recorded constraint).
+      * ``phase1_steps == total_timesteps`` (Phase-1-only; the periodic gate is
+        the only thing preserving the best checkpoint).
+    """
+    cfg = sprint_a_curriculum(
+        total_timesteps,
+        run_name=run_name,
+        checkpoint_dir=checkpoint_dir,
+    )
+    return dataclasses.replace(
+        cfg,
+        use_track_curriculum=True,
+        curriculum_horizon_steps=total_timesteps,
+        curriculum_shape="linear",
+        curriculum_stages=curriculum_stages,
+    )
+
 
 def _scripted_opponents(
-    num_players: int, *, use_strong: bool = False
-) -> list[type[BaseAgent]]:
+    num_players: int, *, use_strong: bool = False, broaden_mix: bool = False
+) -> list:
     """Phase-1 opponent factories.
 
     Default pool is mostly :class:`HeuristicAgent` with one :class:`RandomAgent`
@@ -422,12 +602,21 @@ def _scripted_opponents(
     upgraded to :class:`StrongHeuristicAgent` (the relative-objective strength
     bar, default ``strength=2``) so the learner trains against a far harder
     scripted curriculum; one ``RandomAgent`` seat is retained for exploration.
-    The entries are zero-arg callables (the class itself), matching how the env
-    instantiates non-snapshot opponent specs.
+
+    When ``use_strong`` *and* ``broaden_mix`` (Idea 6), the pool is broadened to
+    a mix of ``StrongHeuristicAgent`` strengths 2 & 3, a plain ``HeuristicAgent``,
+    and a ``RandomAgent`` (cycled to fill the seats) for curriculum variety.
+    ``broaden_mix`` is a no-op without ``use_strong`` so non-strong runs are
+    unchanged.
+
+    The entries are zero-arg callables (a class, or a small picklable factory),
+    matching how the env instantiates non-snapshot opponent specs.
     """
     n_opp = num_players - 1
+    if use_strong and broaden_mix:
+        return _broadened_strong_pool(n_opp)
     base: type[BaseAgent] = StrongHeuristicAgent if use_strong else HeuristicAgent
-    pool: list[type[BaseAgent]] = [base] * n_opp
+    pool: list = [base] * n_opp
     if n_opp >= 1:
         pool[-1] = RandomAgent  # inject some exploration pressure
     return pool
@@ -489,6 +678,9 @@ def _build_vec_env(
         seed=seed,
         shaping_weight=shaping_weight,
         shaping_progress_coef=config.shaping_progress_coef,
+        shaping_spinout_weight=config.shaping_spinout_weight,
+        shaping_spinout_cap=config.shaping_spinout_cap,
+        randomize_seat=curriculum.randomize_seat,
     )
     if curriculum.normalize_reward or curriculum.normalize_obs:
         venv = VecNormalize(
@@ -586,15 +778,30 @@ def smoke_train(
 _HOLDOUT_TRACK_SEEDS: tuple[int, ...] = (90_000_001, 90_000_002, 90_000_003)
 
 
-def _resolve_track_source(track: TrackSource | None, seed: int) -> TrackSource:
+def _resolve_track_source(
+    track: TrackSource | None,
+    seed: int,
+    curriculum: "CurriculumConfig | None" = None,
+) -> TrackSource:
     """Resolve the training track source.
 
     ``None`` (the default) -> a :class:`TrackSampler` that draws a fresh
     generated track every episode (training on procedurally generated tracks is
     now the default, §6A). A fixed :class:`Track` pins one specific track; an
     already-built sampler callable is passed through unchanged.
+
+    When ``curriculum.use_track_curriculum`` and ``track is None`` (Sprint B Idea
+    2), return a step-aware :class:`StepAwareTrackSampler` pinned to step 0
+    instead; the Phase-1 chunk loop advances its step by rebuilding the vec env
+    at stage boundaries (process-safe staged rebuilds). The curriculum only
+    applies to generated-track training -- a pinned fixed Track is left untouched.
     """
     if track is None:
+        if curriculum is not None and curriculum.use_track_curriculum:
+            schedule = default_curriculum_schedule(
+                curriculum.curriculum_horizon_steps
+            )
+            return StepAwareTrackSampler(schedule, base_seed=seed, step=0)
         return TrackSampler(base_seed=seed)
     return track
 
@@ -602,6 +809,34 @@ def _resolve_track_source(track: TrackSource | None, seed: int) -> TrackSource:
 def _track_label(track_source: TrackSource) -> str:
     """Checkpoint-metadata label for a track source (samplers are 'generated')."""
     return track_source.name if isinstance(track_source, Track) else "generated"
+
+
+def _curriculum_stage_index(step: int, horizon: int, n_stages: int) -> int:
+    """Discrete curriculum stage (0..n_stages-1) for a global ``step`` (Sprint B).
+
+    Maps the [0, horizon] ramp into ``n_stages`` equal bands; steps at/after the
+    horizon clamp to the final (full-difficulty) stage. Used to decide when the
+    Phase-1 chunk loop must rebuild the training vec env with a harder
+    step-pinned sampler (process-safe staged rebuilds; see §9 resolution).
+    """
+    n_stages = max(1, n_stages)
+    if horizon <= 0:
+        return n_stages - 1
+    frac = min(1.0, max(0.0, step / horizon))
+    return min(n_stages - 1, int(frac * n_stages))
+
+
+def _curriculum_stage_step(stage: int, horizon: int, n_stages: int) -> int:
+    """Representative global step for a curriculum ``stage`` (Sprint B).
+
+    Returns the step at the *start* of the stage's band, so a fresh step-pinned
+    :class:`StepAwareTrackSampler` built for the stage uses that band's
+    difficulty. The final stage maps to ``horizon`` (full difficulty).
+    """
+    n_stages = max(1, n_stages)
+    if stage >= n_stages - 1:
+        return horizon
+    return round(stage * horizon / n_stages)
 
 
 def _gate_tracks(track_source: TrackSource) -> list[Track]:
@@ -616,6 +851,76 @@ def _gate_tracks(track_source: TrackSource) -> list[Track]:
     return [generate_track(s, name=f"holdout-{s}") for s in _HOLDOUT_TRACK_SEEDS]
 
 
+@dataclass
+class GateResult:
+    """Outcome of one held-out eval gate (Sprint A, Ideas 8/9).
+
+    The gate now reports BOTH the trained-against (strong) win-rate and the weak
+    ``HeuristicAgent`` win-rate, and promotes on the Wilson lower bound of the
+    pooled ``(wins, games)`` against the trained-against opponent so a lucky,
+    low-game checkpoint cannot displace a genuinely-better one.
+
+    Attributes:
+        win_rate_strong: Pooled point-estimate win-rate vs the trained-against
+            pool (the strong heuristic when ``use_strong_heuristic_opponents``,
+            else the weak heuristic).
+        win_rate_weak: Pooled point-estimate win-rate vs the weak
+            ``HeuristicAgent`` (reporting only).
+        wilson_lb_strong: Wilson 95% LOWER bound of the pooled strong
+            ``(wins, games)`` -- the promotion criterion (Idea 9).
+        games_strong: Total games played in the strong pass (>= 0).
+    """
+
+    win_rate_strong: float
+    win_rate_weak: float
+    wilson_lb_strong: float
+    games_strong: int
+
+    @property
+    def promote_score(self) -> float:
+        """The scalar the best-checkpoint logic compares (Idea 9 Wilson LB)."""
+        return self.wilson_lb_strong
+
+
+def _pooled_win_counts(
+    gate_path: str,
+    *,
+    gate_tracks: list[Track],
+    per_track_games: int,
+    num_players: int,
+    seed: int,
+    opponent_factory,
+) -> tuple[int, int]:
+    """Pool ``(wins, games)`` for the MLAgent across the held-out gate track(s).
+
+    Aggregates integer ``AgentStats.wins`` / ``AgentStats.games_played`` (not a
+    mean of per-track rates) so the pooled counts can feed
+    :func:`wilson_interval` directly (Idea 9). ``opponent_factory`` selects the
+    opponent the win-rate is measured against (Idea 8).
+    """
+    from heat.ml.evaluate import evaluate_ml
+
+    total_wins = 0
+    total_games = 0
+    for i, gt in enumerate(gate_tracks):
+        per_agent = evaluate_ml(
+            gate_path,
+            num_games=per_track_games,
+            num_players=num_players,
+            track=gt,
+            seed=seed + i,
+            parallel=False,
+            opponent_factory=opponent_factory,
+        )
+        ml_stats = per_agent.get("MLAgent")
+        if ml_stats is not None:
+            total_wins += int(ml_stats.wins)
+            total_games += int(ml_stats.games_played)
+        else:
+            total_games += per_track_games
+    return total_wins, total_games
+
+
 def _gate_score(
     model: MaskablePPO,
     *,
@@ -625,27 +930,46 @@ def _gate_score(
     seed: int,
     vec_env: VecEnv | None = None,
     normalize: dict | None = None,
-) -> float:
-    """Evaluate the live model's win-rate vs the scripted pool (the §2.1 gate).
+) -> GateResult:
+    """Evaluate the live model on the held-out gate (Ideas 8/9; §2.1 fallback).
 
     Falls back to the existing :func:`heat.ml.evaluate.evaluate_ml` (the design's
-    explicit fallback when 6B's richer eval is absent — **no 6B symbols are
+    explicit fallback when 6B's richer eval is absent -- **no 6B symbols are
     imported**). The model is written to a temp checkpoint and evaluated as an
-    :class:`heat.agents.ml_agent.MLAgent` over a few games; returns the MLAgent
-    win-rate in ``[0, 1]``. The gate uses the **real (un-normalized) win-rate**,
-    so it is immune to ``VecNormalize`` reward scaling (§2.6 caveat). When the
-    run normalizes *observations*, the stats sidecar is written next to the
-    temp checkpoint so the gate's ``MLAgent`` applies the same obs normalization
-    the policy was trained under.
+    :class:`heat.agents.ml_agent.MLAgent` over a few games per held-out track.
+
+    Sprint A changes (vs the 6C point-estimate gate):
+
+    * **Idea 8** -- score against the opponent we actually train against. When
+      ``use_strong_heuristic_opponents``, the strong pass uses
+      :func:`heat.ml.evaluate.strong_heuristic_agent_factory`; a separate weak
+      pass (vs the default ``HeuristicAgent``) is reported alongside.
+    * **Idea 9** -- pool wins/games across the held-out track(s) and promote on
+      the Wilson LOWER bound of the pooled strong counts (when
+      ``gate_use_wilson_lb``), not the point estimate.
+
+    The gate uses the **real (un-normalized) win-rate**, so it is immune to
+    ``VecNormalize`` reward scaling (§2.6 caveat). When the run normalizes
+    *observations*, the stats sidecar is written next to the temp checkpoint so
+    the gate's ``MLAgent`` applies the same obs normalization the policy was
+    trained under.
     """
     import tempfile
 
-    from heat.ml.evaluate import evaluate_ml
+    from heat.ml.evaluate import strong_heuristic_agent_factory
 
     gate_tracks = _gate_tracks(track) if track is not None else _gate_tracks(
         TrackSampler(base_seed=seed)
     )
     per_track_games = max(1, curriculum.gate_games // len(gate_tracks))
+
+    # The trained-against opponent (Idea 8): the strong heuristic when the
+    # curriculum trains vs it, else the same weak heuristic the weak pass uses.
+    strong_factory = (
+        strong_heuristic_agent_factory()
+        if curriculum.use_strong_heuristic_opponents
+        else None
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         gate_path = os.path.join(tmp, "gate_model")
@@ -659,22 +983,47 @@ def _gate_score(
             normalize=normalize,
             vec_env=vec_env,
         )
-        # Average the win-rate over the gate track(s): a single fixed track for a
-        # pinned run, or the held-out generated set for generated-track training.
-        rates: list[float] = []
-        for i, gt in enumerate(gate_tracks):
-            per_agent = evaluate_ml(
-                gate_path,
-                num_games=per_track_games,
-                num_players=num_players,
-                track=gt,
-                seed=seed + i,
-                parallel=False,
-            )
-            ml_stats = per_agent.get("MLAgent")
-            rates.append(float(ml_stats.win_rate) if ml_stats is not None else 0.0)
 
-    return sum(rates) / len(rates) if rates else 0.0
+        # Strong pass: pooled (wins, games) vs the trained-against opponent.
+        strong_wins, strong_games = _pooled_win_counts(
+            gate_path,
+            gate_tracks=gate_tracks,
+            per_track_games=per_track_games,
+            num_players=num_players,
+            seed=seed,
+            opponent_factory=strong_factory,
+        )
+        win_rate_strong = strong_wins / strong_games if strong_games else 0.0
+
+        # Weak pass (reporting): pooled win-rate vs the weak HeuristicAgent. When
+        # the curriculum is not strong, the strong pass already IS the weak pass,
+        # so reuse its numbers rather than paying for a second batch.
+        if strong_factory is None:
+            win_rate_weak = win_rate_strong
+        else:
+            weak_wins, weak_games = _pooled_win_counts(
+                gate_path,
+                gate_tracks=gate_tracks,
+                per_track_games=per_track_games,
+                num_players=num_players,
+                seed=seed,
+                opponent_factory=None,
+            )
+            win_rate_weak = weak_wins / weak_games if weak_games else 0.0
+
+    if curriculum.gate_use_wilson_lb:
+        wilson_lb_strong, _ = wilson_interval(strong_wins, strong_games)
+    else:
+        # Legacy point-estimate promotion: the LB field carries the point value
+        # so promote_score stays a single comparable scalar.
+        wilson_lb_strong = win_rate_strong
+
+    return GateResult(
+        win_rate_strong=win_rate_strong,
+        win_rate_weak=win_rate_weak,
+        wilson_lb_strong=wilson_lb_strong,
+        games_strong=strong_games,
+    )
 
 
 def train_self_play(
@@ -717,8 +1066,10 @@ def train_self_play(
     os.makedirs(curriculum.checkpoint_dir, exist_ok=True)
     seed = config.seed if config.seed is not None else 0
 
-    # Default to generated tracks (a sampler); a fixed Track pins one track.
-    track_source = _resolve_track_source(track, seed)
+    # Default to generated tracks (a sampler); a fixed Track pins one track. With
+    # the Sprint B curriculum on, this is a StepAwareTrackSampler the Phase-1
+    # chunk loop advances via staged vec-env rebuilds.
+    track_source = _resolve_track_source(track, seed, curriculum)
 
     best_path = os.path.join(curriculum.checkpoint_dir, curriculum.run_name)
     final_path = os.path.join(
@@ -727,9 +1078,18 @@ def train_self_play(
     track_name = _track_label(track_source)
     norm_meta = _normalize_meta(curriculum)
 
-    def _gate(m: MaskablePPO, venv: VecEnv | None = None) -> float:
+    def _gate(m: MaskablePPO, venv: VecEnv | None = None) -> GateResult:
         if gate_fn is not None:
-            return float(gate_fn(m))
+            # Tests inject ``gate_fn=lambda m: <float>`` (a model -> float). Wrap
+            # the float into a GateResult so the rest of the loop (which keys off
+            # ``promote_score`` + the strong/weak split) is unchanged.
+            s = float(gate_fn(m))
+            return GateResult(
+                win_rate_strong=s,
+                win_rate_weak=s,
+                wilson_lb_strong=s,
+                games_strong=0,
+            )
         return _gate_score(
             m,
             curriculum=curriculum,
@@ -754,10 +1114,12 @@ def train_self_play(
             vec_env=venv,
         )
 
-    # --- Phase 1: scripted opponents ---
+    # --- Phase 1: scripted opponents (chunked + periodically gated, Idea 7) ---
     apply_shaping_config(config)  # base shaping; the schedule overrides per-chunk
     scripted = _scripted_opponents(
-        num_players, use_strong=curriculum.use_strong_heuristic_opponents
+        num_players,
+        use_strong=curriculum.use_strong_heuristic_opponents,
+        broaden_mix=curriculum.broaden_phase1_mix,
     )
     venv = _build_vec_env(
         track=track_source,
@@ -770,13 +1132,88 @@ def train_self_play(
         seed=seed,
     )
     model = build_model(venv, config)
-    model.learn(total_timesteps=curriculum.phase1_steps, progress_bar=False)
 
-    # Establish the Phase-1 baseline as the first "best" — the model we must
-    # never lose. This is the safety net (§2.1): even a fully collapsing Phase 2
-    # cannot overwrite this checkpoint with a worse one.
-    best_score = _gate(model, venv)
-    _save_best(model, venv)
+    # Chunk Phase 1 into ``phase1_eval_every`` learn/gate iterations so a
+    # Phase-1-heavy run (Idea 4) still preserves the BEST held-out checkpoint, not
+    # the (possibly regressed) final weights. After each chunk: run the held-out
+    # gate, log the strong/weak split + promotion score to TensorBoard, and
+    # overwrite the canonical best checkpoint only when ``promote_score`` strictly
+    # improves (Idea 9 Wilson LB). ``best_score`` is the running best promotion
+    # score; ``None`` until the first gate so the first chunk always saves.
+    best_score: float | None = None
+    p1_remaining = curriculum.phase1_steps
+    p1_step = max(1, curriculum.phase1_eval_every)
+    p1_chunk_idx = 0
+
+    # Sprint B step-aware curriculum (Idea 2): when the training source is a
+    # StepAwareTrackSampler, the global step does NOT reach SubprocVecEnv workers
+    # through the pickled sampler. So we drive difficulty by REBUILDING the
+    # training vec env at curriculum stage boundaries with a fresh, step-pinned
+    # sampler (process-safe staged rebuilds). The gate's ``track_source`` keeps
+    # the original sampler -- gating always uses the fixed full-difficulty
+    # held-out set (``_gate_tracks``), so the gate is comparable across stages.
+    use_curriculum = isinstance(track_source, StepAwareTrackSampler)
+    cur_stage = 0
+    cur_horizon = curriculum.curriculum_horizon_steps
+    cur_stages = max(1, curriculum.curriculum_stages)
+    # The Phase-1 env was already built from ``track_source`` (a
+    # StepAwareTrackSampler pinned to step 0), so it starts at stage 0 -- no
+    # initial rebuild needed; stage rebuilds happen on boundary crossings below.
+
+    total_so_far = 0
+    while p1_remaining > 0:
+        chunk = min(p1_step, p1_remaining)
+        model.learn(
+            total_timesteps=chunk,
+            progress_bar=False,
+            reset_num_timesteps=(p1_chunk_idx == 0),
+        )
+        p1_remaining -= chunk
+        p1_chunk_idx += 1
+        total_so_far += chunk
+
+        # Advance the curriculum: if this chunk crossed a stage boundary, rebuild
+        # the training env with a harder step-pinned sampler and swap it in.
+        if use_curriculum:
+            new_stage = _curriculum_stage_index(
+                total_so_far, cur_horizon, cur_stages
+            )
+            if new_stage > cur_stage and p1_remaining > 0:
+                cur_stage = new_stage
+                staged_sampler = StepAwareTrackSampler(
+                    track_source.schedule,
+                    base_seed=seed,
+                    step=_curriculum_stage_step(
+                        new_stage, cur_horizon, cur_stages
+                    ),
+                )
+                new_venv = _build_vec_env(
+                    track=staged_sampler,
+                    num_players=num_players,
+                    opponents=scripted,
+                    learner_id=learner_id,
+                    config=config,
+                    curriculum=curriculum,
+                    shaping_weight=config.shaping_weight,
+                    seed=seed,
+                )
+                venv = _swap_vec_env(model, venv, new_venv)
+                model.logger.record("curriculum/stage", new_stage)
+
+        score = _gate(model, venv)
+        model.logger.record("eval/gate_score", score.promote_score)
+        model.logger.record("eval/win_rate_strong", score.win_rate_strong)
+        model.logger.record("eval/win_rate_weak", score.win_rate_weak)
+        if best_score is None or score.promote_score > best_score:
+            best_score = score.promote_score
+            _save_best(model, venv)
+
+    # Guarantee at least one best save even if phase1_steps < phase1_eval_every
+    # (or phase1_steps == 0): this checkpoint is the safety net (§2.1) -- even a
+    # fully collapsing Phase 2 cannot overwrite it with a worse one.
+    if best_score is None:
+        best_score = _gate(model, venv).promote_score
+        _save_best(model, venv)
 
     base_lr = config.learning_rate
 
@@ -909,17 +1346,21 @@ def train_self_play(
         chunk_idx += 1
 
         # §2.1 eval-gated best-checkpoint preservation: only overwrite best_path
-        # when the score STRICTLY improves. Log the gate score for TensorBoard
-        # so a collapse is visible live (§3.2).
-        score = _gate(model, venv)
-        model.logger.record("eval/gate_score", score)
+        # when the promotion score STRICTLY improves. Log the gate score (and the
+        # Sprint-A strong/weak split) for TensorBoard so a collapse is visible
+        # live (§3.2).
+        result = _gate(model, venv)
+        promote = result.promote_score
+        model.logger.record("eval/gate_score", promote)
+        model.logger.record("eval/win_rate_strong", result.win_rate_strong)
+        model.logger.record("eval/win_rate_weak", result.win_rate_weak)
         model.logger.record("eval/best_score", best_score)
-        if score > best_score:
-            best_score = score
+        if promote > best_score:
+            best_score = promote
             _save_best(model, venv)
         elif (
             curriculum.reload_best_on_regression
-            and score < best_score - curriculum.regression_tol
+            and promote < best_score - curriculum.regression_tol
         ):
             # Recovery option (§2.1): reload the best policy weights so a
             # collapsing Phase 2 continues from strength rather than from rubble.

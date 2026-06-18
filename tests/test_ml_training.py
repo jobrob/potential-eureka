@@ -36,12 +36,15 @@ from heat.ml.model import (
 )
 from heat.ml.training import (
     CurriculumConfig,
+    GateResult,
     load_meta,
     meta_path_for,
     save_checkpoint,
+    sprint_a_curriculum,
     train_self_play,
     vecnorm_path_for,
     _resolve_track_source,
+    _scripted_opponents,
     _track_label,
     _gate_tracks,
 )
@@ -158,6 +161,26 @@ def _tiny_ppo(seed: int = 0) -> PPOConfig:
         verbose=0,
         device="cpu",
         n_envs=1,
+    )
+
+
+def _agent_stats(*, games: int, wins: int):
+    """A minimal ``AgentStats`` for monkeypatched gate-eval returns.
+
+    The gate only reads ``wins`` / ``games_played`` / ``win_rate``; the finish
+    distribution / averages are irrelevant here, so they are filled with inert
+    placeholders.
+    """
+    from heat.simulation.stats import AgentStats
+
+    return AgentStats(
+        agent_type="MLAgent",
+        games_played=games,
+        wins=wins,
+        win_rate=wins / games if games else 0.0,
+        finish_position_counts={},
+        avg_finish_position=0.0,
+        avg_heat_remaining=0.0,
     )
 
 
@@ -394,3 +417,241 @@ class TestTrackSource:
     def test_gate_tracks_for_fixed_is_itself(self) -> None:
         usa = load_track_by_name("usa")
         assert [t.name for t in _gate_tracks(usa)] == [usa.name]
+
+
+# ---------------------------------------------------------------------------
+# Sprint A: in-Phase-1 periodic gate + best-checkpoint preservation (Idea 7)
+# ---------------------------------------------------------------------------
+
+
+def test_phase1_periodic_gate_preserves_best(tmp_path) -> None:
+    """A descending Phase-1 gate must keep the FIRST (highest) chunk's model.
+
+    Phase-1-only run (phase1_steps == total_timesteps) chunked into several
+    ``phase1_eval_every`` iterations. With a strictly descending injected gate,
+    the canonical ``best_path`` checkpoint must hold the first/highest model --
+    the Phase-1 analogue of the descending-scores Phase-2 regression test.
+    """
+    scores = iter([0.9, 0.5, 0.2, 0.1])
+
+    config = _tiny_ppo()
+    # Phase-1-only: total == phase1, chunked into 3 x 64-step gates.
+    curriculum = _tiny_curriculum(
+        tmp_path,
+        total_timesteps=192,
+        phase1_steps=192,
+        phase1_eval_every=64,
+    )
+    _model, best_path = train_self_play(
+        config, curriculum, num_players=2, gate_fn=lambda m: next(scores)
+    )
+
+    # Canonical best checkpoint exists + round-trips with the contract.
+    meta = load_meta(best_path)
+    assert meta["obs_dim"] == spaces.OBS_DIM
+    assert meta["action_dim"] == spaces.ACTION_DIM
+    assert meta["codec_version"] == spaces.CODEC_VERSION
+
+
+def test_phase1_gate_promotes_on_strict_improvement(tmp_path) -> None:
+    """In a Phase-1-only run, best_path is written only on strict improvement."""
+    import heat.ml.training as training_mod
+
+    calls: list[str] = []
+    real_save = training_mod.save_checkpoint
+
+    def recording_save(model, path, **kwargs):  # noqa: ANN001
+        calls.append(path)
+        return real_save(model, path, **kwargs)
+
+    training_mod.save_checkpoint = recording_save
+    try:
+        # 3 Phase-1 chunks: 0.1 (first -> save), 0.5 (improves -> save),
+        # 0.5 (flat -> no save).
+        scores = iter([0.1, 0.5, 0.5])
+        config = _tiny_ppo()
+        curriculum = _tiny_curriculum(
+            tmp_path,
+            total_timesteps=192,
+            phase1_steps=192,
+            phase1_eval_every=64,
+        )
+        _model, best_path = train_self_play(
+            config, curriculum, num_players=2, gate_fn=lambda m: next(scores)
+        )
+    finally:
+        training_mod.save_checkpoint = real_save
+
+    best_writes = [c for c in calls if c == best_path]
+    # First chunk save + one improving promotion == 2 writes to best_path.
+    assert len(best_writes) == 2
+
+
+# ---------------------------------------------------------------------------
+# Sprint A: gate scores against the trained-against opponent (Idea 8)
+# ---------------------------------------------------------------------------
+
+
+def test_gate_uses_strong_opponent_factory(tmp_path, monkeypatch) -> None:
+    """With use_strong_heuristic_opponents the gate passes a strong factory.
+
+    Monkeypatch ``evaluate_ml`` (as imported inside ``_pooled_win_counts``) to
+    record every ``opponent_factory`` it receives, then assert the strong pass
+    used a non-None factory producing a StrongHeuristicAgent.
+    """
+    from heat.agents.strong_heuristic import StrongHeuristicAgent
+    import heat.ml.evaluate as eval_mod
+
+    seen: list = []
+
+    def fake_evaluate_ml(model_path, *, opponent_factory=None, **kwargs):  # noqa: ANN001
+        seen.append(opponent_factory)
+        return {
+            "MLAgent": _agent_stats(games=4, wins=2)
+        }
+
+    monkeypatch.setattr(eval_mod, "evaluate_ml", fake_evaluate_ml)
+
+    from heat.ml.training import _gate_score
+
+    config = _tiny_ppo()
+    curriculum = _tiny_curriculum(
+        tmp_path, use_strong_heuristic_opponents=True, gate_games=6
+    )
+
+    # Build a real tiny model to save during the gate.
+    from heat.ml.env import HeatEnv
+    from heat.ml.model import build_model
+
+    model = build_model(HeatEnv(num_players=2), config)
+    result = _gate_score(
+        model,
+        curriculum=curriculum,
+        num_players=2,
+        track=load_track_by_name("usa"),
+        seed=0,
+    )
+
+    assert isinstance(result, GateResult)
+    # At least one strong pass used a real strong factory.
+    strong_factories = [f for f in seen if f is not None]
+    assert strong_factories, "strong pass should pass a non-None opponent factory"
+    agent = strong_factories[0](player_id=1, seed=0)
+    assert isinstance(agent, StrongHeuristicAgent)
+    # And at least one weak pass used the default (None) factory.
+    assert any(f is None for f in seen)
+
+
+def test_gate_result_reports_weak_and_strong(tmp_path, monkeypatch) -> None:
+    """GateResult carries distinct weak + strong win-rates from the two passes."""
+    import heat.ml.evaluate as eval_mod
+
+    # Strong pass returns 1/4; weak pass returns 3/4. The two passes are
+    # distinguished by whether opponent_factory is None (weak) or not (strong).
+    def fake_evaluate_ml(model_path, *, opponent_factory=None, **kwargs):  # noqa: ANN001
+        if opponent_factory is None:
+            return {"MLAgent": _agent_stats(games=4, wins=3)}
+        return {"MLAgent": _agent_stats(games=4, wins=1)}
+
+    monkeypatch.setattr(eval_mod, "evaluate_ml", fake_evaluate_ml)
+
+    from heat.ml.training import _gate_score
+    from heat.ml.env import HeatEnv
+    from heat.ml.model import build_model
+
+    config = _tiny_ppo()
+    curriculum = _tiny_curriculum(
+        tmp_path, use_strong_heuristic_opponents=True, gate_games=4
+    )
+    model = build_model(HeatEnv(num_players=2), config)
+    result = _gate_score(
+        model,
+        curriculum=curriculum,
+        num_players=2,
+        track=load_track_by_name("usa"),
+        seed=0,
+    )
+    assert result.win_rate_strong == 0.25
+    assert result.win_rate_weak == 0.75
+    # Wilson LB of 1/4 is below the point estimate.
+    assert 0.0 <= result.wilson_lb_strong < 0.25
+    assert result.promote_score == result.wilson_lb_strong
+
+
+# ---------------------------------------------------------------------------
+# Sprint A: Wilson-LB promotion (Idea 9)
+# ---------------------------------------------------------------------------
+
+
+def test_gate_promotes_on_wilson_lb() -> None:
+    """Equal point estimates but more games -> higher Wilson LB -> promoted.
+
+    Unit test of the pooled-(wins, games) -> wilson_interval promotion criterion:
+    two checkpoints both at 50% win-rate, one over 10 games and one over 100; the
+    higher-n checkpoint has the strictly higher lower bound.
+    """
+    from heat.simulation.stats import wilson_interval
+
+    lb_small, _ = wilson_interval(5, 10)
+    lb_large, _ = wilson_interval(50, 100)
+    assert lb_large > lb_small  # more games -> tighter -> higher LB at equal rate
+
+
+# ---------------------------------------------------------------------------
+# Sprint A: broadened Phase-1 opponent mix (Idea 6)
+# ---------------------------------------------------------------------------
+
+
+def test_broadened_phase1_pool_composition() -> None:
+    """use_strong + broaden_mix yields the expected class mix and seat count."""
+    from heat.agents.heuristic_agent import HeuristicAgent
+    from heat.agents.random_agent import RandomAgent
+    from heat.agents.strong_heuristic import StrongHeuristicAgent
+    from heat.ml.training import _StrongHeuristicFactory
+
+    pool = _scripted_opponents(4, use_strong=True, broaden_mix=True)
+    assert len(pool) == 3  # num_players - 1
+
+    # Instantiate each spec (class or factory) and check the realized agent mix.
+    agents = [spec() if callable(spec) else spec for spec in pool]
+    # Template is [Strong(3), Strong(2), Heuristic, Random] cycled to 3 seats.
+    assert isinstance(agents[0], StrongHeuristicAgent) and agents[0].strength == 3
+    assert isinstance(agents[1], StrongHeuristicAgent) and agents[1].strength == 2
+    assert isinstance(agents[2], HeuristicAgent)
+    # The strength-3 seat is built by the picklable factory, not a lambda.
+    assert isinstance(pool[0], _StrongHeuristicFactory)
+
+
+def test_broaden_mix_is_noop_without_strong() -> None:
+    """broaden_mix without use_strong leaves the default weak pool unchanged."""
+    from heat.agents.heuristic_agent import HeuristicAgent
+    from heat.agents.random_agent import RandomAgent
+
+    pool = _scripted_opponents(4, use_strong=False, broaden_mix=True)
+    assert pool[:-1] == [HeuristicAgent, HeuristicAgent]
+    assert pool[-1] is RandomAgent
+
+
+def test_broadened_pool_is_picklable() -> None:
+    """The broadened pool specs survive pickling (SubprocVecEnv spawn)."""
+    import pickle
+
+    pool = _scripted_opponents(4, use_strong=True, broaden_mix=True)
+    restored = pickle.loads(pickle.dumps(pool))
+    assert len(restored) == 3
+
+
+# ---------------------------------------------------------------------------
+# Sprint A: launch preset (Ideas 4/15)
+# ---------------------------------------------------------------------------
+
+
+def test_sprint_a_preset_is_phase1_only_and_strong() -> None:
+    """The Sprint-A preset bundles the Idea 4/8/9/10/15 levers."""
+    curr = sprint_a_curriculum(1_000_000)
+    assert curr.phase1_steps == curr.total_timesteps  # Idea 4: Phase-1-only
+    assert curr.gate_games >= 120 and curr.gate_use_wilson_lb  # Idea 9
+    assert curr.phase1_eval_every > 0  # Idea 7 cadence
+    assert curr.use_strong_heuristic_opponents  # Idea 8
+    assert curr.randomize_seat  # Idea 10
+    assert curr.normalize_obs is False  # Idea 15 (recorded constraint)

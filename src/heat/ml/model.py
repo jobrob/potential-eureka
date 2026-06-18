@@ -63,6 +63,15 @@ class PPOConfig:
     )
     #: Dimensionality of the latent the features extractor emits.
     features_dim: int = 128
+    #: Give the actor and critic SEPARATE feature extractors (Idea 13-part-1).
+    #: NOTE the inversion: the field name mirrors SB3's
+    #: ``ActorCriticPolicy.share_features_extractor``, so the default ``False``
+    #: here means *unshared* -- the NEW behavior. (SB3's own default is ``True``,
+    #: a single shared trunk, which this codec previously inherited because the
+    #: key was never set.) Unshared splits the actor ("what action given this
+    #: kind") from the critic ("how's the race going") so they stop competing for
+    #: one trunk -- friction that worsens as the net grows. Costs params.
+    share_features_extractor: bool = False
 
     # --- PPO hyperparameters (§5c defaults) ---
     n_steps: int = 2048
@@ -81,6 +90,12 @@ class PPOConfig:
     shaping_weight: float = 0.0
     #: Per-space progress coefficient inside the dense shaping term.
     shaping_progress_coef: float = 1.0
+    #: Optional bounded anti-spinout penalty weight (Idea 3). 0.0 == off, so the
+    #: default reward is unchanged. See :data:`heat.ml.spaces.SHAPING_SPINOUT_WEIGHT`.
+    shaping_spinout_weight: float = 0.0
+    #: Hard cap on the per-step spinout penalty magnitude (Idea 3). See
+    #: :data:`heat.ml.spaces.SHAPING_SPINOUT_CAP`.
+    shaping_spinout_cap: float = 0.05
 
     # --- bookkeeping ---
     seed: int | None = None
@@ -168,6 +183,8 @@ def apply_shaping_config(config: PPOConfig) -> None:
     """
     spaces.SHAPING_WEIGHT = config.shaping_weight
     spaces.SHAPING_PROGRESS_COEF = config.shaping_progress_coef
+    spaces.SHAPING_SPINOUT_WEIGHT = config.shaping_spinout_weight
+    spaces.SHAPING_SPINOUT_CAP = config.shaping_spinout_cap
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +248,9 @@ def build_model(env: gym.Env, config: PPOConfig | None = None) -> MaskablePPO:
 
     policy_kwargs: dict = {
         "net_arch": list(config.net_arch),
+        # Idea 13-part-1: explicitly set the share flag (previously omitted ->
+        # inherited SB3's True). Default False == separate actor/critic trunks.
+        "share_features_extractor": config.share_features_extractor,
         "features_extractor_class": HeatMLPExtractor,
         "features_extractor_kwargs": {
             "features_dim": config.features_dim,

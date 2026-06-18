@@ -145,7 +145,7 @@ class TestPlayerCountInvariance:
             + sp.BLOCK_OWN_GEAR
             + sp.BLOCK_OWN_KINEMATICS
             + sp.BLOCK_DECK_COMPOSITION
-            + sp.BLOCK_TRACK_LOOKAHEAD
+            + sp.BLOCK_TRACK
             + sp.BLOCK_ADRENALINE_CONTEXT
         )
         opp_block = vec[start : start + sp.BLOCK_OPPONENT_SLOTS]

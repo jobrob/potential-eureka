@@ -365,9 +365,9 @@ class TestForcedDecisions:
 
 
 class TestGeneratedTrackObsInvariant:
-    """The OBS_DIM=72 contract is track-agnostic: a *generated* track must
-    still encode to a (72,) float32 vector in [-1, 1] with NO codec change.
-    This is the single most important Sprint 6A invariant (roadmap §3)."""
+    """The OBS_DIM contract is track-agnostic: a *generated* track must still
+    encode to an (OBS_DIM,) float32 vector in [-1, 1]. This is the single most
+    important Sprint 6A invariant (roadmap §3)."""
 
     def test_encode_observation_on_generated_tracks(self) -> None:
         from heat.ml.features import encode_observation
@@ -458,3 +458,173 @@ class TestTrackSamplerEnv:
         assert env.track is track
         env.reset(seed=2)
         assert env.track is track
+
+
+# ---------------------------------------------------------------------------
+# Sprint A: learner-seat randomization (Idea 10)
+# ---------------------------------------------------------------------------
+
+
+class TestSeatRandomization:
+    def test_reset_repicks_seat_when_enabled(self) -> None:
+        """With randomize_seat, many seeded resets visit >1 distinct seat."""
+        env = _make_env(num_players=3, randomize_seat=True)
+        seats = set()
+        for seed in range(40):
+            env.reset(seed=seed)
+            assert 0 <= env.learner_id < env.num_players
+            seats.add(env.learner_id)
+        assert len(seats) > 1  # not pinned to a single seat
+
+    def test_fixed_seat_when_disabled(self) -> None:
+        """Without randomize_seat (default), learner_id never moves."""
+        env = _make_env(num_players=3, learner_id=1)  # randomize_seat default False
+        for seed in range(10):
+            env.reset(seed=seed)
+            assert env.learner_id == 1
+
+    def test_seat_randomization_is_seed_deterministic(self) -> None:
+        """Same reset(seed) twice -> same learner_id and identical first obs."""
+        env = _make_env(num_players=4, randomize_seat=True)
+        obs1, _ = env.reset(seed=7)
+        seat1 = env.learner_id
+        obs2, _ = env.reset(seed=7)
+        seat2 = env.learner_id
+        assert seat1 == seat2
+        np.testing.assert_array_equal(obs1, obs2)
+
+    def test_obs_consistent_across_seats(self) -> None:
+        """For every drawn seat: obs shape/bounds hold and opponents fill the
+        non-learner seats exactly."""
+        env = _make_env(num_players=4, randomize_seat=True)
+        for seed in range(30):
+            obs, info = env.reset(seed=seed)
+            assert obs.shape == (OBS_DIM,)
+            assert np.all(obs >= -1.0) and np.all(obs <= 1.0)
+            # Opponents fill exactly the non-learner seats.
+            assert len(env._opponents) == env.num_players - 1
+            assert env.learner_id not in env._opponents
+
+
+# ---------------------------------------------------------------------------
+# Sprint A: bounded anti-spinout shaping (Idea 3)
+# ---------------------------------------------------------------------------
+
+
+class TestSpinoutShaping:
+    def test_shaping_default_off_unchanged(self) -> None:
+        """With all shaping weights 0, step_reward equals the pure-sparse value."""
+        from heat.ml import spaces as sp
+
+        # Save + zero out all shaping globals.
+        saved = (
+            sp.SHAPING_WEIGHT,
+            sp.SHAPING_PROGRESS_COEF,
+            sp.SHAPING_SPINOUT_WEIGHT,
+            sp.SHAPING_SPINOUT_CAP,
+        )
+        sp.SHAPING_WEIGHT = 0.0
+        sp.SHAPING_SPINOUT_WEIGHT = 0.0
+        try:
+            env = _make_env(num_players=2)
+            env.reset(seed=3)
+            # Drive a few steps; reward must equal the sparse placement reward
+            # (0.0 until terminal). Off-by-default == no dense / spinout term.
+            terminated = truncated = False
+            steps = 0
+            while not (terminated or truncated) and steps < 500:
+                mask = env.action_masks()
+                action = int(np.flatnonzero(mask)[0])
+                _obs, reward, terminated, truncated, _ = env.step(action)
+                if not (terminated or truncated):
+                    assert reward == 0.0
+                steps += 1
+        finally:
+            (
+                sp.SHAPING_WEIGHT,
+                sp.SHAPING_PROGRESS_COEF,
+                sp.SHAPING_SPINOUT_WEIGHT,
+                sp.SHAPING_SPINOUT_CAP,
+            ) = saved
+
+    def test_spinout_penalty_bounded(self) -> None:
+        """A newly-spun-out step never costs more than SHAPING_SPINOUT_CAP."""
+        from heat.ml import spaces as sp
+        from heat.models.game_state import GameState
+
+        # A high weight with a small cap: the subtracted magnitude is capped.
+        saved = (sp.SHAPING_SPINOUT_WEIGHT, sp.SHAPING_SPINOUT_CAP, sp.SHAPING_WEIGHT)
+        sp.SHAPING_WEIGHT = 0.0
+        sp.SHAPING_SPINOUT_WEIGHT = 100.0
+        sp.SHAPING_SPINOUT_CAP = 0.05
+        try:
+            track = _track()
+            prev = GameState.create(track, 2, seed=0)
+            curr = prev.clone(reseed=0)
+            # Force a fresh spin-out on the learner in curr.
+            prev.get_player(0).spun_out = False
+            curr.get_player(0).spun_out = True
+
+            r = sp.step_reward(prev, curr, 0, done=False)
+            # Reward is exactly -cap (no other term active), and |r| <= cap.
+            assert r == pytest.approx(-0.05)
+            assert abs(r) <= sp.SHAPING_SPINOUT_CAP + 1e-9
+
+            # The raw penalty helper is in [0, 1].
+            p = sp._spinout_penalty(prev, curr, 0)
+            assert 0.0 <= p <= 1.0
+        finally:
+            (sp.SHAPING_SPINOUT_WEIGHT, sp.SHAPING_SPINOUT_CAP, sp.SHAPING_WEIGHT) = saved
+
+
+# ---------------------------------------------------------------------------
+# Sprint A: evaluate_ml learner_seat (Idea 10 measurement)
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateMlLearnerSeat:
+    def test_evaluate_ml_learner_seat_places_agent(self, tmp_path) -> None:
+        """evaluate_ml(learner_seat=k) seats the MLAgent at k; a seat sweep
+        returns finite win-rates for every seat."""
+        from heat.ml.evaluate import evaluate_ml
+        from heat.ml.env import HeatEnv
+        from heat.ml.model import PPOConfig, build_model
+        from heat.ml.training import save_checkpoint
+
+        # Tiny real checkpoint so evaluate_ml can load an MLAgent.
+        cfg = PPOConfig(
+            net_arch=[16, 16],
+            features_extractor_hidden=[16],
+            features_dim=16,
+            n_steps=64,
+            batch_size=32,
+            n_epochs=1,
+            seed=0,
+            device="cpu",
+        )
+        model = build_model(HeatEnv(num_players=3), cfg)
+        path = str(tmp_path / "seat_model")
+        save_checkpoint(model, path, track_name="usa", num_players=3)
+
+        num_players = 3
+        rates = []
+        for seat in range(num_players):
+            per_agent = evaluate_ml(
+                path,
+                num_games=2,
+                num_players=num_players,
+                seed=0,
+                parallel=False,
+                learner_seat=seat,
+            )
+            ml = per_agent.get("MLAgent")
+            assert ml is not None
+            assert np.isfinite(ml.win_rate)
+            rates.append(ml.win_rate)
+        assert len(rates) == num_players
+
+    def test_evaluate_ml_rejects_out_of_range_seat(self, tmp_path) -> None:
+        from heat.ml.evaluate import evaluate_ml
+
+        with pytest.raises(ValueError):
+            evaluate_ml("unused", num_players=2, learner_seat=5)

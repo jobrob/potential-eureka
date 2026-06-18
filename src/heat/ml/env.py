@@ -98,7 +98,14 @@ class HeatEnv(gym.Env):
             :class:`BaseAgent`/factory (reused for all opponents) or a sequence
             of length ``num_players - 1``. Each entry may be a ``BaseAgent`` or
             a zero-arg factory returning one. Defaults to ``HeuristicAgent``.
-        learner_id: the seat the RL policy controls (default 0).
+        learner_id: the seat the RL policy controls (default 0). When
+            ``randomize_seat`` is set this is only the *initial* seat; each
+            :meth:`reset` re-picks it from the episode RNG.
+        randomize_seat: re-pick ``learner_id`` from the seeded episode RNG at the
+            start of every :meth:`reset` (Idea 10). Off by default so existing
+            fixed-seat runs are byte-for-byte unchanged. The observation is
+            seat-agnostic (opponents are encoded relatively), so this only
+            changes which engine seat the policy drives -- not the obs contract.
     """
 
     metadata = {"render_modes": []}
@@ -109,12 +116,13 @@ class HeatEnv(gym.Env):
         num_players: int = 4,
         opponents: OpponentSpec | Sequence[OpponentSpec] | None = None,
         learner_id: int = 0,
+        randomize_seat: bool = False,
     ) -> None:
         super().__init__()
 
-        if not (2 <= num_players <= spaces.MAX_PLAYERS):
+        if not (1 <= num_players <= spaces.MAX_PLAYERS):
             raise ValueError(
-                f"num_players must be in [2, {spaces.MAX_PLAYERS}], got {num_players}"
+                f"num_players must be in [1, {spaces.MAX_PLAYERS}], got {num_players}"
             )
         if not (0 <= learner_id < num_players):
             raise ValueError(
@@ -133,6 +141,7 @@ class HeatEnv(gym.Env):
             self.track = track if track is not None else _default_track()
         self.num_players = num_players
         self.learner_id = learner_id
+        self.randomize_seat = randomize_seat
         self._opponent_specs = self._normalize_opponents(opponents, num_players)
 
         self.observation_space = spaces.observation_space()
@@ -209,6 +218,14 @@ class HeatEnv(gym.Env):
         # leaves self.track unchanged (original behavior).
         if self._track_source is not None:
             self.track = self._track_source(seed)
+
+        # Per-episode learner-seat randomization (opt-in, Idea 10). Drawn from
+        # the RNG ``super().reset(seed=...)`` just seeded, so the seat -- like the
+        # track and the game state below -- is a deterministic function of the
+        # episode seed ("same seed -> same episode" still holds). Re-picked BEFORE
+        # _build_opponents so opponents fill exactly the non-learner seats.
+        if self.randomize_seat:
+            self.learner_id = int(self.np_random.integers(self.num_players))
 
         self.state = GameState.create(
             self.track, self.num_players, seed=seed

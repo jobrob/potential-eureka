@@ -32,14 +32,18 @@ from heat.models.game_state import GameState
 
 #: Bumped whenever OBS_DIM / ACTION_DIM / the codec layout changes. The 5d
 #: checkpoint sidecar records this so a stale model fails fast on load.
-CODEC_VERSION: int = 1
+#: v2 (Sprint B): replaced the 4-dim next-corner lookahead with an all-corners
+#: ego-centric track block (Option A whole-track obs). OBS_DIM 72 -> 104. v1
+#: checkpoints are intentionally rejected by the MLAgent version tripwire.
+CODEC_VERSION: int = 2
 
 # ---------------------------------------------------------------------------
 # Observation space (§3.1)
 # ---------------------------------------------------------------------------
 
-#: Fixed observation vector length (PLAN.md "~60-80").
-OBS_DIM: int = 72
+#: Fixed observation vector length. v2: 104 (was 72), after swapping the 4-dim
+#: track-lookahead block for the 36-dim all-corners track block (see below).
+OBS_DIM: int = 104
 
 #: Maximum number of seats. Variable player counts are encoded with a fixed
 #: opponent-slot layout; absent/finished opponents are zero-filled with a
@@ -53,25 +57,46 @@ BLOCK_HAND_HISTOGRAM: int = 8
 BLOCK_OWN_GEAR: int = 4
 BLOCK_OWN_KINEMATICS: int = 4
 BLOCK_DECK_COMPOSITION: int = 6
-BLOCK_TRACK_LOOKAHEAD: int = 4
+
+# --- Track block (Sprint B Option A: all-corners ego-centric whole-track obs) ---
+#: Maximum number of corner slots. The generator caps tracks at 7 corners
+#: (``num_corners_range=(3, 7)``), so 8 slots encode EVERY corner of EVERY
+#: generated track with one slot of slack.
+MAX_CORNERS: int = 8
+#: Floats per corner slot: (dist_ahead, speed_limit, corner_len, lanes). No
+#: explicit presence bit -- ``dist_ahead == 0`` is the padding marker, since
+#: every real corner reads ``dist_ahead > 0`` (a corner at the current position
+#: counts as a full lap away, ``rules.distance_to_next_corner``).
+CORNER_SLOT_FLOATS: int = 4
+#: Track-global floats appended after the corner slots: (laps_remaining,
+#: dist_to_finish, heat_pool, pos_in_lap).
+TRACK_GLOBALS: int = 4
+#: All-corners ego-centric track block: MAX_CORNERS slots + the globals
+#: sub-block. Replaces the old 4-dim BLOCK_TRACK_LOOKAHEAD.
+BLOCK_TRACK: int = MAX_CORNERS * CORNER_SLOT_FLOATS + TRACK_GLOBALS  # 36
+
 BLOCK_ADRENALINE_CONTEXT: int = 2
 #: 5 floats per opponent slot, for the MAX_PLAYERS - 1 opponent seats.
 OPP_SLOT_FLOATS: int = 5
 BLOCK_OPPONENT_SLOTS: int = OPP_SLOT_FLOATS * (MAX_PLAYERS - 1)  # 25
 #: Phase / decision context (one-hot kind + react/slipstream/round bits). The
-#: remainder up to OBS_DIM is explicit zero padding owned by this block.
+#: remainder up to OBS_DIM is explicit zero padding owned by this block. NOTE
+#: (§3.1 footgun): this is DERIVED, so the new BLOCK_TRACK must be subtracted
+#: here -- otherwise the phase-context block silently absorbs the size change and
+#: the obs layout corrupts. The literal assert below guards against a miscount.
 BLOCK_PHASE_CONTEXT: int = (
     OBS_DIM
     - BLOCK_HAND_HISTOGRAM
     - BLOCK_OWN_GEAR
     - BLOCK_OWN_KINEMATICS
     - BLOCK_DECK_COMPOSITION
-    - BLOCK_TRACK_LOOKAHEAD
+    - BLOCK_TRACK
     - BLOCK_ADRENALINE_CONTEXT
     - BLOCK_OPPONENT_SLOTS
 )  # == 19
 
 assert BLOCK_PHASE_CONTEXT >= 0, "feature blocks exceed OBS_DIM"
+assert BLOCK_PHASE_CONTEXT == 19, BLOCK_PHASE_CONTEXT  # freeze the intended size
 
 
 def observation_space() -> gym.spaces.Box:
@@ -136,6 +161,16 @@ SHAPING_WEIGHT: float = 0.0
 #: Per-space progress coefficient inside the (default-off) dense shaping term.
 SHAPING_PROGRESS_COEF: float = 1.0
 
+#: Optional bounded anti-spinout penalty weight (Idea 3). Default 0 == off, so
+#: existing behavior is unchanged. Penalizes the learner the step it spins out
+#: (overshoots a corner speed limit / cannot pay the heat), nudging the policy
+#: away from degenerate over-pushing.
+SHAPING_SPINOUT_WEIGHT: float = 0.0
+
+#: Hard cap on the per-step spinout penalty magnitude, keeping the term from
+#: dominating the sparse win signal even if ``SHAPING_SPINOUT_WEIGHT`` is large.
+SHAPING_SPINOUT_CAP: float = 0.05
+
 
 def _placement_reward(state: GameState, learner_id: int) -> float:
     """Sparse terminal placement reward in ``[-1, +1]`` from finish order.
@@ -152,6 +187,23 @@ def _placement_reward(state: GameState, learner_id: int) -> float:
         return 0.0
     rank = player.finish_order  # 1-based
     return 1.0 - 2.0 * (rank - 1) / (n - 1)
+
+
+def _spinout_penalty(
+    prev: GameState, curr: GameState, learner_id: int
+) -> float:
+    """Return ``1.0`` the step the learner *newly* spins out, else ``0.0``.
+
+    Reads the engine's :attr:`heat.models.player_state.PlayerState.spun_out`
+    flag, which the corner-check sets when the car overshoots a corner speed
+    limit it cannot pay for. Firing only on the rising edge (``not prev`` ->
+    ``curr``) charges the penalty once per spin rather than every step the flag
+    stays set. The caller scales this in ``[0, 1]`` value by a weight and a hard
+    cap, so the term is bounded by construction.
+    """
+    prev_p = prev.get_player(learner_id)
+    curr_p = curr.get_player(learner_id)
+    return 1.0 if (curr_p.spun_out and not prev_p.spun_out) else 0.0
 
 
 def step_reward(
@@ -186,5 +238,12 @@ def step_reward(
         curr_abs = curr_p.lap * length + curr_p.position
         progress = (curr_abs - prev_abs) / length
         reward += SHAPING_WEIGHT * SHAPING_PROGRESS_COEF * progress
+
+    # Optional bounded anti-spinout penalty (Idea 3); default-off (weight 0). The
+    # raw penalty is in [0, 1]; the subtracted magnitude is hard-capped at
+    # SHAPING_SPINOUT_CAP so it can never dominate the placement reward.
+    if SHAPING_SPINOUT_WEIGHT != 0.0:
+        penalty = _spinout_penalty(prev, curr, learner_id)  # in [0, 1]
+        reward -= min(SHAPING_SPINOUT_CAP, SHAPING_SPINOUT_WEIGHT * penalty)
 
     return reward

@@ -50,6 +50,9 @@ def heat_env_factory(
     seed: int,
     shaping_weight: float = 0.0,
     shaping_progress_coef: float = 1.0,
+    shaping_spinout_weight: float = 0.0,
+    shaping_spinout_cap: float = 0.05,
+    randomize_seat: bool = False,
 ) -> HeatEnv:
     """Build a fresh :class:`HeatEnv` for one (sub-)worker.
 
@@ -64,12 +67,15 @@ def heat_env_factory(
     # every sub-env computes the same reward the learner is training under.
     spaces.SHAPING_WEIGHT = shaping_weight
     spaces.SHAPING_PROGRESS_COEF = shaping_progress_coef
+    spaces.SHAPING_SPINOUT_WEIGHT = shaping_spinout_weight
+    spaces.SHAPING_SPINOUT_CAP = shaping_spinout_cap
 
     env = HeatEnv(
         track=track,
         num_players=num_players,
         opponents=opponents,
         learner_id=learner_id,
+        randomize_seat=randomize_seat,
     )
     # Stash the per-worker seed; SB3 calls env.reset(seed=...) via VecEnv.seed,
     # but we also reset once here so a never-seeded env is still deterministic.
@@ -103,6 +109,9 @@ def make_vec_env(
     seed: int = 0,
     shaping_weight: float = 0.0,
     shaping_progress_coef: float = 1.0,
+    shaping_spinout_weight: float = 0.0,
+    shaping_spinout_cap: float = 0.05,
+    randomize_seat: bool = False,
 ) -> VecEnv:
     """Build a vectorized HEAT env of ``n_envs`` sub-envs (§6C Part 1).
 
@@ -118,6 +127,9 @@ def make_vec_env(
             is reproducible from this one value.
         shaping_weight / shaping_progress_coef: reward-shaping globals re-applied
             inside each worker (spawn does not inherit parent globals).
+        randomize_seat: re-pick the learner seat per episode in each sub-env
+            (Idea 10). Off by default. Each sub-env is independently seeded, so
+            the seat draw stays reproducible from the single base ``seed``.
 
     Returns:
         A ``DummyVecEnv`` or ``SubprocVecEnv`` ready to pass to ``build_model`` /
@@ -135,6 +147,9 @@ def make_vec_env(
             seed=seed + i,
             shaping_weight=shaping_weight,
             shaping_progress_coef=shaping_progress_coef,
+            shaping_spinout_weight=shaping_spinout_weight,
+            shaping_spinout_cap=shaping_spinout_cap,
+            randomize_seat=randomize_seat,
         )
         for i in range(n_envs)
     ]

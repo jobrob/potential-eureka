@@ -105,27 +105,75 @@ def _deck_composition(player: PlayerState) -> list[float]:
     ]
 
 
-def _track_lookahead(player: PlayerState, track) -> list[float]:
-    """4 floats: dist-to-next-corner/length, next speed_limit/maxlimit,
-    current-space lanes (normalized), in-corner flag."""
+def _track_block(player: PlayerState, track) -> list[float]:
+    """BLOCK_TRACK floats: MAX_CORNERS ego-centric corner slots + a globals
+    sub-block (Sprint B Option A whole-track obs; replaces the old 4-dim
+    next-corner lookahead).
+
+    Ego-centric: the corner slots are ordered by forward (wrap-aware) distance
+    from the learner's current position, matching
+    ``rules.distance_to_next_corner`` (a corner standing under the player counts
+    as a full lap away). With ``MAX_CORNERS=8`` and the generator capping tracks
+    at 7 corners, every corner of every generated track lands in exactly one
+    slot. Absent slots are zero-filled; because every real corner has
+    ``dist_ahead > 0``, a slot whose ``dist_ahead`` is 0 is unambiguously
+    padding. All fields are pre-clipped to ``[0, 1]``.
+
+    Per-corner slot (4 floats):
+      dist_ahead   = fwd_dist / track.length
+      speed_limit  = corner.speed_limit / max(speed_limit over corners)
+      corner_len   = (end - start + 1) / max(corner_len over corners)
+      lanes        = lanes at the corner entry / max(lanes over spaces)
+
+    Globals sub-block (4 floats):
+      laps_remaining  = (laps - player.lap) / laps
+      dist_to_finish  = (laps*length - (player.lap*length + position)) / (laps*length)
+      heat_pool       = player.heat_available / HEAT_POOL_SIZE
+      pos_in_lap      = player.position / length
+    """
     length = track.length or 1
-    corner, dist = rules.distance_to_next_corner(track, player.position)
-    if corner is None:
-        dist_norm = 1.0
-        limit_norm = 1.0
-    else:
-        dist_norm = _clip01(dist / length)
-        max_limit = max((c.speed_limit for c in track.corners), default=1) or 1
-        limit_norm = _clip01(corner.speed_limit / max_limit)
-    # Current-space lanes, normalized by the track's max lanes.
-    if 0 <= player.position < len(track.spaces):
-        lanes = track.spaces[player.position].lanes
-    else:
-        lanes = 1
+    pos = player.position
+    corners = list(track.corners)
+    max_limit = max((c.speed_limit for c in corners), default=1) or 1
+    max_clen = max(((c.end - c.start + 1) for c in corners), default=1) or 1
     max_lanes = max((s.lanes for s in track.spaces), default=1) or 1
-    lanes_norm = _clip01(lanes / max_lanes)
-    in_corner = 1.0 if track.get_corner_at(player.position) is not None else 0.0
-    return [dist_norm, limit_norm, lanes_norm, in_corner]
+
+    # Forward distance to each corner start (wrap-aware), matching
+    # rules.distance_to_next_corner's convention (a corner at pos == one lap).
+    def fwd_dist(c) -> int:
+        d = (c.start - pos) % length
+        return length if d == 0 else d
+
+    ordered = sorted(corners, key=fwd_dist)
+
+    slots: list[float] = []
+    for i in range(spaces.MAX_CORNERS):
+        if i < len(ordered):
+            c = ordered[i]
+            d = fwd_dist(c)
+            if 0 <= c.start < len(track.spaces):
+                entry_lanes = track.spaces[c.start].lanes
+            else:
+                entry_lanes = 1
+            slots += [
+                _clip01(d / length),
+                _clip01(c.speed_limit / max_limit),
+                _clip01((c.end - c.start + 1) / max_clen),
+                _clip01(entry_lanes / max_lanes),
+            ]
+        else:
+            slots += [0.0, 0.0, 0.0, 0.0]  # padding (dist_ahead == 0 marker)
+
+    laps = track.laps or 1
+    laps_remaining = _clip01((laps - player.lap) / laps)
+    total_len = length * laps
+    abs_pos = player.lap * length + pos
+    dist_to_finish = _clip01((total_len - abs_pos) / total_len)
+    heat = _clip01(player.heat_available / rules.HEAT_POOL_SIZE)
+    pos_in_lap = _clip01(pos / length)
+    globals_ = [laps_remaining, dist_to_finish, heat, pos_in_lap]
+
+    return slots + globals_
 
 
 def _own_rank(state: GameState, player: PlayerState) -> float:
@@ -240,7 +288,7 @@ def encode_observation(
     values += _own_gear(player)                    # 4
     values += _own_kinematics(player, track)       # 4
     values += _deck_composition(player)            # 6
-    values += _track_lookahead(player, track)      # 4
+    values += _track_block(player, track)          # BLOCK_TRACK (36)
     values += _adrenaline_context(state, player)   # 2
     values += _opponent_slots(state, player, track)  # 25
     values += _phase_context(state, decision)      # BLOCK_PHASE_CONTEXT
