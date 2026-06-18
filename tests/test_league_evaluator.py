@@ -119,16 +119,57 @@ def test_pairwise_mode_delegates():
     ) in ladder.pairwise
 
 
-def test_sampled_matchup_not_implemented():
-    """The 8D 'sampled' seam exists but raises NotImplementedError in 8C (§7.5)."""
+def test_sampled_requires_fields():
+    """Sampled mode (8D) needs an explicit sampled_fields list (§7.2/§12)."""
     contenders = {
         "a": heuristic_agent_factory(),
         "b": random_agent_factory(),
         "c": random_agent_factory(),
         "d": random_agent_factory(),
     }
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError, match="sampled_fields"):
         evaluate_league(
             contenders, tracks=_tracks(1), num_players=4,
             matchup_sampling="sampled", seed=0,
         )
+
+
+def test_sampled_matchup_runs_and_rates():
+    """Sampled mode plays a precomputed field list and rates it (§7.2)."""
+    contenders = {
+        "strong": strong_heuristic_agent_factory(strength=3),
+        "heur": heuristic_agent_factory(),
+        "rand": random_agent_factory(),
+        "rand2": random_agent_factory(),
+    }
+    fields = [("heur", "rand", "rand2", "strong")]
+    ladder = evaluate_league(
+        contenders, tracks=_tracks(1), num_players=4,
+        matchup_sampling="sampled", sampled_fields=fields,
+        games_per_field=4, rating="trueskill", seed=0,
+    )
+    assert ladder.outcomes is not None and len(ladder.outcomes) > 0
+    # All four contenders rated; relabelled outcomes carry pool keys.
+    assert set(ladder.ratings) == {"strong", "heur", "rand", "rand2"}
+    labels = {po.agent_type for o in ladder.outcomes for po in o.players}
+    assert labels <= {"strong", "heur", "rand", "rand2"}
+
+
+def test_sampled_matchup_deterministic():
+    """Same (contenders, fields, seed) -> identical sampled-mode ratings."""
+    contenders = {
+        "strong": strong_heuristic_agent_factory(strength=2),
+        "heur": heuristic_agent_factory(),
+        "rand": random_agent_factory(),
+        "rand2": random_agent_factory(),
+    }
+    fields = [("heur", "rand", "rand2", "strong")]
+    kw = dict(
+        tracks=_tracks(1), num_players=4, matchup_sampling="sampled",
+        sampled_fields=fields, games_per_field=4, rating="trueskill", seed=3,
+    )
+    a = evaluate_league(contenders, **kw)
+    b = evaluate_league(contenders, **kw)
+    assert {k: v.rating for k, v in a.ratings.items()} == {
+        k: v.rating for k, v in b.ratings.items()
+    }

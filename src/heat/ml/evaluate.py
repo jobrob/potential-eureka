@@ -648,6 +648,70 @@ def _free_for_all_outcomes(
     return combined
 
 
+def _sampled_field_outcomes(
+    contenders: Mapping[str, AgentFactory],
+    fields: list[tuple[str, ...]],
+    *,
+    tracks: list[Track],
+    num_players: int,
+    games_per_field: int,
+    seed: int,
+    parallel: bool,
+) -> list[GameOutcome]:
+    """Play a *precomputed* list of distinct-member fields (Sprint 8D, §7.2/§12).
+
+    Mirrors :func:`_free_for_all_outcomes` but consumes an explicit ``fields``
+    list (built + balanced + unit-tested in :mod:`heat.ml.sweep`) instead of
+    enumerating ``C(n, num_players)``. Each field is played on every track, on
+    each cyclic seat rotation (seat order cancels, §7.4), relabelled by pool key,
+    and stamped with a globally unique, deterministic ``game_index`` so the
+    combined list has a stable total order for ELO / TrueSkill.
+
+    This is the thin seam the spec recommends (§12): the balanced sampler lives
+    in 8D's ``sweep.py`` and hands the field list here, keeping the evaluator
+    simple and the sampler independently testable.
+    """
+    for field in fields:
+        if len(field) != num_players:
+            raise ValueError(
+                f"every sampled field must have {num_players} members, "
+                f"got {len(field)}: {field!r}"
+            )
+        if len(set(field)) != num_players:
+            raise ValueError(f"sampled field has duplicate members: {field!r}")
+        missing = [lbl for lbl in field if lbl not in contenders]
+        if missing:
+            raise ValueError(f"sampled field references unknown contenders {missing}")
+
+    combined: list[GameOutcome] = []
+    gindex = 0
+    for field_idx, field in enumerate(fields):
+        for t_idx, track in enumerate(tracks):
+            for r_idx, seating in enumerate(
+                _seat_rotations(list(field), num_players)
+            ):
+                seat_factories = [contenders[lbl] for lbl in seating]
+                seat_labels = {seat: lbl for seat, lbl in enumerate(seating)}
+                batch_seed = (
+                    seed
+                    + field_idx * 1_000_003
+                    + t_idx * 10_007
+                    + r_idx * 101
+                )
+                raw = run_batch(
+                    track,
+                    seat_factories,
+                    num_games=games_per_field,
+                    parallel=parallel,
+                    seed=batch_seed,
+                )
+                relabelled = _relabel_outcomes(raw, seat_labels)
+                for o in relabelled:
+                    combined.append(dataclasses.replace(o, game_index=gindex))
+                    gindex += 1
+    return combined
+
+
 def evaluate_league(
     contenders: Mapping[str, AgentFactory],
     *,
@@ -662,6 +726,7 @@ def evaluate_league(
     matchup_sampling: str = "exhaustive",
     fields_per_contender: int | None = None,
     games_per_field: int | None = None,
+    sampled_fields: list[tuple[str, ...]] | None = None,
 ) -> LeagueLadder:
     """Round-robin a pool of checkpoints + reference heuristics; rank-based ratings.
 
@@ -688,10 +753,18 @@ def evaluate_league(
         rating: ``"trueskill"`` (default headline) or ``"elo"`` (always computed).
         seed: base seed (deterministic).
         parallel: passed to ``run_batch`` (default ``False`` for MLAgent pools).
-        matchup_sampling: ``"exhaustive"`` (8C) or ``"sampled"`` (8D -- not yet
-            implemented; raises ``NotImplementedError``).
-        fields_per_contender / games_per_field: 8D sampled-mode knobs (unused in
-            8C; accepted so the API is stable for 8D).
+        matchup_sampling: ``"exhaustive"`` (8C default -- enumerate ``C(n,k)``
+            fields) or ``"sampled"`` (8D -- play a precomputed balanced
+            ``sampled_fields`` list so the league scales to tens of contenders,
+            §7.2/§12). The balanced sampler that builds ``sampled_fields`` lives
+            in :mod:`heat.ml.sweep` and is unit-tested there.
+        fields_per_contender / games_per_field: 8D sampled-mode knobs.
+            ``games_per_field`` sets games per field-rotation in sampled mode
+            (defaults to ``games_per_matchup``); ``fields_per_contender`` (K) is
+            recorded for provenance but the field list is built externally.
+        sampled_fields: required when ``matchup_sampling="sampled"`` -- the
+            precomputed list of distinct-``num_players`` contender-label tuples
+            to play (each on every track, seat-rotated).
 
     Returns:
         A :class:`LeagueLadder` with ELO ratings (always), optional TrueSkill,
@@ -707,11 +780,43 @@ def evaluate_league(
             f"got {matchup_sampling!r}"
         )
     if matchup_sampling == "sampled":
-        # 8D forward-compat seam (§7.5): the param + LeagueLadder.outcomes field
-        # exist now; the balanced field sampler is filled in by Sprint 8D.
-        raise NotImplementedError(
-            "matchup_sampling='sampled' is a Sprint 8D feature; use "
-            "'exhaustive' for the 8C small-N evaluator"
+        # 8D (§7.2/§12): play a precomputed balanced field list. The sampler
+        # that builds it lives in heat.ml.sweep (unit-tested there); the
+        # evaluator stays a thin seam that seats, rotates, relabels, and rates.
+        if mode != "free_for_all":
+            raise ValueError(
+                "matchup_sampling='sampled' is only valid with "
+                "mode='free_for_all'"
+            )
+        if not (2 <= num_players <= 6):
+            raise ValueError(f"num_players must be 2..6, got {num_players}")
+        if sampled_fields is None:
+            raise ValueError(
+                "matchup_sampling='sampled' requires sampled_fields (build it "
+                "with heat.ml.sweep.balanced_fields)"
+            )
+        gpf = games_per_field if games_per_field is not None else games_per_matchup
+        gpf = max(1, gpf)
+        outcomes = _sampled_field_outcomes(
+            contenders,
+            list(sampled_fields),
+            tracks=tracks,
+            num_players=num_players,
+            games_per_field=gpf,
+            seed=seed,
+            parallel=parallel,
+        )
+        ratings = compute_elo(outcomes, by="agent_type", bootstrap_seed=seed)
+        trueskill = (
+            compute_trueskill(outcomes, by="agent_type")
+            if rating == "trueskill"
+            else None
+        )
+        return LeagueLadder(
+            ratings=ratings,
+            trueskill=trueskill,
+            pairwise=None,
+            outcomes=outcomes,
         )
 
     if mode == "pairwise":
