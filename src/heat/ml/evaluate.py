@@ -139,6 +139,9 @@ def _make_lookahead(
     n_determinizations: int,
     spin_penalty: float,
     leaf_value: str,
+    determinize_hidden: bool,
+    top_k: int | None,
+    sim_budget: int | None,
 ) -> Agent:
     """Top-level (picklable) constructor for a :class:`LookaheadAgent`.
 
@@ -146,7 +149,9 @@ def _make_lookahead(
     lambda/closure) so the factory pickles into ``ProcessPoolExecutor`` workers.
     Carries only config primitives; the agent builds its own default rollout
     policy. The agent is deterministic given the state, so ``seed`` is ignored
-    here (eval is order-independent).
+    here (eval is order-independent). The S2 levers
+    (``determinize_hidden``/``top_k``/``sim_budget``) are plain primitives so the
+    league entry for the tuned agent pickles unchanged.
     """
     agent_name = name if name is not None else f"Lookahead-{player_id}"
     return LookaheadAgent(
@@ -155,6 +160,9 @@ def _make_lookahead(
         n_determinizations=n_determinizations,
         spin_penalty=spin_penalty,
         leaf_value=leaf_value,
+        determinize_hidden=determinize_hidden,
+        top_k=top_k,
+        sim_budget=sim_budget,
     )
 
 
@@ -165,13 +173,18 @@ def lookahead_agent_factory(
     n_determinizations: int = 2,
     spin_penalty: float = DEFAULT_SPIN_PENALTY,
     leaf_value: str = "progress",
+    determinize_hidden: bool = False,
+    top_k: int | None = None,
+    sim_budget: int | None = None,
 ) -> AgentFactory:
     """Return a picklable factory producing :class:`LookaheadAgent`s.
 
     Mirrors :func:`strong_heuristic_agent_factory`: the returned callable is a
     :func:`functools.partial` of a top-level constructor (never a lambda), so it
     pickles into ``run_batch(parallel=True)`` workers. Lets the search agent be
-    dropped into ``evaluate_ml`` / the league as a first-class contender.
+    dropped into ``evaluate_ml`` / the league as a first-class contender. The S2
+    config (``determinize_hidden``/``top_k``/``sim_budget``) lets the league host
+    the *tuned* search agent (determinized multiplayer + branching control).
     """
     return functools.partial(
         _make_lookahead,
@@ -180,6 +193,9 @@ def lookahead_agent_factory(
         n_determinizations=n_determinizations,
         spin_penalty=spin_penalty,
         leaf_value=leaf_value,
+        determinize_hidden=determinize_hidden,
+        top_k=top_k,
+        sim_budget=sim_budget,
     )
 
 

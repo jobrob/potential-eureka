@@ -61,9 +61,11 @@ here and called out in the eval harness; treat solo/limit-1 as the gating metric
 
 from __future__ import annotations
 
+import random
+import time
 from typing import Callable
 
-from heat.models.cards import Card
+from heat.models.cards import Card, CardType
 from heat.models.game_state import GameState
 from heat.engine import rules
 from heat.engine.driver import Decision, DecisionKind, run_round_driver
@@ -97,6 +99,54 @@ DEFAULT_SPIN_PENALTY: float = 11.0
 #: "inert spin_penalty" pathology (Problem A) and, together with pre-spin
 #: progress crediting, the "horizon blows up" pathology (Problem B).
 DEFAULT_OWN_SPIN_PENALTY: float = 1000.0
+
+#: Default branching cap. ``None`` keeps every distinct-by-speed candidate (the
+#: S1 behaviour). An int keeps only the ``top_k`` candidates ranked by the fast
+#: ``_move_eval`` prior before the expensive rollout -- the design's "top-k by a
+#: fast prior" branching control. Sized to comfortably contain the best play on
+#: the tight distribution while taming the 494-wide CARDS branch at depth.
+DEFAULT_TOP_K: int | None = None
+
+#: Default per-move simulation budget (clones). ``None`` = unbounded (S1). When
+#: set, the planner stops scoring further candidates once this many rollout
+#: clones have been spent this move, so deep/wide search stays affordable. The
+#: top-k prior ordering ensures the highest-prior candidates are scored first,
+#: so a budget cut never drops a likely-best play before a likely-worse one.
+DEFAULT_SIM_BUDGET: int | None = None
+
+
+class SearchProfile:
+    """Lightweight per-agent profiling accumulator (clones, time, moves).
+
+    The design asks S2 to "record profiling numbers (clones/move, ms/move)".
+    A :class:`LookaheadAgent` owns one of these and updates it on every planned
+    move; :meth:`summary` returns the per-move averages the eval harness prints.
+    Cheap (a few counter increments) so it is always on -- no flag to forget.
+    """
+
+    __slots__ = ("clones", "moves", "seconds")
+
+    def __init__(self) -> None:
+        self.clones = 0
+        self.moves = 0
+        self.seconds = 0.0
+
+    def record_move(self, clones: int, seconds: float) -> None:
+        self.clones += clones
+        self.seconds += seconds
+        self.moves += 1
+
+    def clones_per_move(self) -> float:
+        return self.clones / self.moves if self.moves else 0.0
+
+    def ms_per_move(self) -> float:
+        return (self.seconds / self.moves * 1000.0) if self.moves else 0.0
+
+    def summary(self) -> str:
+        return (
+            f"moves={self.moves} clones/move={self.clones_per_move():.1f} "
+            f"ms/move={self.ms_per_move():.2f}"
+        )
 
 
 def _default_rollout_policy() -> BaseAgent:
@@ -137,6 +187,20 @@ class LookaheadAgent(BaseAgent):
         leaf_value: ``"progress"`` (lap-aware race progress -- the prototype's
             objective) or ``"move_eval"`` (the strong heuristic's spaces-currency
             :func:`_move_eval.evaluate_move`). Default ``"progress"``.
+        determinize_hidden: When True (S2), each rollout clone re-samples the
+            *opponents'* hidden hands/decks from the public belief (uniform over
+            the cards known to be in their hand+draw pile) before rolling forward
+            -- "determinized search". When False (S1 default), the rollout sees
+            the opponents' actual hands ("open-hand" search). Has no effect in
+            solo play (no opponents). See :meth:`_determinize_opponents`.
+        top_k: Branching control. When set, only the ``top_k`` candidate plays
+            ranked highest by the fast ``_move_eval`` prior are rolled out (the
+            others are pruned before the expensive search). ``None`` (default)
+            keeps every distinct-by-speed candidate (S1).
+        sim_budget: Per-move cap on rollout clones. When set, the planner stops
+            after this many clones have been spent on the current move (candidates
+            are scored highest-prior-first so a cut never drops a likely-best
+            play first). ``None`` (default) is unbounded (S1).
         seed: Optional seed mixed into the per-turn rollout RNG so a seeded batch
             is reproducible. The agent is otherwise a deterministic function of
             the state (no global RNG is ever touched).
@@ -152,6 +216,9 @@ class LookaheadAgent(BaseAgent):
         spin_penalty: float = DEFAULT_SPIN_PENALTY,
         own_spin_penalty: float = DEFAULT_OWN_SPIN_PENALTY,
         leaf_value: str = "progress",
+        determinize_hidden: bool = False,
+        top_k: int | None = DEFAULT_TOP_K,
+        sim_budget: int | None = DEFAULT_SIM_BUDGET,
         seed: int | None = None,
     ) -> None:
         super().__init__(name=name)
@@ -164,6 +231,12 @@ class LookaheadAgent(BaseAgent):
         if leaf_value not in ("progress", "move_eval"):
             raise ValueError(
                 f"leaf_value must be 'progress' or 'move_eval', got {leaf_value!r}"
+            )
+        if top_k is not None and top_k < 1:
+            raise ValueError(f"top_k must be >= 1 or None, got {top_k}")
+        if sim_budget is not None and sim_budget < 1:
+            raise ValueError(
+                f"sim_budget must be >= 1 or None, got {sim_budget}"
             )
 
         # Resolve the rollout policy (instance or factory) into an instance.
@@ -179,7 +252,13 @@ class LookaheadAgent(BaseAgent):
         self.spin_penalty = float(spin_penalty)
         self.own_spin_penalty = float(own_spin_penalty)
         self.leaf_value = leaf_value
+        self.determinize_hidden = determinize_hidden
+        self.top_k = top_k
+        self.sim_budget = sim_budget
         self.seed = seed
+
+        #: Per-agent profiling (clones/move, ms/move). Always on; cheap.
+        self.profile = SearchProfile()
 
         # Cached plan for the current turn (mirrors StrongHeuristicAgent).
         self._plan_sig: _TurnSig | None = None
@@ -248,6 +327,113 @@ class LookaheadAgent(BaseAgent):
                 plans.append(((gear, gear_heat), play))
         return plans
 
+    def _candidate_prior(
+        self,
+        state: GameState,
+        player_id: int,
+        gear: tuple[int, int],
+        cards: tuple[Card, ...],
+    ) -> float:
+        """Fast static score of a ``(gear, cards)`` candidate (no rollout).
+
+        Used only to RANK candidates for top-k branching control and budget
+        ordering -- never to choose the final move (the rollout does that). It
+        reuses the strong heuristic's spaces-currency :func:`_move_eval` so the
+        ranking matches the project's own notion of a good move, which is far
+        cheaper than a clone+rollout. Computed against the *live* state's player
+        (no clone), so the whole prior pass costs nothing in clones.
+        """
+        player = state.get_player(player_id)
+        exp_stress = ME.expected_basic_value(player)
+        exp_speed = ME.play_speed(cards, exp_stress)
+        result = ME.evaluate_move(
+            state,
+            player_id,
+            expected_speed=exp_speed,
+            heat_spent=gear[1],
+            from_position=player.position,
+            from_lap=player.lap,
+            planned_gear=gear[0],
+            heat_price=ME.DEFAULT_HEAT_PRICE,
+            horizon_corners=1,
+            opponent_aware=True,
+            blocking=False,
+            enable_solvency=True,
+        )
+        return result.value
+
+    def _prune_top_k(
+        self,
+        state: GameState,
+        player_id: int,
+        candidates: list[tuple[tuple[int, int], tuple[Card, ...]]],
+    ) -> list[tuple[tuple[int, int], tuple[Card, ...]]]:
+        """Order candidates by the fast prior and keep the best (top-k).
+
+        Returns candidates sorted by descending prior (so the planner scores the
+        most promising lines first -- which makes a ``sim_budget`` cut drop only
+        the least-promising candidates). When ``top_k`` is set, truncates to that
+        many. The sort is *stable* on the original enumeration order via the
+        index tiebreak, so determinism is preserved (equal-prior candidates keep
+        their S1 order). When ``top_k`` is None we still sort -- this only matters
+        for budget ordering and never changes the unbudgeted argmax.
+        """
+        scored = [
+            (self._candidate_prior(state, player_id, gear, cards), idx, gear, cards)
+            for idx, (gear, cards) in enumerate(candidates)
+        ]
+        # Descending prior, ties broken by original index (stable, deterministic).
+        scored.sort(key=lambda t: (-t[0], t[1]))
+        ordered = [(gear, cards) for _, _, gear, cards in scored]
+        if self.top_k is not None:
+            ordered = ordered[: self.top_k]
+        return ordered
+
+    # ------------------------------------------------------------------
+    # Hidden-information determinization (S2)
+    # ------------------------------------------------------------------
+
+    def _determinize_opponents(
+        self, clone: GameState, player_id: int, det_rng: random.Random
+    ) -> None:
+        """Re-sample opponents' hidden hands/decks from the public belief.
+
+        From the learner's seat the *contents* of an opponent's hand+draw-pile
+        are public (the standard deck plus any stress/heat they have taken, all
+        observable from play), but the *partition* into "in hand" vs "in draw
+        pile" and the draw order are hidden. The maximum-entropy belief
+        consistent with that knowledge is: pool each opponent's current
+        ``hand + draw_pile`` cards, shuffle, deal back a hand of the same size,
+        and leave the remainder as the (shuffled) draw pile. The discard pile is
+        left untouched (cards already played/discarded are public and their
+        position is fixed). This is the "determinized search" the design calls
+        for; averaging over several such determinizations approximates the
+        expectation over the opponents' hidden state.
+
+        Mutates ``clone`` in place. Only opponents are resampled -- the learner's
+        own hand is not hidden from itself. No-op in solo play. The learner's own
+        future *draws* remain a chance node handled by ``n_determinizations``
+        re-seeding (see :meth:`_score_plan`).
+        """
+        for opp in clone.players:
+            if opp.player_id == player_id or opp.finished:
+                continue
+            deck = opp.deck
+            hand_size = len(opp.hand)
+            # Pool the hidden cards (hand + draw pile); discard stays put.
+            pool = list(opp.hand) + list(deck.draw_pile)
+            if not pool:
+                continue
+            # Canonicalize before shuffling so the result depends only on the
+            # det RNG + the (multiset) contents, never on prior list order
+            # (mirrors Deck.attach_rng's id-sort-then-shuffle discipline).
+            pool.sort(key=lambda c: c.id)
+            det_rng.shuffle(pool)
+            opp.hand = pool[:hand_size]
+            remaining = pool[hand_size:]
+            # Rebuild the draw pile in-place, preserving the existing discard.
+            deck._draw_pile = list(remaining)
+
     # ------------------------------------------------------------------
     # Rollout core
     # ------------------------------------------------------------------
@@ -278,6 +464,14 @@ class LookaheadAgent(BaseAgent):
             # logging must be on regardless of the live game's setting. The
             # clone is throwaway, so this never touches the real event log.
             clone.logging_enabled = True
+            if self.determinize_hidden:
+                # A chance node over the opponents' hidden state: re-deal their
+                # hands/decks from the public belief, with a det-specific RNG
+                # derived from the same deterministic reseed so the whole score
+                # stays a pure function of (state, turn_seed, plan, det).
+                self._determinize_opponents(
+                    clone, player_id, random.Random(reseed ^ 0x5DEECE66)
+                )
             total += self._rollout_once(clone, player_id, gear, cards)
         return total / self.n_determinizations
 
@@ -507,29 +701,64 @@ class LookaheadAgent(BaseAgent):
     ) -> tuple[tuple[int, int], tuple[Card, ...]]:
         """Search the candidate plans and return the best ``(gear, cards)``.
 
-        Deterministic: candidates are scored in a fixed enumeration order and
+        Deterministic: candidates are scored in a fixed (prior-ranked) order and
         ties are broken by first-seen order, so the same state + seed always
         yields the same plan (no RNG in the selection).
+
+        S2 adds two tractability levers, both of which preserve the unbudgeted /
+        unpruned argmax on the S1 default config (``top_k=None``,
+        ``sim_budget=None``):
+
+          * **top-k branching control** -- candidates are ranked by the fast
+            ``_move_eval`` prior; only the best ``top_k`` are rolled out.
+          * **sim budget** -- once ``sim_budget`` rollout clones have been spent
+            this move, scoring stops. Because candidates are scored in
+            prior-descending order, a budget cut only ever drops the
+            least-promising (by prior) lines.
+
+        Per-move clones and wall time are recorded into :attr:`profile`.
         """
         candidates = self._candidate_plans(state, player_id, legal_gears)
         if not candidates:
             # Degenerate fallback: cheapest legal gear with any legal play.
             gear = legal_gears[0]
             plays = rules.legal_card_plays(state.get_player(player_id).hand, gear[0])
+            self.profile.record_move(0, 0.0)
             return gear, plays[0]
 
         sig = self._turn_signature(state, player_id)
         turn_seed = self._turn_seed(sig)
 
-        best_plan = candidates[0]
+        # Rank by the fast prior (and truncate to top_k); ordering also makes the
+        # budget cut prior-aware. The original enumeration index is the score's
+        # plan_index so the per-candidate reseed stream is stable regardless of
+        # the prior re-ordering.
+        ordered = self._prune_top_k(state, player_id, candidates)
+        index_of = {(gear, cards): i for i, (gear, cards) in enumerate(candidates)}
+
+        clones_per_score = self.n_determinizations
+        t0 = time.perf_counter()
+        clones_spent = 0
+        best_plan = ordered[0]
         best_value = float("-inf")
-        for idx, (gear, cards) in enumerate(candidates):
+        for gear, cards in ordered:
+            if (
+                self.sim_budget is not None
+                and clones_spent + clones_per_score > self.sim_budget
+                and clones_spent > 0
+            ):
+                # Out of budget; keep the best found so far. (Always score at
+                # least one candidate so a tiny budget still returns a real plan.)
+                break
+            plan_index = index_of[(gear, cards)]
             value = self._score_plan(
-                state, player_id, gear, cards, turn_seed, idx
+                state, player_id, gear, cards, turn_seed, plan_index
             )
+            clones_spent += clones_per_score
             if value > best_value:
                 best_value = value
                 best_plan = (gear, cards)
+        self.profile.record_move(clones_spent, time.perf_counter() - t0)
         return best_plan
 
     def _ensure_plan(

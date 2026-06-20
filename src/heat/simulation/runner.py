@@ -199,6 +199,9 @@ def _make_lookahead(
     n_determinizations: int,
     spin_penalty: float,
     leaf_value: str,
+    determinize_hidden: bool,
+    top_k: int | None,
+    sim_budget: int | None,
     use_seed: bool,
 ) -> Agent:
     """Top-level (picklable) constructor for a :class:`LookaheadAgent`.
@@ -207,7 +210,9 @@ def _make_lookahead(
     enclosing :func:`functools.partial` pickles into ``ProcessPoolExecutor``
     workers; the agent builds its own default :class:`HeuristicAgent` rollout
     policy. ``seed`` is threaded into the per-turn rollout RNG only when
-    ``use_seed`` is set, so the default factory stays order-independent.
+    ``use_seed`` is set, so the default factory stays order-independent. The
+    S2 levers (``determinize_hidden``, ``top_k``, ``sim_budget``) are all plain
+    primitives so the league/tuned-agent factory pickles unchanged.
     """
     agent_name = name if name is not None else f"Lookahead-{player_id}"
     return LookaheadAgent(
@@ -216,6 +221,9 @@ def _make_lookahead(
         n_determinizations=n_determinizations,
         spin_penalty=spin_penalty,
         leaf_value=leaf_value,
+        determinize_hidden=determinize_hidden,
+        top_k=top_k,
+        sim_budget=sim_budget,
         seed=seed if use_seed else None,
     )
 
@@ -227,6 +235,9 @@ def lookahead_agent_factory(
     n_determinizations: int = 2,
     spin_penalty: float = DEFAULT_SPIN_PENALTY,
     leaf_value: str = "progress",
+    determinize_hidden: bool = False,
+    top_k: int | None = None,
+    sim_budget: int | None = None,
     use_seed: bool = False,
 ) -> AgentFactory:
     """Return a picklable factory producing :class:`LookaheadAgent`s.
@@ -239,9 +250,14 @@ def lookahead_agent_factory(
     Args:
         name: Optional fixed display name (else ``Lookahead-{id}``).
         horizon: Rollout depth in rounds (``0`` == greedy one-ply).
-        n_determinizations: Clones averaged per candidate (own-draw variance).
+        n_determinizations: Clones averaged per candidate (own-draw variance, and
+            -- with ``determinize_hidden`` -- opponent-hand variance).
         spin_penalty: ``lambda`` in ``progress - lambda * spins`` (spaces/spin).
         leaf_value: ``"progress"`` or ``"move_eval"``.
+        determinize_hidden: Re-sample opponents' hidden hands/decks per rollout
+            (S2 multiplayer determinization). No effect in solo.
+        top_k: Keep only the best ``top_k`` candidates by the fast prior.
+        sim_budget: Per-move cap on rollout clones.
         use_seed: Thread the per-player derived seed into the rollout RNG (off by
             default so the agent is fully deterministic regardless of seat order).
     """
@@ -252,6 +268,9 @@ def lookahead_agent_factory(
         n_determinizations=n_determinizations,
         spin_penalty=spin_penalty,
         leaf_value=leaf_value,
+        determinize_hidden=determinize_hidden,
+        top_k=top_k,
+        sim_budget=sim_budget,
         use_seed=use_seed,
     )
 

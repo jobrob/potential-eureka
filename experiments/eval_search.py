@@ -209,15 +209,24 @@ def _run_field(
     track_seeds: list[int],
     num_players: int,
     game_seed_base: int,
-) -> dict[str, _AgentAgg]:
+) -> tuple[dict[str, _AgentAgg], dict[str, str]]:
     """Run one field (solo or 4p) and aggregate per-agent metrics.
 
     For each held-out track seed, every agent label plays one game seated at
     seat 0 (the remaining seats in 4p are weak heuristics -- a fixed, neutral
     backdrop so the corner metric for seat 0 is comparable across agents). A
     fresh agent instance per game keeps per-game RNG state clean.
+
+    Returns ``(aggs, profiles)`` where ``profiles[label]`` is a one-line profiling
+    summary (clones/move, ms/move) accumulated across that label's games when the
+    agent exposes a ``profile`` (only the ``LookaheadAgent`` does); other labels
+    map to an empty string.
     """
     aggs: dict[str, _AgentAgg] = {label: _AgentAgg() for label in label_to_agent}
+    # Accumulate profiling across games per label by summing into one profile.
+    prof_clones: dict[str, int] = {label: 0 for label in label_to_agent}
+    prof_moves: dict[str, int] = {label: 0 for label in label_to_agent}
+    prof_seconds: dict[str, float] = {label: 0.0 for label in label_to_agent}
 
     for gi, tseed in enumerate(track_seeds):
         track = generate_track(tseed, _TIGHT_PARAMS)
@@ -236,8 +245,73 @@ def _run_field(
             finished = 0 in result.finish_order
             passes, spins = _passes_and_spins_by_limit(track, result.event_log, 0)
             aggs[label].add_game(finished, result.total_rounds, passes, spins)
+            prof = getattr(agent, "profile", None)
+            if prof is not None:
+                prof_clones[label] += prof.clones
+                prof_moves[label] += prof.moves
+                prof_seconds[label] += prof.seconds
 
-    return aggs
+    profiles: dict[str, str] = {}
+    for label in label_to_agent:
+        m = prof_moves[label]
+        if m:
+            profiles[label] = (
+                f"clones/move={prof_clones[label] / m:.1f} "
+                f"ms/move={prof_seconds[label] / m * 1000.0:.2f} "
+                f"(moves={m})"
+            )
+        else:
+            profiles[label] = ""
+    return aggs, profiles
+
+
+# ---------------------------------------------------------------------------
+# Seat-neutral 4p win-rate (secondary gate)
+# ---------------------------------------------------------------------------
+
+
+def _winner(result) -> int | None:
+    """The winning seat id (first in finish order), or None if nobody finished."""
+    return result.finish_order[0] if result.finish_order else None
+
+
+def _seat_neutral_winrate(
+    make_focal: "callable",
+    make_opponent: "callable",
+    *,
+    track_seeds: list[int],
+    game_seed_base: int,
+) -> float:
+    """Win-rate of ``make_focal`` vs three ``make_opponent`` in 4p, seat-neutral.
+
+    Per the seat-bias finding (front turn-order seats win more, all else equal),
+    a single fixed-seat measurement is contaminated. We therefore rotate the
+    focal agent through ALL FOUR seats (different seeds per rotation) and average
+    the win indicator, so the positional advantage cancels. Returns the fraction
+    of games the focal agent finished first across the 4 x len(track_seeds)
+    games.
+    """
+    wins = 0
+    games = 0
+    for gi, tseed in enumerate(track_seeds):
+        track = generate_track(tseed, _TIGHT_PARAMS)
+        for focal_seat in range(4):
+            agents: list[BaseAgent] = []
+            for seat in range(4):
+                agents.append(
+                    make_focal() if seat == focal_seat else make_opponent()
+                )
+            game = Game(
+                track,
+                agents,
+                logging_enabled=False,
+                seed=game_seed_base + gi * 4 + focal_seat,
+            )
+            result = game.run()
+            if _winner(result) == focal_seat:
+                wins += 1
+            games += 1
+    return wins / games if games else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +319,11 @@ def _run_field(
 # ---------------------------------------------------------------------------
 
 
-def _print_field(title: str, aggs: dict[str, _AgentAgg]) -> None:
+def _print_field(
+    title: str,
+    aggs: dict[str, _AgentAgg],
+    profiles: dict[str, str] | None = None,
+) -> None:
     print(f"\n=== {title} ===")
     # All limits that appeared, low (tight) first.
     limits = sorted(
@@ -281,6 +359,13 @@ def _print_field(title: str, aggs: dict[str, _AgentAgg]) -> None:
             s = agg.total_spins_by_limit.get(lim, 0)
             parts.append(f"L{lim}:{s}/{p}")
         print(f"    {label:<18}" + "  ".join(parts))
+
+    # Profiling (clones/move, ms/move) for agents that expose it.
+    if profiles and any(profiles.values()):
+        print("  search profiling:")
+        for label, summary in profiles.items():
+            if summary:
+                print(f"    {label:<18}{summary}")
 
 
 def _success_check(solo: dict[str, _AgentAgg]) -> None:
@@ -331,6 +416,49 @@ def _success_check(solo: dict[str, _AgentAgg]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Secondary gate: seat-neutral 4p win-rate (S2)
+# ---------------------------------------------------------------------------
+
+
+def _winrate_gate(
+    make_det: "callable",
+    track_seeds: list[int],
+    seed_base: int,
+) -> None:
+    """Print the S2 secondary gate: seat-neutral 4p win-rate of the tuned agent.
+
+    The success bar is: vs the WEAK heuristic, win-rate **> parity** (parity in a
+    4p field is 25%); vs the STRONG heuristic, **competitive** (we report it and
+    flag clearly below parity). All measurements are seat-neutral (focal agent
+    rotated through all four seats) so the front-seat positional advantage does
+    not masquerade as skill. This is explicitly SECONDARY to the solo/limit-1
+    discipline above -- determinized search can be optimistic in adversarial
+    hidden-info play, so a soft result here does not fail the sprint.
+    """
+    print("\n=== 4P win-rate (seat-neutral, secondary gate) ===")
+    parity = 1.0 / 4.0
+
+    vs_weak = _seat_neutral_winrate(
+        make_det, lambda: HeuristicAgent(),
+        track_seeds=track_seeds, game_seed_base=seed_base,
+    )
+    vs_strong = _seat_neutral_winrate(
+        make_det, lambda: StrongHeuristicAgent(strength=2),
+        track_seeds=track_seeds, game_seed_base=seed_base + 4000,
+    )
+
+    print(f"  parity (4p) = {parity * 100:.0f}%")
+    print(f"  LookaheadDet vs 3x weak  heuristic: {vs_weak * 100:.1f}%")
+    print(f"  LookaheadDet vs 3x strong heuristic: {vs_strong * 100:.1f}%")
+    print(
+        f"  -> vs weak > parity:       "
+        f"{'PASS' if vs_weak > parity + 1e-9 else 'FAIL'}\n"
+        f"  -> vs strong competitive:  "
+        f"{'PASS (>= parity)' if vs_strong >= parity - 1e-9 else 'SOFT (< parity)'}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -347,6 +475,12 @@ def main() -> None:
                         help="base seed for game RNG (track seeds are held-out)")
     parser.add_argument("--skip-4p", action="store_true",
                         help="run only the solo field (faster)")
+    parser.add_argument("--top-k", type=int, default=None,
+                        help="LookaheadAgent top-k branching cap (S2)")
+    parser.add_argument("--sim-budget", type=int, default=None,
+                        help="LookaheadAgent per-move clone budget (S2)")
+    parser.add_argument("--skip-winrate", action="store_true",
+                        help="skip the (slower) seat-neutral 4p win-rate gate")
     args = parser.parse_args()
 
     track_seeds = [_HELDOUT_BASE + i for i in range(args.games)]
@@ -358,37 +492,57 @@ def main() -> None:
         return StrongHeuristicAgent(strength=2)
 
     def make_lookahead() -> BaseAgent:
+        # S1-style: open-hand rollout (no hidden-info determinization).
         return LookaheadAgent(
             horizon=args.horizon,
             n_determinizations=args.dets,
+            top_k=args.top_k,
+            sim_budget=args.sim_budget,
+        )
+
+    def make_lookahead_det() -> BaseAgent:
+        # S2 tuned: hidden-info determinization on (the multiplayer-correct mode).
+        return LookaheadAgent(
+            name="LookaheadDet",
+            horizon=args.horizon,
+            n_determinizations=args.dets,
+            determinize_hidden=True,
+            top_k=args.top_k,
+            sim_budget=args.sim_budget,
         )
 
     labels = {
         "Heuristic": make_heuristic,
         "StrongHeuristic": make_strong,
         "Lookahead": make_lookahead,
+        "LookaheadDet": make_lookahead_det,
     }
 
     print(
         f"eval_search: {args.games} held-out generated tracks "
         f"(tight params, limit-1 weighted), horizon={args.horizon}, "
-        f"dets={args.dets}"
+        f"dets={args.dets}, top_k={args.top_k}, sim_budget={args.sim_budget}"
     )
 
-    solo = _run_field(
+    solo, solo_prof = _run_field(
         labels, track_seeds=track_seeds, num_players=1,
         game_seed_base=args.seed,
     )
-    _print_field("SOLO (primary gate)", solo)
+    _print_field("SOLO (primary gate)", solo, solo_prof)
 
     if not args.skip_4p:
-        four = _run_field(
+        four, four_prof = _run_field(
             labels, track_seeds=track_seeds, num_players=4,
             game_seed_base=args.seed + 5000,
         )
-        _print_field("4P vs weak heuristics (open-hand rollout, S2 caveat)", four)
+        _print_field(
+            "4P vs weak heuristics (seat-0; spin/finish metric)", four, four_prof
+        )
 
     _success_check(solo)
+
+    if not args.skip_winrate:
+        _winrate_gate(make_lookahead_det, track_seeds, args.seed + 9000)
 
 
 if __name__ == "__main__":

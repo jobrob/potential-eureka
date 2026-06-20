@@ -1,7 +1,8 @@
 # Search + Imitation Sprints — beating the limit-1 corner via the simulator we own
 
-> **Status:** **Sprint S1 (a.k.a. "9a") is BUILT + VALIDATED + green** (see the
-> "S1 — Outcome" subsection in §4); everything downstream of S1 is design-only.
+> **Status:** **Sprints S1 (a.k.a. "9a") and S2 are BUILT + VALIDATED + green**
+> (see the "S1 — Outcome" and "S2 — Outcome" subsections in §4); everything
+> downstream of S2 is design-only.
 > Correction: the Tier-1.1 prototype `experiments/proto_search.py` referenced
 > below **was never committed and did not exist** — S1's `LookaheadAgent` was
 > built from scratch by generalizing `StrongHeuristicAgent`'s 1-ply joint
@@ -271,6 +272,100 @@ heuristic **competitive**, at an inference cost the eval harness tolerates.
 **Risks.** Determinized search can be over-optimistic in adversarial hidden-info
 play; keep solo/limit-1 discipline as the primary metric, treat multiplayer
 win-rate as secondary until S4/S5.
+
+#### Sprint S2 — Outcome (BUILT + VALIDATED, 2026-06-20)
+
+Delivered on branch `worktree-sprint-9b-search-s2` (stacked on S1), all as
+**opt-in config on `LookaheadAgent`** so the S1 default path — and all 15 S1
+tests — are byte-for-byte unchanged:
+
+- **Multiplayer hidden-info determinization** (`determinize_hidden=True`):
+  before each rollout clone, each opponent's hidden `hand + draw_pile` is pooled,
+  id-sorted (canonical), shuffled with a det-specific RNG derived from the same
+  deterministic reseed, and re-dealt to a same-size hand + shuffled draw pile;
+  the discard pile (public) is untouched. The belief is **multiset-preserving**
+  (never invents/loses an opponent card), leaves the learner's own hand alone,
+  and is a no-op in solo. Averaging over `n_determinizations` such re-deals is
+  the chance-node expectation over the opponents' hidden state.
+- **Expectimax / own-draw chance node:** the existing `n_determinizations`
+  averaging is the expectation over the learner's own future draws (each clone
+  re-seeds the draw order); S2 layers the opponent-hand chance node on top of it.
+- **Branching control:** `top_k` keeps only the best-`k` candidates ranked by a
+  fast `_move_eval` prior; candidates are scored **prior-descending**, so a
+  `sim_budget` (per-move clone cap) only ever drops the least-promising lines.
+  Both default to off (= S1 full search), and a unit test proves
+  top-k-keeps-all == full-search argmax and unbudgeted == raw S1 argmax.
+- **Profiling:** every `LookaheadAgent` owns a `SearchProfile` (clones/move,
+  ms/move), printed by the eval harness — always on, no flag.
+- **Leaf value:** `leaf_value="move_eval"` already plugged in S1; carried.
+- **REACT/slipstream:** already executed inside the rollout via the rollout
+  policy on the clone (they are part of every rolled-out line), so deeper search
+  already values them; S2 did not add a *separate* own-REACT branch (the rollout
+  policy's REACT is competent and branching it would multiply cost for little
+  measured gain — flagged for S5 if a gap appears).
+- **League entry:** both `lookahead_agent_factory`s (runner + evaluate) gained
+  `determinize_hidden` / `top_k` / `sim_budget` as plain primitives, so the tuned
+  determinized agent pickles into `evaluate_league` / `run_batch(parallel=True)`
+  unchanged. The eval harness registers it as the `LookaheadDet` contender.
+
+15 new tests in `tests/test_search_agent_s2.py` (determinization multiset
+invariant / own-hand+discard untouched / hand-size kept / actually-resamples /
+determinism-under-determinization / 4p legal completion / solo no-op; top-k keeps
+full-search best; budget caps clones/move and still scores ≥1 candidate;
+profiling records). **All 15 S1 + 15 S2 + 28 strong-heuristic tests green.**
+
+**Validated numbers (24 held-out generated tracks, tight/limit-1-weighted,
+horizon=2, dets=2):**
+
+| Metric (limit-1) | Heuristic | StrongHeur | Lookahead (S1) | **LookaheadDet (S2)** |
+|---|---|---|---|---|
+| solo worst-case spins/L1-pass | 1.50 | 1.86 | 0.50 | **0.50** |
+| solo finish | 100% | 100% | 100% | **100%** |
+| solo rounds | 26.2 | 42.1 | 19.3 | **19.3** |
+| solo pooled L1 spins/passes | 64/130 | 298/190 | 7/93 | **7/93** |
+| 4p p90 spins/L1-pass | 1.24 | 2.20 | 0.43 | **0.25** |
+| 4p pooled L2 / L3 spins | 14/5 | 30/19 | 5/0 | **0/0** |
+
+- **Primary gate (solo/limit-1): PASS** — worst-case 0.50 ≤ heuristic 1.50,
+  100% finish, rounds 19.3 ≤ 26.2. Solo is identical to S1 (determinization is a
+  no-op without opponents), exactly as intended.
+- **Secondary gate (seat-neutral 4p win-rate): PASS both.** Focal agent rotated
+  through all four seats (front-seat positional bias cancelled): **vs 3× weak
+  heuristic 63.5%** (parity 25%), **vs 3× strong heuristic 76.0%**. Both well
+  above parity — the determinized agent is the strongest contender in the field.
+- **In 4p, determinization is a net positive on the corner metric too:**
+  `LookaheadDet` drives L2/L3 to **0 spins** and a tighter L1 p90 (0.25 vs the
+  open-hand `Lookahead`'s 0.43), i.e. sampling opponent hands made it *less*
+  reckless, not more.
+- **Profiling / cost:** full search ~25 clones/move, ~4.4 ms/move solo /
+  ~30 ms/move in 4p (the 4p cost is the rollout simulating 3 opponents per round,
+  not the search breadth). `top_k=6` cuts this to **~11 clones/move (2.4×
+  cheaper)** while **still PASSING all three S1 criteria** (worst-case L1 0.667 ≤
+  heuristic 1.50) — the branching control is free accuracy-wise on this
+  distribution. Clone cost itself profiled at **~16 µs/clone (~64k/s)**.
+
+**Things S3+ MUST inherit:**
+
+1. **Determinization belief = pool `hand+draw_pile`, keep discard fixed.** The
+   opponent's *total card multiset* is public (standard deck + observable
+   stress/heat); only the hand/draw partition + order are hidden. Re-dealing the
+   pooled hidden cards (NOT touching the discard) is the max-entropy belief and
+   is multiset-preserving — a BC/DAgger expert that queries the search in 4p must
+   use this same belief, or its targets will be inconsistent with the env's real
+   info set. Canonicalize (id-sort) before the det shuffle, exactly like
+   `Deck.attach_rng`, or determinism breaks.
+2. **The S1 controllable-spin-dominates leaf split survived multiplayer
+   unchanged** — determinization adds variance to *later_spins* (opponent-driven
+   traffic) but `own_spins` is still the lever, so the `own_spin_penalty=1000` +
+   pre-spin-progress-floor combination is still load-bearing. Do not flatten it.
+3. **Branching control is prior-ordered, not prior-filtered-then-arbitrary.**
+   `top_k` and `sim_budget` are only safe because candidates are scored in
+   descending-prior order, so a cut drops the *worst* lines. A learned-prior
+   variant (S5) must preserve that ordering guarantee.
+4. **4p search cost scales with opponent count in the rollout, not breadth.**
+   ~30 ms/move in 4p vs ~4 ms solo is the 3 opponents being simulated each round,
+   so a faster rollout policy (or a learned leaf that shortens the horizon) is
+   the lever for S5 throughput — not a smaller `top_k`.
 
 ---
 
