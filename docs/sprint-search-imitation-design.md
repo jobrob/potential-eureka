@@ -1,7 +1,12 @@
 # Search + Imitation Sprints — beating the limit-1 corner via the simulator we own
 
-> **Status:** design. The Tier-1.1 prototype (`experiments/proto_search.py`) is
-> built and run; everything downstream of Sprint S1 is design-only.
+> **Status:** **Sprint S1 (a.k.a. "9a") is BUILT + VALIDATED + green** (see the
+> "S1 — Outcome" subsection in §4); everything downstream of S1 is design-only.
+> Correction: the Tier-1.1 prototype `experiments/proto_search.py` referenced
+> below **was never committed and did not exist** — S1's `LookaheadAgent` was
+> built from scratch by generalizing `StrongHeuristicAgent`'s 1-ply joint
+> planning. The prototype *numbers* quoted in the TL;DR are kept only as the
+> original motivation; the **validated** S1 numbers live in §4.
 > **Input:** the solo-driving investigation (memory: `project-solo-driving-decision-trace`)
 > and the Tier-1 idea triage from the 2026-06-19 review.
 > **Goal (unchanged):** an agent that takes tight (speed-limit-1) corners cleanly
@@ -180,6 +185,59 @@ generalization check.)
 **solo** (the corner-learning objective) and 4p with open-hand search, defer
 proper hidden-info sampling to S2. (2) Branching blow-up on rich hands → S1 keeps
 the dedup-by-speed prune from the prototype.
+
+#### Sprint S1 — Outcome (BUILT + VALIDATED, 2026-06-20)
+
+Delivered: `src/heat/agents/search_agent.py` (`LookaheadAgent`), registered in
+`heat.agents`; picklable `lookahead_agent_factory` in **both**
+`simulation/runner.py` and `ml/evaluate.py`; `experiments/eval_search.py`
+(generated tracks, spins bucketed by corner limit, p90/max); 15 unit tests in
+`tests/test_search_agent.py`. All on branch `worktree-sprint-9a-search-agent`.
+
+**Validated result (correct spin accounting, held-out generated tracks):**
+limit-1 spins/pass pooled **~0.06–0.22 vs HeuristicAgent ~0.49 (~3× fewer)**;
+worst-case (max) spins/limit-1-pass **≤ heuristic in every config tested**;
+**100% solo finish**; **rounds ≤ heuristic**. Robust across 24/32 tracks,
+seeds {0,5}, and horizons {2,3,4}. All three S1 success criteria PASS.
+
+**Three things the next sprint MUST inherit (hard-won — see memory
+`project-sprint-9a-search-agent`):**
+
+1. **The naive `progress − λ·spins` objective in this doc is INERT.** Because S1
+   search only *forces* the learner's first-round gear+cards and delegates
+   everything else to the rollout policy, the limit-1 spins that remain occur in
+   rollout-policy-driven later steps that are ~identical across candidates, so
+   `λ·spins` is a constant offset that cancels from the argmax (sweeping λ from
+   11→60 changed *nothing*). **The working objective splits spins by round:**
+   `progress − own_spin_penalty·own_spins − spin_penalty·later_spins`, where
+   `own_spins` are first-round spins (the forced move's own spin — the only spin
+   the search controls; `own_spin_penalty = 1000`, sized to dominate any banked
+   progress) and `later_spins` is a mild tie-break. S2/S5 reusing the leaf value
+   must keep this split (or an equivalent that makes the controllable spin
+   dominate), not the flat penalty.
+2. **End-of-horizon `progress` rewards reckless lines at depth.** A spin resets
+   the car to `corner.start−1`; the rollout policy then banks recovery progress
+   over the remaining `horizon−1` rounds, so deeper horizons *select* spinning
+   lines (h=3 blew up to ~370 spins across the held-out set). Fix shipped: a
+   **depth-invariant pre-spin progress floor** — when the forced move spins,
+   credit progress only up to `corner.start−1` (lap 0), never post-spin recovery
+   (`_pre_spin_progress`). Any deeper search (S2 expectimax, S5 MCTS value
+   targets) inherits this hazard; value the leaf at/just-before the failed corner,
+   not after recovery.
+3. **`StrongHeuristicAgent` is the WRONG rollout/leaf policy on this
+   distribution.** At strength 2 it spins *more* than the plain `HeuristicAgent`
+   on tight generated tracks (its 1-ply solvency is USA-fit). S1's default
+   rollout policy is `HeuristicAgent`; keep it (or build a tighter one) — do not
+   assume "stronger scripted = better leaf."
+
+**Also note for S2:** spin accounting reads `spin_out` events from the *clone's*
+event log (logging force-enabled on the throwaway clone) and is counted **once**
+after the rollout — counting the cumulative log per round multiply-counts early
+spins (the bug that originally inflated S1's headline). Determinism for the unit
+test comes from a per-(candidate, determinization) explicit `reseed=` derived
+from a hand-folded turn seed (NOT Python `hash()`, which is `PYTHONHASHSEED`
+-salted); `GameState.clone(reseed=None)` advances the parent RNG, so never clone
+candidates in a bare loop from the live state.
 
 ---
 

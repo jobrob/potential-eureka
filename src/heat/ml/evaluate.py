@@ -33,6 +33,7 @@ from typing import Mapping
 
 from heat.agents.ml_agent import MLAgent
 from heat.agents.strong_heuristic import StrongHeuristicAgent
+from heat.agents.search_agent import LookaheadAgent, DEFAULT_SPIN_PENALTY
 from heat.engine.game import Agent
 from heat.models.track import Track
 from heat.simulation.runner import (
@@ -127,6 +128,58 @@ def strong_heuristic_agent_factory(
         _make_strong_heuristic,
         strength=strength,
         name=name,
+    )
+
+
+def _make_lookahead(
+    player_id: int,
+    seed: int | None,
+    name: str | None,
+    horizon: int,
+    n_determinizations: int,
+    spin_penalty: float,
+    leaf_value: str,
+) -> Agent:
+    """Top-level (picklable) constructor for a :class:`LookaheadAgent`.
+
+    Mirrors :func:`_make_strong_heuristic`: a plain top-level function (no
+    lambda/closure) so the factory pickles into ``ProcessPoolExecutor`` workers.
+    Carries only config primitives; the agent builds its own default rollout
+    policy. The agent is deterministic given the state, so ``seed`` is ignored
+    here (eval is order-independent).
+    """
+    agent_name = name if name is not None else f"Lookahead-{player_id}"
+    return LookaheadAgent(
+        name=agent_name,
+        horizon=horizon,
+        n_determinizations=n_determinizations,
+        spin_penalty=spin_penalty,
+        leaf_value=leaf_value,
+    )
+
+
+def lookahead_agent_factory(
+    name: str | None = None,
+    *,
+    horizon: int = 2,
+    n_determinizations: int = 2,
+    spin_penalty: float = DEFAULT_SPIN_PENALTY,
+    leaf_value: str = "progress",
+) -> AgentFactory:
+    """Return a picklable factory producing :class:`LookaheadAgent`s.
+
+    Mirrors :func:`strong_heuristic_agent_factory`: the returned callable is a
+    :func:`functools.partial` of a top-level constructor (never a lambda), so it
+    pickles into ``run_batch(parallel=True)`` workers. Lets the search agent be
+    dropped into ``evaluate_ml`` / the league as a first-class contender.
+    """
+    return functools.partial(
+        _make_lookahead,
+        name=name,
+        horizon=horizon,
+        n_determinizations=n_determinizations,
+        spin_penalty=spin_penalty,
+        leaf_value=leaf_value,
     )
 
 

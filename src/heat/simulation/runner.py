@@ -43,6 +43,7 @@ from typing import Callable, Sequence
 from heat.agents.heuristic_agent import HeuristicAgent
 from heat.agents.random_agent import RandomAgent
 from heat.agents.strong_heuristic import StrongHeuristicAgent
+from heat.agents.search_agent import LookaheadAgent, DEFAULT_SPIN_PENALTY
 from heat.engine.game import Agent, Game
 from heat.models.track import Track
 
@@ -186,6 +187,71 @@ def strong_heuristic_agent_factory(
         name=name,
         strength=strength,
         heat_price=heat_price,
+        use_seed=use_seed,
+    )
+
+
+def _make_lookahead(
+    player_id: int,
+    seed: int | None,
+    name: str | None,
+    horizon: int,
+    n_determinizations: int,
+    spin_penalty: float,
+    leaf_value: str,
+    use_seed: bool,
+) -> Agent:
+    """Top-level (picklable) constructor for a :class:`LookaheadAgent`.
+
+    Carries only config primitives (never a live rollout-policy instance) so the
+    enclosing :func:`functools.partial` pickles into ``ProcessPoolExecutor``
+    workers; the agent builds its own default :class:`HeuristicAgent` rollout
+    policy. ``seed`` is threaded into the per-turn rollout RNG only when
+    ``use_seed`` is set, so the default factory stays order-independent.
+    """
+    agent_name = name if name is not None else f"Lookahead-{player_id}"
+    return LookaheadAgent(
+        name=agent_name,
+        horizon=horizon,
+        n_determinizations=n_determinizations,
+        spin_penalty=spin_penalty,
+        leaf_value=leaf_value,
+        seed=seed if use_seed else None,
+    )
+
+
+def lookahead_agent_factory(
+    name: str | None = None,
+    *,
+    horizon: int = 2,
+    n_determinizations: int = 2,
+    spin_penalty: float = DEFAULT_SPIN_PENALTY,
+    leaf_value: str = "progress",
+    use_seed: bool = False,
+) -> AgentFactory:
+    """Return a picklable factory producing :class:`LookaheadAgent`s.
+
+    Mirrors :func:`strong_heuristic_agent_factory`: a top-level
+    ``functools.partial`` of a top-level constructor (no lambdas/closures) so it
+    pickles cleanly for ``run_batch(parallel=True)``. The agent owns its default
+    rollout policy, so only config primitives cross the process boundary.
+
+    Args:
+        name: Optional fixed display name (else ``Lookahead-{id}``).
+        horizon: Rollout depth in rounds (``0`` == greedy one-ply).
+        n_determinizations: Clones averaged per candidate (own-draw variance).
+        spin_penalty: ``lambda`` in ``progress - lambda * spins`` (spaces/spin).
+        leaf_value: ``"progress"`` or ``"move_eval"``.
+        use_seed: Thread the per-player derived seed into the rollout RNG (off by
+            default so the agent is fully deterministic regardless of seat order).
+    """
+    return functools.partial(
+        _make_lookahead,
+        name=name,
+        horizon=horizon,
+        n_determinizations=n_determinizations,
+        spin_penalty=spin_penalty,
+        leaf_value=leaf_value,
         use_seed=use_seed,
     )
 
