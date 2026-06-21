@@ -400,6 +400,111 @@ learnable once it is in the data.
 (compounding errors) — exactly what S4 (DAgger) fixes. Action-target snapping
 must match the env's value-multiset rule (`env._decode_legal`).
 
+#### Sprint S3 — Outcome (BUILT + VALIDATED, 2026-06-21)
+
+Delivered on branch `worktree-sprint-9c-bc` (stacked on S1+S2), with the frozen
+obs/action codec reused unchanged so the BC net drops into `MLAgent` /
+`evaluate_ml` / the league with no contract change:
+
+- **`experiments/gen_demos.py`** — runs the S1/S2 `LookaheadAgent` over many
+  GENERATED tracks (the eval harness's tight/limit-1-weighted params), driving
+  `run_round_driver` exactly as `HeatEnv` does, and logs
+  `(encode_observation, chosen_flat_action, action_mask)` at every **real-choice**
+  learner decision. Output is a compressed `.npz` (obs/action/mask/kind/track_seed/
+  split) + a `.demos.json` provenance sidecar (codec version, expert config).
+- **`experiments/train_bc.py`** — standalone supervised **masked** cross-entropy
+  trainer (NOT PPO): builds a real `MaskablePPO` via `build_model` (so the weights
+  live in the exact architecture `MLAgent` expects), then optimizes
+  `-log_prob(target)` from `policy.get_distribution(obs, action_masks=mask)` — the
+  same masked distribution `MLAgent` arg-maxes over at inference. Saves via
+  `save_checkpoint` (zip + `.meta.json`). Only the actor trunk+head are trained;
+  the critic is left at init (`MLAgent` never reads the value head).
+- **`experiments/eval_bc.py`** — behavioral gate; reuses `eval_search.py`'s
+  spins-by-corner-limit / finish / rounds reconstruction verbatim and adds the BC
+  net (loaded as a contract-checked `MLAgent`) as a contender vs the Lookahead
+  expert and the Heuristic, on the **held-out** 900_000+ track band (disjoint
+  from the train 100_000+ / val 500_000+ bands `gen_demos` samples).
+- 11 unit tests in `tests/test_bc.py` (demo tuples codec-valid + mask-consistent +
+  only-real-choices-logged + track-disjoint split; CARDS target snaps like
+  `env._decode_legal`; off-table REACT dropped not crashed; BC checkpoint loads as
+  MaskablePPO + has the contract sidecar + round-trips through `MLAgent` returning
+  only legal moves). **All 30 S1+S2 + 11 S3 tests green; full suite 770 passed.**
+
+**Dataset (solo, 150 train / 40 val tracks):** 17,079 tuples (13,930 train /
+3,149 val), kind balance GEAR 27% / CARDS 25% / DISCARD 23% / REACT 24% (solo has
+no SLIPSTREAM). 4p set (150/40): 16,342 tuples incl. 6% SLIPSTREAM. **432–592
+expert decisions per set were dropped as unencodable** — see learning #2.
+
+**Supervised metrics (solo, 30 epochs, GPU):** train CE 0.43 / acc 0.84 /
+CARDS-acc 0.55; **val CE 0.61 / acc 0.78 / CARDS-acc 0.48**. Val CE bottoms ~epoch
+30 then overfits. So the net reproduces the expert's *label* on ~78% of unseen
+states — but only ~48% on the high-stakes CARDS (corner-entry) decision.
+
+**Behavioral gate (held-out generated, solo, 24 tracks) — the honest result:**
+
+| Metric (limit-1) | Heuristic | Lookahead (expert) | **BC (no search)** |
+|---|---|---|---|
+| solo finish (engine) | 100% | 100% | 100%* |
+| rounds-to-finish | 26.2 | 20.8 | **113 (11/24 hit MAX_ROUNDS=200)** |
+| L1 spins/pass mean | 0.47 | 0.06 | **15.0** |
+| L1 spins/pass p90 / max | 1.50 / 1.50 | 0.20 / 0.67 | **31.2 / 63.7** |
+| pooled L1 spins/passes | 64/130 | 6/83 | **2366/170** |
+
+\* "finish" is the engine's lap-counter sense; in racing terms the BC car
+**crawl-and-spins** (113 rounds, ~11× the expert), so the finish is degenerate,
+not skilled. The 4p net is the same (L1 mean 23.9, max 194, ~102 rounds).
+
+**Gate verdict: NOT MET — and this is the expected, designed S3 outcome.** BC
+alone does **not** learn the limit-1 corner. It is ~250× worse than the expert
+and ~30× worse than the plain heuristic on worst-case L1 spins/pass. The §4 risk
+note ("BC drifts off-distribution; compounding errors; S4's job, not yours")
+materialized in full: the net clones the expert's labels well on the states the
+**expert visits** (which almost never include a spin — pooled expert L1 spins are
+6/83), so the post-spin 0-heat **recovery** states are essentially absent from the
+data. The ~22% of CARDS the net gets wrong put it into exactly those unseen
+states, where it has no learned recovery and re-spins, compounding into the
+death-spiral. (Decision trace: the net correctly sits in gear 1–2 near corners
+but plays a too-high card — e.g. an Upgrade-5 in gear 1 — into a limit-1 corner.)
+Sampling vs arg-max made no material difference over the gate (det L1 15.0 vs
+sampled 11.5), so it is not an arg-max-mode artifact — it is genuine drift.
+
+**Things S4 MUST inherit:**
+
+1. **BC ≠ corner skill; you MUST close the loop on the learner's OWN states
+   (DAgger), not just the expert's.** The expert's near-zero spin rate means its
+   trajectories contain almost no recovery demonstrations, so a pure
+   obs→action clone has no data for the post-spin states it will actually visit.
+   Roll out the *current BC learner*, collect the 0-heat post-spin states it
+   lands in, query the `LookaheadAgent` for the correct action **on those
+   states**, aggregate, retrain. This is the whole reason S3's gate fails and S4
+   exists — do not expect more demos / a bigger net to fix it (we already saw
+   val-acc plateau at ~78% with severe behavioral failure).
+2. **The flat action space is a behavior-covering SUBSET of the engine's true
+   action space — the scripted/search expert emits actions the codec can't
+   represent.** ~3–4% of real-choice expert decisions (concentrated in REACT:
+   the fixed 8-slot `_REACT_TABLE` does not enumerate every legal
+   `(cooldown, boost, adrenaline_*)` combo, e.g. `cooldown_count=1` +
+   adrenaline_speed) have **no `encode_action_index`**. `gen_demos` drops these
+   (and counts them) rather than crashing or fabricating a wrong target. A
+   `MaskablePPO` policy can only ever *emit* an in-table action, so this is the
+   right call — but S4/DAgger querying the expert must apply the same drop, and
+   any future codec expansion (S5) must re-check this REACT coverage.
+3. **Action-target snapping via the value-multiset rule held up.**
+   `encode_action_index` collapses a CARDS play to its value-multiset index — the
+   same collapse `env._decode_legal` round-trips through — so a logged target is
+   always set in its own mask (asserted in `gen_demos` and unit-tested against
+   `env._decode_legal`). The BC failure is NOT a snapping bug; the contract is
+   clean. Keep this invariant when generating DAgger labels.
+4. **Train the actor only; the critic is uninitialized in the BC checkpoint.**
+   S4's BC→PPO warm-start must not assume a calibrated value head — let PPO learn
+   it from reward (a KL-to-BC regularizer on the *actor* is the right anti-
+   forgetting lever, per the §4 S4 risk note, not a frozen critic).
+5. **Measurement footgun: "finish rate" is near-useless solo.** The engine's
+   lap counter eventually completes even for a crawl-and-spin policy, so 100%
+   "finish" hid a 113-round degenerate race. Gate S4 on **worst-case L1
+   spins/pass and rounds-to-finish**, never finish-rate alone (same lesson as the
+   8C USA-mean saga, one layer deeper).
+
 ---
 
 ### Sprint S4 — BC → RL fine-tune + DAgger  (close the distribution gap)

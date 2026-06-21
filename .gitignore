@@ -16,4 +16,5 @@ scripts/logs/*.log
 test_race.log
 *.log
 checkpoints/
+data/
 .claude/
