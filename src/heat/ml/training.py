@@ -1323,6 +1323,13 @@ def train_self_play(
     else:
         model = build_model(venv, config)
 
+    # SB3 ``load`` restores the checkpoint's saved ``verbose`` -- a warm-start BC
+    # checkpoint was saved with ``verbose=0``, which silences the fine-tune's
+    # rollout tables and makes a 40-min run look hung. Re-apply the live config's
+    # verbosity so a warm-started run shows the same SB3 progress a fresh run does
+    # (no-op on the build_model path, which already used config.verbose).
+    model.verbose = config.verbose
+
     # Chunk Phase 1 into ``phase1_eval_every`` learn/gate iterations so a
     # Phase-1-heavy run (Idea 4) still preserves the BEST held-out checkpoint, not
     # the (possibly regressed) final weights. After each chunk: run the held-out
@@ -1629,12 +1636,18 @@ def _load_model_with_gamma(
     single reload that carries the weights forward. The shaping/reward-mode
     globals are re-applied afterwards so this process computes the right reward.
     """
+    # ``custom_objects`` overrides values baked into the saved checkpoint at load
+    # time. We override ``gamma`` (the discount handoff) AND ``verbose`` -- a
+    # warm-start BC checkpoint was saved with ``verbose=0``, and without this each
+    # phase reload would re-silence SB3's rollout tables, making a multi-phase
+    # fine-tune look hung for its whole run.
     model = MaskablePPO.load(
         path,
         env=venv,
         device=resolve_device(config.device),
-        custom_objects={"gamma": gamma},
+        custom_objects={"gamma": gamma, "verbose": config.verbose},
     )
+    model.verbose = config.verbose
     apply_shaping_config(config)
     return model
 

@@ -566,4 +566,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from _runlog import run_main
+
+    run_main("eval_search", main)

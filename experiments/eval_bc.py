@@ -161,4 +161,6 @@ def _gate(field, players: int) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from _runlog import run_main
+
+    run_main("eval_bc", main)

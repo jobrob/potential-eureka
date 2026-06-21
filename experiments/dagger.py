@@ -365,6 +365,11 @@ def _retrain_bc(
         batch=args.batch,
         lr=args.lr,
         eval_every=max(1, args.epochs),  # report once at the end (quiet iters)
+        # Per-iteration early stopping: each DAgger retrain restores its best-val
+        # checkpoint instead of shipping the overfit last-epoch one (val
+        # CARDS-acc peaks ~epoch 2-3 then regresses on the growing aggregate).
+        patience=args.patience,
+        early_stop_metric=args.early_stop_metric,
         net=args.net,
         device=args.device,
         seed=args.seed,
@@ -511,6 +516,14 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch", type=int, default=256)
     parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--patience", type=int, default=8,
+                        help="per-iteration BC early-stop patience (epochs "
+                             "without selection-metric improvement); 0 or "
+                             ">= epochs disables early stopping")
+    parser.add_argument("--early-stop-metric", type=str, default="val_ce",
+                        choices=["val_ce", "val_acc", "val_cards_acc"],
+                        help="metric selecting each iteration's best-val "
+                             "checkpoint (passed to train_bc)")
     parser.add_argument("--net", type=str, default="default",
                         choices=["default", "small", "large"])
     parser.add_argument("--device", type=str, default="auto")
@@ -539,4 +552,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from _runlog import run_main
+
+    run_main("dagger", main)
