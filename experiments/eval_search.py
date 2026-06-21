@@ -275,21 +275,22 @@ def _winner(result) -> int | None:
     return result.finish_order[0] if result.finish_order else None
 
 
-def _seat_neutral_winrate(
+def _seat_neutral_win_counts(
     make_focal: "callable",
     make_opponent: "callable",
     *,
     track_seeds: list[int],
     game_seed_base: int,
-) -> float:
-    """Win-rate of ``make_focal`` vs three ``make_opponent`` in 4p, seat-neutral.
+) -> tuple[int, int]:
+    """``(wins, games)`` of ``make_focal`` vs three ``make_opponent``, seat-neutral.
 
     Per the seat-bias finding (front turn-order seats win more, all else equal),
     a single fixed-seat measurement is contaminated. We therefore rotate the
-    focal agent through ALL FOUR seats (different seeds per rotation) and average
-    the win indicator, so the positional advantage cancels. Returns the fraction
-    of games the focal agent finished first across the 4 x len(track_seeds)
-    games.
+    focal agent through ALL FOUR seats (different seeds per rotation) and pool the
+    win indicator, so the positional advantage cancels. Returns the raw pooled
+    ``(wins, games)`` over the ``4 x len(track_seeds)`` games -- the counts a
+    Wilson lower bound (the S4 league gate) needs; :func:`_seat_neutral_winrate`
+    divides them for the bare fraction.
     """
     wins = 0
     games = 0
@@ -311,6 +312,25 @@ def _seat_neutral_winrate(
             if _winner(result) == focal_seat:
                 wins += 1
             games += 1
+    return wins, games
+
+
+def _seat_neutral_winrate(
+    make_focal: "callable",
+    make_opponent: "callable",
+    *,
+    track_seeds: list[int],
+    game_seed_base: int,
+) -> float:
+    """Seat-neutral win fraction of ``make_focal`` vs three ``make_opponent`` (4p).
+
+    Thin wrapper over :func:`_seat_neutral_win_counts` (the single source of truth
+    for the seat-rotation logic) returning the bare fraction the S2 gate prints.
+    """
+    wins, games = _seat_neutral_win_counts(
+        make_focal, make_opponent,
+        track_seeds=track_seeds, game_seed_base=game_seed_base,
+    )
     return wins / games if games else 0.0
 
 

@@ -1,8 +1,11 @@
 # Search + Imitation Sprints — beating the limit-1 corner via the simulator we own
 
-> **Status:** **Sprints S1 (a.k.a. "9a") and S2 are BUILT + VALIDATED + green**
-> (see the "S1 — Outcome" and "S2 — Outcome" subsections in §4); everything
-> downstream of S2 is design-only.
+> **Status:** **Sprints S1 (a.k.a. "9a"), S2, S3 (BC) and S4 (DAgger + BC→PPO)
+> are BUILT** (see the "Sx — Outcome" subsections in §4). S1/S2 are green and
+> pass their gates; S3's behavioral gate fails by design (the BC distribution
+> gap), which S4's DAgger loop closes ~11× at smoke scale (gate clears only with
+> a full-scale run — see "S4 — Outcome"). Only **S5 (the AZ/MuZero loop) is
+> design-only.**
 > Correction: the Tier-1.1 prototype `experiments/proto_search.py` referenced
 > below **was never committed and did not exist** — S1's `LookaheadAgent` was
 > built from scratch by generalizing `StrongHeuristicAgent`'s 1-ply joint
@@ -536,6 +539,105 @@ checkpoint, league + Wilson-LB gate results vs the existing baselines.
 **Risks.** Catastrophic forgetting of corner discipline during the strong phase
 (the 8C bug-2 pattern) — keep the Wilson-LB best-checkpoint gate and consider a
 behavioral-cloning regularizer (KL-to-BC) during fine-tune.
+
+#### Sprint S4 — Outcome (BUILT + VALIDATED at smoke scale, 2026-06-21)
+
+Delivered on branch `worktree-sprint-s4-dagger` (off `master` @ 716601d), all in
+the priority order the sprint mandates — DAgger first (the core fix), then the
+BC→PPO warm-start, with KL-to-BC as the (built, opt-in) anti-forgetting lever:
+
+- **`experiments/dagger.py` — the DAgger loop (core deliverable).** One iteration
+  = roll out the *current learner* (an `MLAgent`) through `run_round_driver`
+  (the exact `HeatEnv`/`gen_demos` loop), **apply the learner's action** to
+  advance the game (so the trajectory follows the LEARNER's distribution — the
+  whole point), query the `LookaheadAgent` expert for the label **on that exact
+  learner-visited state**, aggregate `(obs, expert_target, mask)` into the running
+  dataset, retrain BC. Label generation **reuses the gen_demos machinery
+  verbatim** (`_encode_target`, `_DemoBuffer`, `_KIND_TO_INT`, `_TIGHT_PARAMS`,
+  the train/val seed bands, `_make_expert`) so the S3 contract holds unchanged:
+  only real-choice (`mask.sum()>1`) states logged, value-multiset CARDS snapping,
+  the same ~3–4% off-table REACT expert actions **dropped + counted** (not
+  crashed), and the S2 determinization belief in 4p.
+- **`experiments/finetune_ppo.py` — BC→PPO warm-start entry point.** A thin
+  wrapper over the already-merged `train_self_play(..., warm_start_path=<bc/dagger
+  ckpt>, phases=default_8c_phases())` 8C machinery (solo→weak→mixed→strong ramp,
+  Wilson-LB gate + best-checkpoint preservation — the 8C bug-2 guard). `--smoke`
+  shrinks the per-phase budgets to prove the pipeline end-to-end in seconds;
+  `--kl-to-bc-coef C` turns on the anti-forgetting lever.
+- **`src/heat/ml/kl_regularizer.py` — KL-to-BC on the actor.** Adds
+  `coef·KL(πθ ‖ π_BC)` over the rollout's *masked* action set to PPO's
+  per-minibatch loss, with a frozen reference loaded from the warm-start
+  checkpoint. Installed as an idempotent, opt-in class-level `train` wrapper
+  (no-op at `coef=0`), so the default warm-start path is byte-for-byte the proven
+  8C code. This is the design's prescribed lever: regularize the **actor** (the
+  BC critic is uninitialized — PPO learns the value head from reward), not a
+  frozen critic.
+- **`experiments/eval_dagger.py` — the S4 gate.** Behavioral gate reusing
+  `eval_search`/`eval_bc`'s spins-by-corner-limit / rounds reconstruction on the
+  held-out generated band (900_000+, disjoint from train/val) **plus** a
+  seat-neutral 4p league gate with a **Wilson-LB** vs weak/strong heuristics. Also
+  fixed a latent S3 display bug in `eval_bc._gate` (the Heuristic row printed the
+  L1-spin mean where it meant `mean_rounds()`).
+
+**Validated (smoke scale: 12 train / 4 val tracks, 3 DAgger iters, 30 epochs,
+CPU; held-out solo generated, 12 tracks):**
+
+| Metric (limit-1, solo) | Heuristic | Lookahead (expert) | BC (S3) | **DAgger iter3** |
+|---|---|---|---|---|
+| rounds-to-finish | 26.0 | 20.8 | 139.5 | **65.4** |
+| L1 spins/pass mean | 0.37 | 0.07 | 9.67 | **1.23** |
+| L1 spins/pass max | 1.50 | 0.67 | 45.75 | **4.25** |
+| pooled L1 spins/passes | 30/73 | 5/46 | 1236/153 | **380/170** |
+| val label-acc / CARDS-acc | — | — | 0.67 / 0.40 | **0.78 / 0.48** |
+
+DAgger cuts worst-case L1 spins/pass ~**11×** (45.75→4.25) and roughly halves the
+crawl-and-spin round count (139→65) — a large, honest closing of the BC
+distribution gap — and val/CARDS accuracy on the *learner's own* states climbs
+monotonically across iterations (0.67/0.40 → 0.78/0.48). **The gate verdict is
+still FAIL vs the heuristic** (max 4.25 vs 1.50): this is a *scale*, not a
+*correctness*, result — 12 tracks / 3 iters / CPU is the minimum bar the success
+criteria allow ("the pipeline is implemented, tested, runs end-to-end on a smoke
+scale, and the gate is wired and reported honestly, even if the headline numbers
+need a longer run"). The mechanism is decisively validated; a full clear needs a
+real campaign (see below). The BC→PPO warm-start + KL-to-BC both run end-to-end on
+the smoke ramp (and are unit-tested), but were **not** taken to a full multi-hour
+GPU campaign — flagged, not faked.
+
+**Things S5 MUST inherit:**
+
+1. **DAgger is the right fix and it works — but it needs scale to clear the
+   gate.** Each iteration provably moves worst-case L1 spins/pass down by ~2–3×
+   and lifts CARDS-acc on the learner's distribution; the curve had not plateaued
+   at iter 3. The full run is: a real seed dataset (≥60 tracks, the gen_demos
+   default), ≥5–8 DAgger iterations with ≥20 rollout tracks each, the `large` net,
+   on the RTX 4080 (torch cu126). Budget the expert query cost: ~11 clones/move
+   at `top_k=6` (~2 ms/move solo) dominates rollout wall-time, so more iters cost
+   linearly in expert calls.
+2. **The DAgger trajectory MUST follow the learner, not the expert — assert it.**
+   The single line that distinguishes DAgger from `gen_demos` is *applying the
+   learner's action* (`send_value = learner_action`) while *labeling with the
+   expert*. A unit test (`test_dagger_trajectory_is_the_learners_not_the_experts`)
+   guards this by showing two different learners visit different state sets on the
+   same track/seed. If a refactor ever routes the expert's action back into
+   `send`, DAgger silently degenerates to BC — keep that test.
+3. **Querying the expert on the learner's state is correct *because* the
+   `LookaheadAgent` re-plans on a turn-signature cache miss.** When the learner
+   picks a different gear than the expert, the player's committed gear changes, so
+   the expert's `choose_cards` cache misses and recomputes restricted to the
+   learner's gear — the CARDS label is conditioned on the gear the learner
+   actually chose. Build a fresh expert per track (no plan-cache leak across
+   games), exactly as gen_demos does. An AZ search-as-trainer loop (S5) querying
+   search on net-visited states inherits this discipline.
+4. **The BC checkpoint's critic is uninitialized — the warm-start MUST let PPO
+   learn the value head; the anti-forgetting lever is KL-to-BC on the *actor*.**
+   Implemented in `kl_regularizer.py`; turn it on (`--kl-to-bc-coef`) during the
+   strong phase, where 8C bug-2 (forgetting corner discipline) bites. A frozen
+   critic is NOT an option here.
+5. **Gate on worst-case L1 spins/pass + rounds, on held-out GENERATED tracks,
+   never finish-rate alone.** Every checkpoint above "finishes" 100% solo while
+   crawling-and-spinning for 65–139 rounds — the same footgun S3 flagged. The
+   `eval_dagger` league gate uses a Wilson-LB (not a point estimate) so a small
+   sample can't fake a win-rate pass.
 
 ---
 

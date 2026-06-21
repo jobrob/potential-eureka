@@ -135,7 +135,7 @@ def _gate(field, players: int) -> None:
           f"L1 spins/pass mean/p90/max = {fmt(bc_mean)}/{fmt(bc_p90)}/{fmt(bc_max)}")
     print(f"  Lookahead finish={look.finish_rate() * 100:.0f}%  rounds={fmt(look.mean_rounds())}  "
           f"L1 spins/pass mean/p90/max = {fmt(lk_mean)}/{fmt(lk_p90)}/{fmt(lk_max)}")
-    print(f"  Heuristic finish={heur.finish_rate() * 100:.0f}%  rounds={fmt(hr_mean)}  "
+    print(f"  Heuristic finish={heur.finish_rate() * 100:.0f}%  rounds={fmt(heur.mean_rounds())}  "
           f"L1 spins/pass mean/p90/max = {fmt(hr_mean)}/{fmt(hr_p90)}/{fmt(hr_max)}")
 
     # Gate components (NaN-safe: no limit-1 passes -> treat that metric as vacuous).
