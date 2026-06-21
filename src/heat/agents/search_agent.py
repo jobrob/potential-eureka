@@ -185,8 +185,18 @@ class LookaheadAgent(BaseAgent):
             Sized large to dominate banked progress. Default
             :data:`DEFAULT_OWN_SPIN_PENALTY`.
         leaf_value: ``"progress"`` (lap-aware race progress -- the prototype's
-            objective) or ``"move_eval"`` (the strong heuristic's spaces-currency
-            :func:`_move_eval.evaluate_move`). Default ``"progress"``.
+            objective), ``"move_eval"`` (the strong heuristic's spaces-currency
+            :func:`_move_eval.evaluate_move`), or ``"learned"`` (Sprint A2: a
+            trained rest-of-lap value net ``V`` scores a *clean* rolled-out leaf
+            in place of ``progress``; spinning leaves keep the ``_pre_spin_progress``
+            floor unchanged). Default ``"progress"``.
+        value_model_path: Path to the A1 value-net checkpoint (SB3 ``.zip`` with a
+            ``.meta.json`` sidecar). Required when ``leaf_value == "learned"``;
+            ignored otherwise. The model is lazy-loaded once on first use (CPU
+            device) and validated against the live ML contract
+            (``obs_dim``/``action_dim``/``codec_version``), mirroring
+            :class:`heat.agents.ml_agent.MLAgent`. Nulled in ``__getstate__`` so
+            the agent pickles by path to ``ProcessPoolExecutor`` workers.
         determinize_hidden: When True (S2), each rollout clone re-samples the
             *opponents'* hidden hands/decks from the public belief (uniform over
             the cards known to be in their hand+draw pile) before rolling forward
@@ -216,6 +226,7 @@ class LookaheadAgent(BaseAgent):
         spin_penalty: float = DEFAULT_SPIN_PENALTY,
         own_spin_penalty: float = DEFAULT_OWN_SPIN_PENALTY,
         leaf_value: str = "progress",
+        value_model_path: str | None = None,
         determinize_hidden: bool = False,
         top_k: int | None = DEFAULT_TOP_K,
         sim_budget: int | None = DEFAULT_SIM_BUDGET,
@@ -228,9 +239,15 @@ class LookaheadAgent(BaseAgent):
             raise ValueError(
                 f"n_determinizations must be >= 1, got {n_determinizations}"
             )
-        if leaf_value not in ("progress", "move_eval"):
+        if leaf_value not in ("progress", "move_eval", "learned"):
             raise ValueError(
-                f"leaf_value must be 'progress' or 'move_eval', got {leaf_value!r}"
+                "leaf_value must be 'progress', 'move_eval', or 'learned', got "
+                f"{leaf_value!r}"
+            )
+        if leaf_value == "learned" and value_model_path is None:
+            raise ValueError(
+                "value_model_path is required when leaf_value == 'learned' "
+                "(the A1 value-net checkpoint the leaf scores clean leaves with)"
             )
         if top_k is not None and top_k < 1:
             raise ValueError(f"top_k must be >= 1 or None, got {top_k}")
@@ -252,10 +269,16 @@ class LookaheadAgent(BaseAgent):
         self.spin_penalty = float(spin_penalty)
         self.own_spin_penalty = float(own_spin_penalty)
         self.leaf_value = leaf_value
+        self.value_model_path = value_model_path
         self.determinize_hidden = determinize_hidden
         self.top_k = top_k
         self.sim_budget = sim_budget
         self.seed = seed
+
+        #: Lazily-loaded value net (SB3 ``MaskablePPO``) for ``leaf_value ==
+        #: "learned"``; ``None`` until the first clean leaf is scored. Nulled in
+        #: ``__getstate__`` so the agent pickles by path (the MLAgent pattern).
+        self._value_model = None
 
         #: Per-agent profiling (clones/move, ms/move). Always on; cheap.
         self.profile = SearchProfile()
@@ -264,6 +287,105 @@ class LookaheadAgent(BaseAgent):
         self._plan_sig: _TurnSig | None = None
         self._plan_gear: tuple[int, int] | None = None
         self._plan_cards: tuple[Card, ...] | None = None
+
+    # ------------------------------------------------------------------
+    # Learned-leaf value net (Sprint A2) -- lazy load, MLAgent patterns
+    # ------------------------------------------------------------------
+
+    def __getstate__(self) -> dict:
+        """Pickle by path: never ship the heavy SB3 value model to workers.
+
+        Mirrors :meth:`heat.agents.ml_agent.MLAgent.__getstate__`. The model is
+        reloaded from :attr:`value_model_path` in the worker on first use, so the
+        learned-leaf agent's ``functools.partial`` factory pickles into a
+        ``ProcessPoolExecutor`` carrying only the path string.
+        """
+        state = self.__dict__.copy()
+        state["_value_model"] = None
+        return state
+
+    def _validate_value_meta(self) -> None:
+        """Assert the value checkpoint's sidecar matches the live ML contract.
+
+        Identical tripwire to :meth:`MLAgent._validate_meta` (§3.4): a stale V --
+        one trained against a now-drifted ``obs_dim`` / ``action_dim`` /
+        ``codec_version`` -- fails fast with a
+        :class:`~heat.agents.ml_agent.CheckpointMismatchError` instead of silently
+        scoring leaves with a garbage value head.
+        """
+        from heat.agents.ml_agent import CheckpointMismatchError
+        from heat.ml import spaces
+        from heat.ml.training import load_meta
+
+        try:
+            meta = load_meta(self.value_model_path)
+        except FileNotFoundError as exc:
+            raise CheckpointMismatchError(
+                f"Value-net sidecar not found for {self.value_model_path!r}; "
+                "expected a '.meta.json' written by save_checkpoint."
+            ) from exc
+
+        expected = {
+            "obs_dim": spaces.OBS_DIM,
+            "action_dim": spaces.ACTION_DIM,
+            "codec_version": spaces.CODEC_VERSION,
+        }
+        mismatches = [
+            f"{key}: checkpoint={meta.get(key)!r} != runtime={want!r}"
+            for key, want in expected.items()
+            if meta.get(key) != want
+        ]
+        if mismatches:
+            raise CheckpointMismatchError(
+                f"Value net {self.value_model_path!r} is incompatible with the "
+                "current ML contract (stale model vs drifted codec): "
+                + "; ".join(mismatches)
+            )
+
+    def _get_value_model(self):
+        """Lazy-load + validate the value net (CPU), caching it on the instance.
+
+        Mirrors :meth:`MLAgent._get_model`: validate the sidecar tripwire first,
+        then ``MaskablePPO.load(..., device="cpu")`` once. CPU inference is fine
+        at this scale (one critic forward per clean leaf -- README A `Risks`).
+        """
+        if self._value_model is None:
+            from sb3_contrib import MaskablePPO
+
+            self._validate_value_meta()
+            self._value_model = MaskablePPO.load(
+                self.value_model_path, device="cpu"
+            )
+        return self._value_model
+
+    def _value_leaf(self, clone: GameState, player_id: int) -> float:
+        """Learned rest-of-lap value of a clean rolled-out leaf (Sprint A2).
+
+        Encodes the leaf *state* with ``encode_observation(clone, player_id,
+        decision=None)`` -- byte-identical to the convention A1 trained V on (the
+        zero-filled phase block; V scores a state, not a pending decision) -- runs
+        the critic forward (``policy.predict_values``), and returns the **negated**
+        scalar.
+
+        The net regresses ``target = -rounds_remaining`` (README A `2.1`), so
+        ``predict_values`` already emits the higher-is-better quantity and the
+        leaf returns it directly (negating ``-(-rounds_remaining)`` would flip the
+        sign back to *more rounds is better*). We pass it through as-is: a state
+        nearer the finish (fewer rounds remaining) predicts closer to ``0`` (a
+        larger, less-negative value) and is preferred, slotting into the existing
+        ``_leaf_score`` sign convention exactly like ``progress``.
+        """
+        import numpy as np
+        import torch
+
+        from heat.ml.features import encode_observation
+
+        obs = encode_observation(clone, player_id, decision=None)
+        model = self._get_value_model()
+        ob = torch.as_tensor(obs).reshape(1, -1)
+        with torch.no_grad():
+            v = model.policy.predict_values(ob)
+        return float(np.asarray(v.detach()).reshape(-1)[0])
 
     # ------------------------------------------------------------------
     # Plan caching helpers (mirror StrongHeuristicAgent)
@@ -598,7 +720,12 @@ class LookaheadAgent(BaseAgent):
         on the clone (the prototype objective). ``leaf_value == "move_eval"``
         instead values the *forced first move* with the strong heuristic's
         spaces-currency evaluator (a static one-ply value), which is the cheap
-        high-quality leaf the design lists as an option.
+        high-quality leaf the design lists as an option. ``leaf_value ==
+        "learned"`` (Sprint A2) scores a **clean** leaf with the trained value net
+        V (``-rounds_remaining``, higher is better) in place of ``progress``; a
+        spinning leaf (``own_spins > 0``) keeps the ``_pre_spin_progress`` floor
+        unchanged (V is never called there), so the corner-skill scoring is
+        preserved by construction.
 
         Two penalties are then subtracted:
 
@@ -625,6 +752,16 @@ class LookaheadAgent(BaseAgent):
                 value = self._pre_spin_progress(clone, player_id)
             else:
                 value = float(ME.race_progress(player, clone.track))
+        elif self.leaf_value == "learned":
+            # Sprint A2: V replaces ONLY the `value` term and ONLY on clean
+            # leaves. A line whose forced move spun keeps the depth-invariant
+            # `_pre_spin_progress` floor (V is never consulted), so the dominant
+            # own-spin penalty still bites at every horizon and a spinning
+            # candidate stays terminal-dominated relative to any clean one.
+            if own_spins > 0:
+                value = self._pre_spin_progress(clone, player_id)
+            else:
+                value = self._value_leaf(clone, player_id)
         else:  # "move_eval"
             value = self._move_eval_value(clone, player_id, gear, cards)
         return (

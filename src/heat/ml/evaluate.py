@@ -139,6 +139,7 @@ def _make_lookahead(
     n_determinizations: int,
     spin_penalty: float,
     leaf_value: str,
+    value_model_path: str | None,
     determinize_hidden: bool,
     top_k: int | None,
     sim_budget: int | None,
@@ -150,8 +151,9 @@ def _make_lookahead(
     Carries only config primitives; the agent builds its own default rollout
     policy. The agent is deterministic given the state, so ``seed`` is ignored
     here (eval is order-independent). The S2 levers
-    (``determinize_hidden``/``top_k``/``sim_budget``) are plain primitives so the
-    league entry for the tuned agent pickles unchanged.
+    (``determinize_hidden``/``top_k``/``sim_budget``) and the A2 learned-leaf
+    lever (``value_model_path``) are plain primitives so the league entry for the
+    tuned / learned-leaf agent pickles unchanged (workers reload V by path).
     """
     agent_name = name if name is not None else f"Lookahead-{player_id}"
     return LookaheadAgent(
@@ -160,6 +162,7 @@ def _make_lookahead(
         n_determinizations=n_determinizations,
         spin_penalty=spin_penalty,
         leaf_value=leaf_value,
+        value_model_path=value_model_path,
         determinize_hidden=determinize_hidden,
         top_k=top_k,
         sim_budget=sim_budget,
@@ -173,6 +176,7 @@ def lookahead_agent_factory(
     n_determinizations: int = 2,
     spin_penalty: float = DEFAULT_SPIN_PENALTY,
     leaf_value: str = "progress",
+    value_model_path: str | None = None,
     determinize_hidden: bool = False,
     top_k: int | None = None,
     sim_budget: int | None = None,
@@ -184,7 +188,9 @@ def lookahead_agent_factory(
     pickles into ``run_batch(parallel=True)`` workers. Lets the search agent be
     dropped into ``evaluate_ml`` / the league as a first-class contender. The S2
     config (``determinize_hidden``/``top_k``/``sim_budget``) lets the league host
-    the *tuned* search agent (determinized multiplayer + branching control).
+    the *tuned* search agent (determinized multiplayer + branching control); the
+    A2 ``value_model_path`` (plain string) hosts the *learned-leaf* agent, which
+    pickles by path so each worker reloads V on first use.
     """
     return functools.partial(
         _make_lookahead,
@@ -193,6 +199,7 @@ def lookahead_agent_factory(
         n_determinizations=n_determinizations,
         spin_penalty=spin_penalty,
         leaf_value=leaf_value,
+        value_model_path=value_model_path,
         determinize_hidden=determinize_hidden,
         top_k=top_k,
         sim_budget=sim_budget,
