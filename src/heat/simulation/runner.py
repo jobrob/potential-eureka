@@ -199,6 +199,7 @@ def _make_lookahead(
     n_determinizations: int,
     spin_penalty: float,
     leaf_value: str,
+    value_model_path: str | None,
     determinize_hidden: bool,
     top_k: int | None,
     sim_budget: int | None,
@@ -212,7 +213,9 @@ def _make_lookahead(
     policy. ``seed`` is threaded into the per-turn rollout RNG only when
     ``use_seed`` is set, so the default factory stays order-independent. The
     S2 levers (``determinize_hidden``, ``top_k``, ``sim_budget``) are all plain
-    primitives so the league/tuned-agent factory pickles unchanged.
+    primitives so the league/tuned-agent factory pickles unchanged. The A2
+    learned-leaf lever (``value_model_path``) is likewise a plain string so the
+    learned-leaf agent pickles by path -- each worker reloads V on first use.
     """
     agent_name = name if name is not None else f"Lookahead-{player_id}"
     return LookaheadAgent(
@@ -221,6 +224,7 @@ def _make_lookahead(
         n_determinizations=n_determinizations,
         spin_penalty=spin_penalty,
         leaf_value=leaf_value,
+        value_model_path=value_model_path,
         determinize_hidden=determinize_hidden,
         top_k=top_k,
         sim_budget=sim_budget,
@@ -235,6 +239,7 @@ def lookahead_agent_factory(
     n_determinizations: int = 2,
     spin_penalty: float = DEFAULT_SPIN_PENALTY,
     leaf_value: str = "progress",
+    value_model_path: str | None = None,
     determinize_hidden: bool = False,
     top_k: int | None = None,
     sim_budget: int | None = None,
@@ -253,7 +258,10 @@ def lookahead_agent_factory(
         n_determinizations: Clones averaged per candidate (own-draw variance, and
             -- with ``determinize_hidden`` -- opponent-hand variance).
         spin_penalty: ``lambda`` in ``progress - lambda * spins`` (spaces/spin).
-        leaf_value: ``"progress"`` or ``"move_eval"``.
+        leaf_value: ``"progress"``, ``"move_eval"``, or ``"learned"`` (A2).
+        value_model_path: A1 value-net checkpoint path; required when
+            ``leaf_value == "learned"``. A plain string so the learned-leaf agent
+            pickles by path (each worker reloads V on first use).
         determinize_hidden: Re-sample opponents' hidden hands/decks per rollout
             (S2 multiplayer determinization). No effect in solo.
         top_k: Keep only the best ``top_k`` candidates by the fast prior.
@@ -268,6 +276,7 @@ def lookahead_agent_factory(
         n_determinizations=n_determinizations,
         spin_penalty=spin_penalty,
         leaf_value=leaf_value,
+        value_model_path=value_model_path,
         determinize_hidden=determinize_hidden,
         top_k=top_k,
         sim_budget=sim_budget,

@@ -129,6 +129,62 @@ def _passes_and_spins_by_limit(
     return passes, spins
 
 
+def _heat_efficiency(
+    track: Track,
+    event_log: list[GameEvent],
+    player_id: int,
+) -> tuple[float, int, int]:
+    """Return ``(distance, heat_spent, cooldowns)`` for one player in one game.
+
+    The A2 spine metric (README A Rung 3): how efficiently the agent spends its
+    heat budget over the lap. All three quantities come straight from the event
+    log so the metric is self-contained:
+
+      * **distance** -- lap-aware forward spaces advanced, reconstructed from the
+        player's ``turn_start`` ``position`` events. A backward jump in raw
+        position is a lap wrap (``+= length``); a spin resets the car backward, so
+        (as in :func:`_passes_and_spins_by_limit`) we cap each per-turn forward
+        delta at a sane single-turn bound and drop implausible legs so a spin's
+        backward reset cannot corrupt the distance.
+      * **heat_spent** -- heat paid to shift up (``gear_shift.heat_cost``) plus one
+        heat per ``boost`` (boost pays exactly 1 heat). These are the two ways
+        heat leaves the engine in pursuit of speed.
+      * **cooldowns** -- heat recovered via the REACT cooldown (sum of
+        ``cooldown.count``); the "cool-downs taken" the design asks for, i.e. how
+        well the agent refills its heat budget between corners.
+
+    Distance-per-heat (``distance / max(1, heat_spent)``) and the cooldown count
+    together show whether V budgets heat over the whole lap rather than just
+    surviving the next corner.
+    """
+    length = track.length
+    max_single_turn = 12
+
+    positions: list[int] = []
+    heat_spent = 0
+    cooldowns = 0
+    for e in event_log:
+        if e.player_id != player_id:
+            continue
+        if e.event_type == "turn_start":
+            positions.append(int(e.data["position"]))
+        elif e.event_type == "gear_shift":
+            heat_spent += int(e.data.get("heat_cost", 0))
+        elif e.event_type == "boost":
+            heat_spent += 1  # boost pays exactly 1 heat
+        elif e.event_type == "cooldown":
+            cooldowns += int(e.data.get("count", 0))
+
+    distance = 0
+    for prev_pos, next_pos in zip(positions, positions[1:]):
+        spaces_moved = (next_pos - prev_pos) % length
+        if spaces_moved == 0 or spaces_moved > max_single_turn:
+            continue
+        distance += spaces_moved
+
+    return float(distance), heat_spent, cooldowns
+
+
 # ---------------------------------------------------------------------------
 # Aggregation
 # ---------------------------------------------------------------------------
@@ -146,6 +202,9 @@ class _AgentAgg:
     ratios_by_limit: dict[int, list[float]] = field(default_factory=dict)
     total_passes_by_limit: dict[int, int] = field(default_factory=dict)
     total_spins_by_limit: dict[int, int] = field(default_factory=dict)
+    # Heat-efficiency (A2 Rung-3): per-game distance/heat ratio and cool-downs.
+    dist_per_heat: list[float] = field(default_factory=list)
+    cooldowns_per_game: list[int] = field(default_factory=list)
 
     def add_game(
         self,
@@ -153,11 +212,16 @@ class _AgentAgg:
         rounds: int,
         passes: dict[int, int],
         spins: dict[int, int],
+        heat_eff: tuple[float, int, int] | None = None,
     ) -> None:
         self.games += 1
         if finished:
             self.finishes += 1
             self.rounds_finishers.append(rounds)
+        if heat_eff is not None:
+            distance, heat_spent, cooldowns = heat_eff
+            self.dist_per_heat.append(distance / max(1, heat_spent))
+            self.cooldowns_per_game.append(cooldowns)
         limits = set(passes) | set(spins)
         for limit in limits:
             p = passes.get(limit, 0)
@@ -196,6 +260,21 @@ class _AgentAgg:
         # p90: the value at the 90th percentile (nearest-rank).
         idx = min(len(ordered) - 1, int(0.9 * (len(ordered) - 1) + 0.5))
         return (mean, ordered[idx], ordered[-1])
+
+    def heat_efficiency(self) -> tuple[float, float]:
+        """``(mean distance-per-heat, mean cool-downs/game)`` over games.
+
+        The A2 Rung-3 spine signal: a higher distance-per-heat means the agent
+        advances more spaces per unit of heat spent (a better-budgeted lap), and
+        the cool-down count shows how actively it refills the heat budget. NaN
+        when no game recorded heat efficiency (only the search fields do).
+        """
+        if not self.dist_per_heat:
+            return (float("nan"), float("nan"))
+        return (
+            statistics.mean(self.dist_per_heat),
+            statistics.mean(self.cooldowns_per_game),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +323,10 @@ def _run_field(
             result = game.run()
             finished = 0 in result.finish_order
             passes, spins = _passes_and_spins_by_limit(track, result.event_log, 0)
-            aggs[label].add_game(finished, result.total_rounds, passes, spins)
+            heat_eff = _heat_efficiency(track, result.event_log, 0)
+            aggs[label].add_game(
+                finished, result.total_rounds, passes, spins, heat_eff
+            )
             prof = getattr(agent, "profile", None)
             if prof is not None:
                 prof_clones[label] += prof.clones
@@ -380,6 +462,16 @@ def _print_field(
             parts.append(f"L{lim}:{s}/{p}")
         print(f"    {label:<18}" + "  ".join(parts))
 
+    # Heat efficiency (A2 Rung-3): distance-per-heat + cool-downs/game.
+    if any(agg.dist_per_heat for agg in aggs.values()):
+        print("  heat efficiency (dist/heat, cooldowns/game -- higher dist/heat "
+              "= better-budgeted lap):")
+        for label, agg in aggs.items():
+            dph, cd = agg.heat_efficiency()
+            if dph != dph:  # NaN -> not measured for this agent
+                continue
+            print(f"    {label:<18}dist/heat={dph:>6.2f}  cooldowns/game={cd:>5.2f}")
+
     # Profiling (clones/move, ms/move) for agents that expose it.
     if profiles and any(profiles.values()):
         print("  search profiling:")
@@ -501,6 +593,9 @@ def main() -> None:
                         help="LookaheadAgent per-move clone budget (S2)")
     parser.add_argument("--skip-winrate", action="store_true",
                         help="skip the (slower) seat-neutral 4p win-rate gate")
+    parser.add_argument("--value-model", type=str, default=None,
+                        help="A1 value-net checkpoint path; when set, register a "
+                             "LookaheadLearned (leaf_value='learned') contender")
     args = parser.parse_args()
 
     track_seeds = [_HELDOUT_BASE + i for i in range(args.games)]
@@ -531,17 +626,35 @@ def main() -> None:
             sim_budget=args.sim_budget,
         )
 
+    def make_lookahead_learned() -> BaseAgent:
+        # A2 learned leaf: V scores clean leaves (own_spins==0); spinning leaves
+        # keep the unchanged _pre_spin_progress floor + own-spin penalty.
+        return LookaheadAgent(
+            name="LookaheadLearned",
+            horizon=args.horizon,
+            n_determinizations=args.dets,
+            leaf_value="learned",
+            value_model_path=args.value_model,
+            top_k=args.top_k,
+            sim_budget=args.sim_budget,
+        )
+
     labels = {
         "Heuristic": make_heuristic,
         "StrongHeuristic": make_strong,
         "Lookahead": make_lookahead,
         "LookaheadDet": make_lookahead_det,
     }
+    if args.value_model is not None:
+        # Register the learned-leaf contender alongside the progress-leaf rows so
+        # the A2 gate (learned vs progress, same horizon) reads off one table.
+        labels["LookaheadLearned"] = make_lookahead_learned
 
     print(
         f"eval_search: {args.games} held-out generated tracks "
         f"(tight params, limit-1 weighted), horizon={args.horizon}, "
         f"dets={args.dets}, top_k={args.top_k}, sim_budget={args.sim_budget}"
+        + (f", value_model={args.value_model}" if args.value_model else "")
     )
 
     solo, solo_prof = _run_field(
