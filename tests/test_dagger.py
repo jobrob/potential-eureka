@@ -77,6 +77,7 @@ def bc_checkpoint(seed_dataset, tmp_path_factory) -> str:
     out = str(tmp_path_factory.mktemp("s4_bc") / "bc.zip")
     bc_args = argparse.Namespace(
         data=seed_dataset, out=out, epochs=1, batch=64, lr=3e-4, eval_every=1,
+        patience=8, early_stop_metric="val_ce",
         net="default", device="cpu", seed=0, players_meta=1,
     )
     train_bc.train_bc(bc_args)
@@ -278,7 +279,8 @@ def test_run_dagger_loop_produces_loadable_checkpoint(
         iterations=1, rollout_train_tracks=2, rollout_val_tracks=1,
         players=1, horizon=2, dets=2, top_k=6, sim_budget=None, open_hand=False,
         expert_seed=0, game_seed=8000,
-        epochs=1, batch=64, lr=3e-4, net="default", device="cpu", seed=0,
+        epochs=1, batch=64, lr=3e-4, patience=8, early_stop_metric="val_ce",
+        net="default", device="cpu", seed=0,
     )
     summary = dagger.run_dagger(args)
     final = summary["final_ckpt"]

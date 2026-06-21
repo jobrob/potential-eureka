@@ -229,6 +229,8 @@ def bc_checkpoint(tiny_demos, tmp_path_factory) -> str:
         batch=64,
         lr=3e-4,
         eval_every=1,
+        patience=8,
+        early_stop_metric="val_ce",
         net="default",
         device="cpu",
         seed=0,
@@ -289,3 +291,118 @@ def test_bc_predicts_legal_action_under_mask(bc_checkpoint):
     mask[0:3] = True
     action, _ = model.predict(obs, action_masks=mask, deterministic=True)
     assert bool(mask[int(np.asarray(action).reshape(-1)[0])])
+
+
+# ---------------------------------------------------------------------------
+# Early stopping: best-val selection + patience (FIX 1)
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedEvaluator:
+    """A deterministic stand-in for ``train_bc._evaluate``.
+
+    ``train_bc`` (with ``eval_every=1`` and a val set) evaluates VAL first each
+    epoch, then TRAIN -- so the call sequence is ``val, train, val, train, ...``.
+    This serves the scripted ``val_ce`` stream on the val (even-indexed) calls
+    and a constant cheap dict on the train calls, so selection is fully
+    deterministic regardless of the actual trained weights.
+    """
+
+    def __init__(self, val_ce_stream):
+        self._stream = val_ce_stream
+        self._n = 0  # total _evaluate calls
+        self.val_calls = 0
+
+    def fn(self, policy, obs, action, mask, kind, device, batch=4096):
+        is_val = (self._n % 2) == 0  # even call each epoch is the val eval
+        self._n += 1
+        if is_val:
+            i = min(self.val_calls, len(self._stream) - 1)
+            ce = self._stream[i]
+            self.val_calls += 1
+            return {"ce": ce, "acc": 1.0 - ce, "cards_acc": 1.0 - ce,
+                    "cards_n": 4}
+        return {"ce": 0.0, "acc": 1.0, "cards_acc": 1.0, "cards_n": 4}
+
+
+def _scripted_evaluator(val_ce_stream):
+    return _ScriptedEvaluator(val_ce_stream)
+
+
+def _bc_args(tiny_demos, out, **over):
+    import argparse
+
+    base = dict(
+        data=tiny_demos["path"], out=out, epochs=10, batch=64, lr=3e-4,
+        eval_every=1, patience=8, early_stop_metric="val_ce",
+        net="default", device="cpu", seed=0, players_meta=1,
+    )
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def test_is_improvement_min_max_and_nan():
+    """The selection comparator honors min/max direction and ignores NaN."""
+    nan = float("nan")
+    # min mode (val_ce): smaller is better.
+    assert train_bc._is_improvement(0.4, 0.5, "min")
+    assert not train_bc._is_improvement(0.6, 0.5, "min")
+    # max mode (accuracy): larger is better.
+    assert train_bc._is_improvement(0.8, 0.7, "max")
+    assert not train_bc._is_improvement(0.6, 0.7, "max")
+    # NaN candidate never improves; first finite beats the NaN sentinel.
+    assert not train_bc._is_improvement(nan, 0.5, "min")
+    assert train_bc._is_improvement(0.5, nan, "min")
+
+
+def test_early_stop_selects_best_val_epoch_and_stops_on_patience(
+    tiny_demos, tmp_path, monkeypatch
+):
+    """A scripted val sequence: the best epoch is selected and patience stops.
+
+    We monkeypatch ``_evaluate`` to return a deterministic scripted metric
+    stream (train calls interleave with val calls). val_ce improves through
+    epoch 3 then regresses; with ``--patience 2`` the loop must stop two epochs
+    after the best (epoch 5) and select epoch 3.
+    """
+    # val_ce per epoch: 0.9, 0.7, 0.5(best), 0.6, 0.65, 0.7, ...  -> best=epoch3
+    val_ce_stream = [0.9, 0.7, 0.5, 0.6, 0.65, 0.7, 0.8, 0.85, 0.9, 0.95]
+    eval = _scripted_evaluator(val_ce_stream)
+    monkeypatch.setattr(train_bc, "_evaluate", eval.fn)
+
+    out = str(tmp_path / "es.zip")
+    summary = train_bc.train_bc(
+        _bc_args(tiny_demos, out, epochs=10, patience=2,
+                 early_stop_metric="val_ce")
+    )
+    assert summary["best_epoch"] == 3
+    assert summary["best_metric"] == pytest.approx(0.5)
+    assert summary["stopped_early"] is True
+    assert summary["epochs"] == 10  # configured budget unchanged
+    # Stopped two epochs after the best (epoch 3) -> consumed val epochs 1..5.
+    assert eval.val_calls == 5
+
+
+def test_early_stop_disabled_still_restores_best_val(
+    tiny_demos, tmp_path, monkeypatch
+):
+    """--patience 0 disables EARLY stop but still restores best-val weights.
+
+    With a scripted val sequence whose best is epoch 2, the run trains all
+    epochs (no early stop) yet the SAVED checkpoint is the epoch-2 (best-val)
+    one -- the selected epoch is reported as 2, not the final epoch.
+    """
+    val_ce_stream = [0.9, 0.4, 0.5, 0.6, 0.7]  # best at epoch 2
+    eval = _scripted_evaluator(val_ce_stream)
+    monkeypatch.setattr(train_bc, "_evaluate", eval.fn)
+
+    out = str(tmp_path / "es_off.zip")
+    summary = train_bc.train_bc(
+        _bc_args(tiny_demos, out, epochs=5, patience=0,
+                 early_stop_metric="val_ce")
+    )
+    assert summary["stopped_early"] is False
+    assert summary["best_epoch"] == 2
+    assert summary["best_metric"] == pytest.approx(0.4)
+    # Trained the full budget: the val stream was consumed for all 5 epochs.
+    assert eval.val_calls == 5

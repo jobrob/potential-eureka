@@ -49,6 +49,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import time
@@ -181,6 +182,36 @@ def _evaluate(
     }
 
 
+# Early-stopping selection metrics: name -> (val-dict key, "min" | "max").
+# "min" metrics (cross-entropy) improve when they go DOWN; "max" metrics
+# (accuracies) improve when they go UP. CARDS-accuracy can be NaN when a val
+# epoch has no CARDS decisions; the selector treats NaN as "no improvement".
+_EARLY_STOP_METRICS: dict[str, tuple[str, str]] = {
+    "val_ce": ("ce", "min"),
+    "val_acc": ("acc", "max"),
+    "val_cards_acc": ("cards_acc", "max"),
+}
+
+
+def _metric_value(val: dict, metric: str) -> float:
+    """Pull the scalar selection value out of a val-metrics dict."""
+    key, _ = _EARLY_STOP_METRICS[metric]
+    return float(val[key])
+
+
+def _is_improvement(candidate: float, best: float, mode: str) -> bool:
+    """True if ``candidate`` strictly beats ``best`` under ``mode`` (min/max).
+
+    NaN candidates never count as an improvement (a CARDS-acc val slice can be
+    NaN when the epoch had no CARDS decisions), so selection stays well-defined.
+    """
+    if candidate != candidate:  # NaN
+        return False
+    if best != best:  # first finite value always improves over NaN sentinel
+        return True
+    return candidate < best if mode == "min" else candidate > best
+
+
 def train_bc(args: argparse.Namespace) -> dict:
     """Train the BC policy and save it as a MaskablePPO checkpoint."""
     ds = _load_dataset(args.data)
@@ -214,8 +245,31 @@ def train_bc(args: argparse.Namespace) -> dict:
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
     rng = np.random.default_rng(args.seed)
     n_train = len(train_idx)
+    have_val = len(val_idx) > 0
+
+    # --- Early-stopping setup ---------------------------------------------
+    # The DAgger loop retrains BC on a growing aggregate each iteration and we
+    # empirically overfit: val CARDS-accuracy peaks ~epoch 2-3 then regresses
+    # while train accuracy keeps climbing. Track the BEST-val checkpoint and
+    # restore it before saving so we ship the best-val net, not the last-epoch
+    # one. ``--patience 0`` (or >= epochs) disables EARLY stopping but still
+    # restores best-val weights at the end.
+    metric_key, metric_mode = _EARLY_STOP_METRICS[args.early_stop_metric]
+    early_stop_enabled = have_val and 0 < args.patience < args.epochs
+    if not have_val:
+        print(
+            "WARNING: empty val set -- early stopping disabled; saving "
+            "final-epoch weights (legacy behavior)."
+        )
+
+    best_state = None  # deep-copied policy.state_dict() at the best val metric
+    best_metric = float("nan")
+    best_epoch = -1
+    best_val: dict = {}
+    epochs_since_improve = 0
 
     history = []
+    stopped_early = False
     t0 = time.perf_counter()
     for epoch in range(args.epochs):
         policy.set_training_mode(True)
@@ -237,19 +291,68 @@ def train_bc(args: argparse.Namespace) -> dict:
             epoch_ce += float(loss.detach()) * len(sel)
             seen += len(sel)
 
-        if (epoch + 1) % args.eval_every == 0 or epoch == args.epochs - 1:
-            tr = _evaluate(policy, tr_obs, tr_act, tr_mask, tr_kind, device)
+        # Compute val metrics EVERY epoch when there is a val set, so best-val
+        # selection is precise (not only on the --eval-every print cadence).
+        va = None
+        if have_val:
             va = _evaluate(policy, va_obs, va_act, va_mask, va_kind, device)
-            history.append({"epoch": epoch + 1, "train": tr, "val": va})
+            candidate = _metric_value(va, args.early_stop_metric)
+            if _is_improvement(candidate, best_metric, metric_mode):
+                best_metric = candidate
+                best_epoch = epoch + 1
+                best_val = va
+                # Deep-copy onto CPU so the snapshot survives later in-place
+                # parameter updates regardless of device.
+                best_state = copy.deepcopy(
+                    {k: v.detach().cpu() for k, v in policy.state_dict().items()}
+                )
+                epochs_since_improve = 0
+            else:
+                epochs_since_improve += 1
+
+        # Periodic human-readable print (avoid log spam), but ALWAYS print the
+        # final epoch and any epoch a stop happens on.
+        is_print_epoch = (
+            (epoch + 1) % args.eval_every == 0 or epoch == args.epochs - 1
+        )
+        if is_print_epoch:
+            tr = _evaluate(policy, tr_obs, tr_act, tr_mask, tr_kind, device)
+            va_print = va if va is not None else {
+                "ce": float("nan"), "acc": float("nan"),
+                "cards_acc": float("nan"), "cards_n": 0,
+            }
+            history.append({"epoch": epoch + 1, "train": tr, "val": va_print})
             print(
                 f"epoch {epoch + 1:3d}  "
                 f"train ce={tr['ce']:.4f} acc={tr['acc']:.3f} "
                 f"cards_acc={tr['cards_acc']:.3f}  |  "
-                f"val ce={va['ce']:.4f} acc={va['acc']:.3f} "
-                f"cards_acc={va['cards_acc']:.3f}"
+                f"val ce={va_print['ce']:.4f} acc={va_print['acc']:.3f} "
+                f"cards_acc={va_print['cards_acc']:.3f}"
             )
 
+        if early_stop_enabled and epochs_since_improve >= args.patience:
+            stopped_early = True
+            print(
+                f"early stop at epoch {epoch + 1}: {args.early_stop_metric} "
+                f"has not improved for {args.patience} epochs "
+                f"(best epoch {best_epoch}, best {args.early_stop_metric}="
+                f"{best_metric:.4f})"
+            )
+            break
+
     elapsed = time.perf_counter() - t0
+
+    # Restore the BEST-val weights so the SAVED checkpoint is the best-val one,
+    # not the last-epoch one (the whole point of early stopping). With no val
+    # set we keep the final-epoch weights (legacy behavior).
+    if best_state is not None:
+        policy.load_state_dict(
+            {k: v.to(device) for k, v in best_state.items()}
+        )
+        print(
+            f"restored best-val weights from epoch {best_epoch} "
+            f"({args.early_stop_metric}={best_metric:.4f})"
+        )
 
     # Save as an ordinary MaskablePPO checkpoint (+ contract sidecar) so MLAgent
     # / evaluate_ml load it unchanged. No VecNormalize was used in BC, so no
@@ -274,6 +377,12 @@ def train_bc(args: argparse.Namespace) -> dict:
         "epochs": args.epochs,
         "elapsed_s": round(elapsed, 1),
         "final": final,
+        # Early-stopping selection result (the checkpoint actually saved).
+        "early_stop_metric": args.early_stop_metric,
+        "best_epoch": best_epoch,
+        "best_metric": best_metric,
+        "best_val": best_val,
+        "stopped_early": stopped_early,
     }
     return summary
 
@@ -288,7 +397,16 @@ def main() -> None:
     parser.add_argument("--batch", type=int, default=256)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--eval-every", type=int, default=5,
-                        help="report train/val metrics every N epochs")
+                        help="print train/val metrics every N epochs (the val "
+                             "metric for selection is computed EVERY epoch)")
+    parser.add_argument("--patience", type=int, default=8,
+                        help="early-stop if the selection metric has not "
+                             "improved for N consecutive epochs; 0 or >= epochs "
+                             "disables early stopping (still restores best-val)")
+    parser.add_argument("--early-stop-metric", type=str, default="val_ce",
+                        choices=sorted(_EARLY_STOP_METRICS),
+                        help="metric selecting the best-val checkpoint "
+                             "(val_ce minimized; val_acc/val_cards_acc maximized)")
     parser.add_argument("--net", type=str, default="default",
                         choices=["default", "small", "large"],
                         help="net size profile (default = PPOConfig defaults)")
@@ -310,6 +428,20 @@ def main() -> None:
     print(f"  device={summary['device']} epochs={summary['epochs']} "
           f"time={summary['elapsed_s']}s")
     print(f"  train rows={summary['n_train']} val rows={summary['n_val']}")
+    if summary.get("best_epoch", -1) >= 0:
+        bv = summary.get("best_val", {})
+        print(
+            f"  SELECTED best epoch {summary['best_epoch']} by "
+            f"{summary['early_stop_metric']}={summary['best_metric']:.4f}"
+            f"{' (stopped early)' if summary.get('stopped_early') else ''}"
+        )
+        if bv:
+            print(
+                f"  BEST-VAL  val ce={bv['ce']:.4f} acc={bv['acc']:.3f} "
+                f"cards_acc={bv['cards_acc']:.3f} (cards_n={bv['cards_n']})"
+            )
+    else:
+        print("  SELECTED final-epoch weights (no val set for early stopping)")
     if summary["final"]:
         f = summary["final"]
         print(
@@ -323,4 +455,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from _runlog import run_main
+
+    run_main("train_bc", main)

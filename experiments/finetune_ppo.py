@@ -93,6 +93,10 @@ def finetune(args: argparse.Namespace) -> tuple[str, str]:
         seed=args.seed,
         n_envs=args.n_envs,
         ent_coef=args.ent_coef,
+        # verbose=1 so stable-baselines3 prints periodic rollout/train tables --
+        # without it a ~40 min fine-tune logs NOTHING and looks dead even while
+        # training. The run must show signs of life in its log.
+        verbose=args.verbose,
     )
     if args.net != "default":
         cfg = net_profile_config(args.net, cfg)
@@ -170,6 +174,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--n-envs", type=int, default=1)
     parser.add_argument("--ent-coef", type=float, default=0.01)
+    parser.add_argument("--verbose", type=int, default=1,
+                        help="SB3 verbosity (1 = print periodic rollout/train "
+                             "tables so a long run shows signs of life; 0 = quiet)")
     parser.add_argument("--eval-every", type=int, default=50_000,
                         help="learn steps per gate chunk (non-smoke)")
     parser.add_argument("--gate-games", type=int, default=20)
@@ -184,4 +191,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from _runlog import run_main
+
+    run_main("finetune_ppo", main)
