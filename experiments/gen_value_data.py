@@ -80,6 +80,7 @@ import numpy as np
 
 from heat.agents.base import BaseAgent
 from heat.agents.heuristic_agent import HeuristicAgent
+from heat.agents.search_agent import LookaheadAgent
 from heat.engine.driver import run_round_driver
 from heat.engine.game import MAX_ROUNDS
 from heat.engine.rules import distance_to_next_corner
@@ -239,6 +240,49 @@ def _generate_one_track(
     return finished
 
 
+def _policy_factory(args: argparse.Namespace):
+    """Return a zero-arg factory that builds seat 0's trajectory policy.
+
+    The MC labeling (rounds_remaining, decision=None, MAX_ROUNDS drop) is
+    policy-independent -- only *who drives seat 0* changes between the A1 default
+    and the A3 light-policy-iteration step:
+
+      * ``--policy heuristic`` (default): :class:`HeuristicAgent` -- byte-identical
+        to A1 (``HeuristicAgent(name="ValueGen")``), so A1's ``test_value_net.py``
+        is unaffected. The S1-validated rollout policy (README A `2.5`).
+      * ``--policy learned``: the A2 agent
+        ``LookaheadAgent(leaf_value="learned", value_model_path=<current V>)`` --
+        the SAME agent A2 ships -- so V can be refit on trajectories the heuristic
+        never demonstrates (Sprint A3 §2.6). A2's ``top_k``/``sim_budget``
+        branching control is threaded so search-policy generation stays affordable.
+
+    A factory (not a shared instance) is returned so each (track, rollout) gets an
+    independent policy with clean per-game RNG state, exactly as A1 rebuilt a fresh
+    ``HeuristicAgent`` per rollout.
+    """
+    policy = getattr(args, "policy", "heuristic")
+    if policy == "heuristic":
+        return lambda: HeuristicAgent(name="ValueGen")
+    if policy == "learned":
+        if getattr(args, "value_model", None) is None:
+            raise ValueError("--value-model is required when --policy learned")
+        value_model = args.value_model
+        horizon = getattr(args, "horizon", 2)
+        dets = getattr(args, "dets", 2)
+        top_k = getattr(args, "top_k", None)
+        sim_budget = getattr(args, "sim_budget", None)
+        return lambda: LookaheadAgent(
+            name="ValueGenLearned",
+            horizon=horizon,
+            n_determinizations=dets,
+            leaf_value="learned",
+            value_model_path=value_model,
+            top_k=top_k,
+            sim_budget=sim_budget,
+        )
+    raise ValueError(f"unknown --policy {policy!r} (expected heuristic|learned)")
+
+
 def generate_dataset(args: argparse.Namespace) -> dict:
     """Generate the train+val value dataset; return a stats summary.
 
@@ -246,8 +290,14 @@ def generate_dataset(args: argparse.Namespace) -> dict:
     rollouts-per-track CLI knob -- raise it to lower MC variance at the limit-1
     corners, README A `7`). Each rollout reseeds the game RNG so it is a distinct
     sample of the own-deck draw process.
+
+    Seat 0's trajectory policy is selected by :func:`_policy_factory` (``heuristic``
+    default / ``learned`` for the A3 iteration step); the labeling is identical
+    either way.
     """
     buf = _ValueBuffer()
+    make_policy = _policy_factory(args)
+    policy_name = getattr(args, "policy", "heuristic")
 
     bands = [
         ("train", _TRAIN_SEED_BASE, args.train_tracks),
@@ -265,7 +315,7 @@ def generate_dataset(args: argparse.Namespace) -> dict:
                 # independent sample of the own-deck draw (MC over the draw
                 # chance node -- README A 2.2).
                 game_seed = args.game_seed + i * args.rollouts + r
-                policy = HeuristicAgent(name="ValueGen")
+                policy = make_policy()
                 finished = _generate_one_track(
                     track_seed,
                     split,
@@ -330,10 +380,21 @@ def generate_dataset(args: argparse.Namespace) -> dict:
 
     # Sidecar provenance (next to the .npz). codec_version is recorded so the
     # trainer can fail fast if the dataset was built against a drifted codec.
+    # generator_policy stays "HeuristicAgent" for the A1 default (test_value_net
+    # asserts this exact string); the A3 learned step records the search agent and
+    # the value model it was driven by, for provenance.
+    if policy_name == "learned":
+        generator_policy = "LookaheadAgent(leaf_value=learned)"
+    else:
+        generator_policy = "HeuristicAgent"
     meta = {
         "codec_version": CODEC_VERSION,
         "obs_dim": OBS_DIM,
-        "generator_policy": "HeuristicAgent",
+        "generator_policy": generator_policy,
+        "policy": policy_name,
+        "value_model": (
+            getattr(args, "value_model", None) if policy_name == "learned" else None
+        ),
         "num_players": 1,
         "rollouts_per_track": args.rollouts,
         "train_seed_base": _TRAIN_SEED_BASE,
@@ -405,12 +466,38 @@ def main() -> None:
                              "value variance at the limit-1 corners (README A 7)")
     parser.add_argument("--game-seed", type=int, default=7000,
                         help="base seed for the per-(track,rollout) game RNG")
+    parser.add_argument("--policy", type=str, default="heuristic",
+                        choices=["heuristic", "learned"],
+                        help="seat-0 trajectory policy: 'heuristic' (A1 default) "
+                             "or 'learned' (A2 LookaheadAgent for the A3 "
+                             "policy-iteration step; requires --value-model)")
+    parser.add_argument("--value-model", type=str, default=None,
+                        help="V checkpoint path driving the learned policy "
+                             "(required when --policy learned)")
+    parser.add_argument("--horizon", type=int, default=2,
+                        help="LookaheadAgent rollout depth (--policy learned only)")
+    parser.add_argument("--dets", type=int, default=2,
+                        help="LookaheadAgent determinizations per candidate "
+                             "(--policy learned only)")
+    parser.add_argument("--top-k", type=int, default=None,
+                        help="LookaheadAgent top-k branching cap, A2's affordability "
+                             "knob (--policy learned only)")
+    parser.add_argument("--sim-budget", type=int, default=None,
+                        help="LookaheadAgent per-move clone budget, A2's "
+                             "affordability knob (--policy learned only)")
     args = parser.parse_args()
+    if args.policy == "learned" and args.value_model is None:
+        parser.error("--value-model is required when --policy learned")
 
+    policy_desc = (
+        "HeuristicAgent"
+        if args.policy == "heuristic"
+        else f"LookaheadAgent(learned, V={args.value_model})"
+    )
     print(
         f"gen_value_data: train_tracks={args.train_tracks} "
         f"val_tracks={args.val_tracks} rollouts={args.rollouts} "
-        f"policy=HeuristicAgent (solo) "
+        f"policy={policy_desc} (solo) "
         f"(codec v{CODEC_VERSION}, OBS_DIM={OBS_DIM})"
     )
     summary = generate_dataset(args)
