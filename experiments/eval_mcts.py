@@ -181,6 +181,89 @@ def _rung2_verdict(solo: dict[str, _AgentAgg], cold_start: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Rung-3 verdict (C2): trained-net-in-search BEATS pre-training-net-in-search
+# ---------------------------------------------------------------------------
+
+
+def _rung3_verdict(solo: dict[str, _AgentAgg]) -> None:
+    """Print the C2 rung-3 verdict: the TRAINED net (used as the search prior+value)
+    BEATS the PRE-TRAINING net (the generator's net) in the same search.
+
+    The bar (README §5 rung 3): the trained net beats the pre-training net on the
+    rung-2 metrics -- strictly lower worst-case L1 spins/pass AND rounds-to-finish
+    on the held-out solo field. Heat-efficiency (dist/heat) is reported alongside
+    (every rung that produces an agent reports budgeting, not just survival -- the
+    README "heat-efficiency check"). A non-beat is reported HONESTLY: it is the C2
+    go/no-go signal for C3 (visit budget too low and/or the prior too weak), not
+    something to mask with finish-rate (the S3/8C footgun).
+    """
+    print("\n=== C2 rung-3 success criteria (solo, L1): MCTS-trained BEATS MCTS-prior ===")
+    trained = solo.get("MCTS-trained")
+    prior = solo.get("MCTS-prior")
+    if trained is None or prior is None:
+        print("  (missing MCTS-trained / MCTS-prior aggregates)")
+        return
+
+    _, _, trained_worst = trained.spin_stats(1)
+    _, _, prior_worst = prior.spin_stats(1)
+    tr_rounds = trained.mean_rounds()
+    pr_rounds = prior.mean_rounds()
+    tr_dph, tr_cd = trained.heat_efficiency()
+    pr_dph, pr_cd = prior.heat_efficiency()
+
+    def fmt(x: float) -> str:
+        return "n/a" if x != x else f"{x:.3f}"
+
+    print(
+        f"  worst-case spins/limit-1-pass:  trained={fmt(trained_worst)}  "
+        f"prior={fmt(prior_worst)}"
+    )
+    print(
+        f"  solo finish rate:               trained={trained.finish_rate() * 100:.0f}%  "
+        f"prior={prior.finish_rate() * 100:.0f}%"
+    )
+    print(
+        f"  rounds-to-finish (mean):        trained={fmt(tr_rounds)}  "
+        f"prior={fmt(pr_rounds)}"
+    )
+    print(
+        f"  heat efficiency (dist/heat):    trained={fmt(tr_dph)}  prior={fmt(pr_dph)}  "
+        f"(cooldowns/game trained={fmt(tr_cd)} prior={fmt(pr_cd)})"
+    )
+
+    # BEAT = strictly lower worst-case L1 spins AND strictly lower rounds. A NaN
+    # (no L1 passes) cannot be a strict win -- it is reported as not-beaten.
+    beat_spins = (
+        trained_worst == trained_worst
+        and prior_worst == prior_worst
+        and trained_worst < prior_worst - 1e-9
+    )
+    beat_rounds = (
+        tr_rounds == tr_rounds
+        and pr_rounds == pr_rounds
+        and tr_rounds < pr_rounds - 1e-9
+    )
+    print(
+        f"  -> worst-case L1 spins < prior:   "
+        f"{'PASS' if beat_spins else 'FAIL'}\n"
+        f"  -> rounds-to-finish < prior:      "
+        f"{'PASS' if beat_rounds else 'FAIL'}"
+    )
+    if beat_spins and beat_rounds:
+        print("  VERDICT: rung-3 PASS -- one generation lifted the net (the AZ "
+              "improvement signal is real).")
+    else:
+        print(
+            "  VERDICT: rung-3 NOT MET -- the trained net did NOT beat the "
+            "pre-training net on BOTH metrics.\n"
+            "  Per README §5 / C2 go/no-go, a non-beat is an HONEST signal (likely "
+            "the C0 visit budget is too low and/or the\n"
+            "  cold-start prior is too weak to produce better-than-net targets), "
+            "NOT a result to paper over with finish-rate."
+        )
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -204,18 +287,18 @@ def main() -> None:
                              "reported as the cold-start FLOOR, not a parity claim.")
     parser.add_argument("--skip-4p", action="store_true",
                         help="run only the solo field (the primary gate)")
+    parser.add_argument("--compare-model", type=str, default=None,
+                        help="Sprint-C2 RUNG-3 mode: a second MaskablePPO checkpoint "
+                             "(the PRE-TRAINING / generator net). When set, the solo "
+                             "field registers TWO MCTS contenders -- 'MCTS-trained' "
+                             "(--model) vs 'MCTS-prior' (--compare-model) -- and "
+                             "prints the rung-3 head-to-head verdict (trained net "
+                             "BEATS pre-training net on the same search).")
     args = parser.parse_args()
 
     track_seeds = [_HELDOUT_BASE + i for i in range(args.games)]
-
-    cold_start = args.model is None
-    tmpdir = None
-    model_path = args.model
-    if cold_start:
-        tmpdir = tempfile.mkdtemp(prefix="c1_cold_")
-        model_path = _mint_cold_start_checkpoint(tmpdir, seed=args.seed)
-
     cfg = MCTSConfig(n_simulations=args.sims)
+    rung3 = args.compare_model is not None
 
     def make_heuristic() -> BaseAgent:
         return HeuristicAgent()
@@ -226,16 +309,57 @@ def main() -> None:
     def make_lookahead() -> BaseAgent:
         return LookaheadAgent(horizon=args.horizon, n_determinizations=args.dets)
 
-    def make_mcts() -> BaseAgent:
+    def _make_mcts(path: str, name: str):
         # Each game gets a fresh agent (clean per-game profile/RNG); the net loads
-        # lazily from model_path through the NetAdapter tripwire (codec v3).
-        return MCTSAgent(model_path=model_path, config=cfg, seed=args.seed, name="MCTS")
+        # lazily from path through the NetAdapter tripwire (codec v3).
+        def factory() -> BaseAgent:
+            return MCTSAgent(model_path=path, config=cfg, seed=args.seed, name=name)
+        return factory
+
+    if rung3:
+        # --- Sprint C2 RUNG-3: trained-net-in-search vs pre-training-net-in-search.
+        if args.model is None:
+            parser.error("--compare-model (rung-3) requires --model (the TRAINED "
+                         "net); cold-start has no trained net to compare.")
+        labels = {
+            "Heuristic": make_heuristic,
+            "Lookahead": make_lookahead,
+            "MCTS-trained": _make_mcts(args.model, "MCTS-trained"),
+            "MCTS-prior": _make_mcts(args.compare_model, "MCTS-prior"),
+        }
+        print(
+            f"eval_mcts RUNG-3: {args.games} held-out generated tracks (tight, "
+            f"L1-weighted), MCTS sims={args.sims}\n"
+            f"  trained={args.model}  vs  prior={args.compare_model}"
+        )
+        solo, solo_prof = _run_field(
+            labels, track_seeds=track_seeds, num_players=1, game_seed_base=args.seed
+        )
+        _print_field("SOLO (rung-3 gate)", solo, solo_prof)
+        if not args.skip_4p:
+            four, four_prof = _run_field(
+                labels, track_seeds=track_seeds, num_players=4,
+                game_seed_base=args.seed + 5000,
+            )
+            _print_field(
+                "4P vs weak heuristics (seat-0; spin/finish metric)", four, four_prof
+            )
+        _rung3_verdict(solo)
+        return
+
+    # --- Sprint C1 RUNG-2 (single net or cold-start floor).
+    cold_start = args.model is None
+    tmpdir = None
+    model_path = args.model
+    if cold_start:
+        tmpdir = tempfile.mkdtemp(prefix="c1_cold_")
+        model_path = _mint_cold_start_checkpoint(tmpdir, seed=args.seed)
 
     labels = {
         "Heuristic": make_heuristic,
         "StrongHeuristic": make_strong,
         "Lookahead": make_lookahead,
-        "MCTS": make_mcts,
+        "MCTS": _make_mcts(model_path, "MCTS"),
     }
 
     print(

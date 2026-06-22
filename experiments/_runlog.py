@@ -29,6 +29,28 @@ import traceback
 from typing import Callable
 
 
+def _force_utf8_streams() -> None:
+    """Reconfigure stdout/stderr to UTF-8 so non-ASCII output never crashes.
+
+    On a default Windows console ``sys.stdout`` is cp1252; printing the Greek /
+    math glyphs the Option-C banners and ``argparse`` ``description=__doc__`` help
+    text carry (``pi``/``tau``/``Sigma``/``-`` etc.) raises ``UnicodeEncodeError``
+    and kills an otherwise-healthy run at exit 1 before it does any work. Forcing
+    UTF-8 here (the Py3.7+ ``reconfigure`` hook, a no-op when already UTF-8 or when
+    the stream does not support it, e.g. a plain pipe) makes every wrapped entry
+    point robust on a plain console without a ``PYTHONIOENCODING`` override. ASCII
+    output is unaffected; this only widens what can be encoded.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except Exception:  # pragma: no cover - non-reconfigurable stream
+            pass
+
+
 def _flush() -> None:
     """Flush both streams so a tail/grep monitor sees markers immediately."""
     try:
@@ -52,6 +74,7 @@ def run_main(name: str, fn: Callable[[], object]) -> None:
     Intended to wrap an entry point's ``main`` under ``if __name__ ==
     "__main__":`` -- e.g. ``run_main("train_bc", main)``.
     """
+    _force_utf8_streams()
     started = _dt.datetime.now().isoformat(timespec="seconds")
     print(f"=== {name} START {started} ===")
     _flush()
