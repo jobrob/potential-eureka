@@ -232,9 +232,14 @@ def _search_visit_distribution(
     agent._clones_this_move = 0
 
     t0 = time.perf_counter()
-    for sim in range(agent.config.n_simulations):
-        agent._simulate(root, model, turn_seed, sim)
+    agent._run_root_search(root, model, turn_seed)
     agent.profile.record_move(agent._clones_this_move, time.perf_counter() - t0)
+
+    # Gumbel root selector (Sprint C4): build the COMPLETED-Q policy target
+    # π = softmax(logits + σ(completedQ)) instead of the visit-count distribution.
+    # Same (obs, π, mask, z) output schema; only the *policy* target changes.
+    if agent.config.root_selector == "gumbel":
+        return _completed_q_distribution(agent, root, decision)
 
     # Build the visit-distribution policy target over the full flat action space.
     pi = np.zeros(ACTION_DIM, dtype=np.float64)
@@ -282,6 +287,87 @@ def _search_visit_distribution(
 
     if not pi_built:
         # Fall back to a one-hot target on the acted action if it encodes.
+        try:
+            flat = encode_action_index(decision, acted_action)
+            if 0 <= flat < ACTION_DIM:
+                pi[:] = 0.0
+                pi[flat] = 1.0
+        except (ValueError, IndexError):
+            pass
+
+    return pi, acted_action
+
+
+def _completed_q_distribution(
+    agent: MCTSAgent,
+    root: Node,
+    decision: Decision,
+) -> tuple[np.ndarray, object]:
+    """Build the Gumbel **completed-Q** policy target (Sprint C4).
+
+    ``π(a) = softmax_a( logits_a + σ(completedQ_a) )`` over the kept candidate set
+    (zeros elsewhere in the full ``ACTION_DIM`` vector), where
+
+      * ``logits_a`` is the net's log-prior over the kept set (``GumbelRootResult``);
+      * ``completedQ_a = Q̂_a = _normalize_q(edge.q())`` for a SEARCHED edge
+        (``edge.n > 0``);
+      * ``completedQ_a = v̂`` (the root's own normalized value ``root_value_norm``)
+        for a sampled-but-unvisited / un-sampled action -- the "completion" step
+        (Sprint C4 decision #2: the standard AlphaZero choice, NOT the interior
+        FPU-reduced parent value).
+
+    The σ transform reuses ``agent._gumbel_sigma`` (the same already-normalized
+    ``[0,1]`` Q̂ the interior PUCT uses, so the −rounds_remaining scale stays tamed).
+    The output schema is IDENTICAL to the visit-count path -- ``(pi, acted_action)``
+    with ``pi`` a probability vector whose support ⊆ mask and sums to 1 -- so
+    ``train_az`` and the ``.npz``/``MLAgent`` contract are unchanged. The same
+    off-table drop-and-count + degenerate fallback the caller applies still hold.
+    """
+    gr = agent._gumbel_result
+    assert gr is not None and gr.edges is root.edges
+
+    edges = gr.edges
+    # σ's max_n is the largest visit count over the searched root edges (Danihelka).
+    max_n = max((e.n for e in edges), default=0)
+
+    # completedQ per edge, then the un-normalized score logits + σ(completedQ).
+    scores: list[tuple[int, float]] = []  # (flat_index, score)
+    for i, edge in enumerate(edges):
+        try:
+            flat = encode_action_index(decision, edge.action)
+        except (ValueError, IndexError):
+            # Off-table action (codec can't encode): cannot be a policy target.
+            continue
+        if not (0 <= flat < ACTION_DIM):
+            continue
+        if edge.n > 0:
+            q_hat = agent._normalize_q(edge.q())
+        else:
+            q_hat = gr.root_value_norm  # completion baseline v̂ (decision #2)
+        score = gr.logits[i] + agent._gumbel_sigma(q_hat, max_n)
+        scores.append((flat, score))
+
+    pi = np.zeros(ACTION_DIM, dtype=np.float64)
+    pi_built = False
+    if scores:
+        # Numerically-stable softmax over the kept candidate scores.
+        raw = np.array([s for _, s in scores], dtype=np.float64)
+        raw -= raw.max()
+        exp = np.exp(raw)
+        total = float(exp.sum())
+        if total > 0.0 and np.isfinite(total):
+            probs = exp / total
+            for (flat, _), p in zip(scores, probs):
+                pi[flat] = p
+            pi_built = True
+
+    # The acted action: the Gumbel-selected argmax(g + logits + σ(Q̂)) (via
+    # _best_edge's Gumbel-aware root branch).
+    acted_edge = agent._best_edge(root, at_root=True)
+    acted_action = acted_edge.action
+
+    if not pi_built:
+        # Degenerate (no encodable edge): fall back to a one-hot on the acted action.
         try:
             flat = encode_action_index(decision, acted_action)
             if 0 <= flat < ACTION_DIM:
@@ -484,6 +570,7 @@ def generate_dataset(args: argparse.Namespace) -> dict:
         dirichlet_eps=args.dirichlet_eps,
         dirichlet_alpha=args.dirichlet_alpha,
         temperature_moves=args.temperature_moves,
+        root_selector=getattr(args, "root_selector", "puct"),
     )
 
     bands = [
@@ -590,6 +677,10 @@ def generate_dataset(args: argparse.Namespace) -> dict:
             "dirichlet_eps": cfg.dirichlet_eps,
             "dirichlet_alpha": cfg.dirichlet_alpha,
             "temperature_moves": cfg.temperature_moves,
+            "root_selector": cfg.root_selector,
+            "gumbel_m": cfg.gumbel_m,
+            "gumbel_c_visit": cfg.gumbel_c_visit,
+            "gumbel_c_scale": cfg.gumbel_c_scale,
         },
         "selfplay_seed_base": _SELFPLAY_SEED_BASE,
         "train_tracks": args.tracks,
@@ -689,6 +780,11 @@ def main() -> None:
                         help="root Dirichlet concentration alpha (C0 default 0.5)")
     parser.add_argument("--temperature-moves", type=int, default=10,
                         help="plies sampling a~N (tau=1) before tau->0 (C0 default 10)")
+    parser.add_argument("--root-selector", type=str, default="puct",
+                        choices=["puct", "gumbel"],
+                        help="root action selector + policy target (C4): 'puct' "
+                             "(default, visit-count target) or 'gumbel' "
+                             "(Gumbel top-m + Sequential Halving, completed-Q target)")
     parser.add_argument("--seed", type=int, default=0,
                         help="base agent search seed (mixed per track)")
     parser.add_argument("--game-seed", type=int, default=8000,
@@ -705,7 +801,8 @@ def main() -> None:
     print(
         f"gen_selfplay: tracks={args.tracks} val={args.val_tracks} sims={args.sims} "
         f"dirichlet=(eps={args.dirichlet_eps},alpha={args.dirichlet_alpha}) "
-        f"T_moves={args.temperature_moves} prior={args.model} "
+        f"T_moves={args.temperature_moves} root_selector={args.root_selector} "
+        f"prior={args.model} "
         f"(codec v{CODEC_VERSION}, OBS_DIM={OBS_DIM}, ACTION_DIM={ACTION_DIM})"
     )
     summary = generate_dataset(args)

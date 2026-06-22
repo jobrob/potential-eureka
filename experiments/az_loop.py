@@ -197,6 +197,7 @@ def _generate(
     sims: int,
     seed: int,
     game_seed: int,
+    root_selector: str = "puct",
 ) -> dict:
     """Generate one generation of self-play targets with the current-best net.
 
@@ -215,6 +216,7 @@ def _generate(
             out=out, model=model_path, tracks=tracks, val_tracks=val_tracks,
             sims=sims, dirichlet_eps=0.25, dirichlet_alpha=0.5,
             temperature_moves=10, seed=seed + generation, game_seed=game_seed + generation,
+            root_selector=root_selector,
         ))
     finally:
         gen_selfplay._SELFPLAY_SEED_BASE = saved
@@ -359,6 +361,7 @@ def run_loop(args: argparse.Namespace) -> dict:
             generation=gen, model_path=best_model, out=data_path,
             tracks=args.tracks, val_tracks=args.val_tracks, sims=args.sims,
             seed=args.seed, game_seed=args.game_seed,
+            root_selector=getattr(args, "root_selector", "puct"),
         )
         print(f"        logged {gen_summary['n_rows']} targets "
               f"(pi_entropy={gen_summary['pi_entropy_mean']:.3f}, "
@@ -512,6 +515,11 @@ def main() -> None:
                         help="LookaheadAgent determinizations")
     parser.add_argument("--stop-patience", type=int, default=2,
                         help="stop after K consecutive non-improving generations")
+    parser.add_argument("--root-selector", type=str, default="puct",
+                        choices=["puct", "gumbel"],
+                        help="self-play root action selector + policy target (C4): "
+                             "'puct' (default, visit-count target) or 'gumbel' "
+                             "(Gumbel top-m + Sequential Halving, completed-Q target)")
     parser.add_argument("--net", type=str, default="default",
                         choices=["default", "small", "large"])
     parser.add_argument("--device", type=str, default="auto",

@@ -131,6 +131,31 @@ DEFAULT_TEMPERATURE_MOVES: int = 10
 DEFAULT_OWN_SPIN_PENALTY: float = 1000.0
 DEFAULT_LATER_SPIN_PENALTY: float = 11.0
 
+#: Gumbel-AlphaZero RootActionSelector constants (Sprint C4). ``DEFAULT_GUMBEL_M``
+#: is the number of root actions sampled without replacement by the Gumbel top-k
+#: trick (capped at the kept-candidate count and at a value Sequential Halving can
+#: afford given ``n_simulations``). ``c_visit`` / ``c_scale`` parameterize the
+#: monotone σ transform ``σ(q) = (c_visit + max_b N_b) · c_scale · q`` applied to
+#: the ALREADY-NORMALIZED ``[0,1]`` Q̂ (so the unbounded −rounds_remaining scale
+#: stays tamed -- the C0 §D Q-scale hazard, now at the root).
+#:
+#: Constants: Danihelka et al. (2022) publish ``c_visit=50, c_scale=1.0``. Sprint
+#: C4 decision #1 says start there and **retune only if the non-collapse test
+#: fails** -- which it did: at our LOW (16) sim budget and [0,1] Q-normalization,
+#: ``(c_visit + max_n)·c_scale ≈ 58`` swamps the log-prior so σ(Q̂) collapses the
+#: completed-Q target to one-hot at narrow (GEAR) decisions (measured GEAR
+#: π-entropy 0.002 -- a swamped σ, the documented hazard). The published constants
+#: assume Danihelka's HUNDREDS-of-sims / [-1,1] value regime; at 16 sims the σ
+#: magnitude must shrink to keep the prior in play. The retune below (``c_visit=25,
+#: c_scale=0.25``) restores a non-collapsed, graded completed-Q target (GEAR
+#: entropy ~0.22, CARDS ~0.86, both well above the ~0.04 PUCT visit-count floor)
+#: while σ still bites (mass shifts toward higher-Q actions -- the
+#: improvement-guarantee test pins this). The behavioral one-cycle CI gate is the
+#: final arbiter (Sprint C4 success criterion 2).
+DEFAULT_GUMBEL_M: int = 8
+DEFAULT_GUMBEL_C_VISIT: float = 25.0
+DEFAULT_GUMBEL_C_SCALE: float = 0.25
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -176,6 +201,21 @@ class MCTSConfig:
     #: a deterministic-eval option. Both are deterministic with noise off.
     act_on_q: bool = False
 
+    # --- root action selector seam (README §3 RootActionSelector; Sprint C4) ---
+    #: ``"puct"`` (default) is the byte-for-byte-unchanged C1/C2/C3 path: log-PUCT
+    #: descent at the root + the visit-count target. ``"gumbel"`` swaps in the
+    #: Gumbel-AlphaZero selector (Gumbel top-``m`` sampling + Sequential Halving for
+    #: the acted action, completed-Q policy target in ``gen_selfplay``), used ONLY
+    #: to build self-play training targets -- the agent still ACTS and is EVALUATED
+    #: with the PUCT search regardless of this toggle (Sprint C4 scope decision #3).
+    root_selector: str = "puct"
+    #: Gumbel top-``m``: the number of root actions sampled without replacement
+    #: (capped at the kept-candidate count and at what Sequential Halving can afford).
+    gumbel_m: int = DEFAULT_GUMBEL_M
+    #: σ transform constants for ``σ(Q̂) = (c_visit + max_b N_b)·c_scale·Q̂``.
+    gumbel_c_visit: float = DEFAULT_GUMBEL_C_VISIT
+    gumbel_c_scale: float = DEFAULT_GUMBEL_C_SCALE
+
     def __post_init__(self) -> None:
         if self.n_simulations < 1:
             raise ValueError(f"n_simulations must be >= 1, got {self.n_simulations}")
@@ -186,6 +226,20 @@ class MCTSConfig:
         if not (0.0 <= self.dirichlet_eps <= 1.0):
             raise ValueError(
                 f"dirichlet_eps must be in [0, 1], got {self.dirichlet_eps}"
+            )
+        if self.root_selector not in ("puct", "gumbel"):
+            raise ValueError(
+                f"root_selector must be 'puct' or 'gumbel', got {self.root_selector!r}"
+            )
+        if self.gumbel_m < 1:
+            raise ValueError(f"gumbel_m must be >= 1, got {self.gumbel_m}")
+        if self.gumbel_c_visit < 0.0:
+            raise ValueError(
+                f"gumbel_c_visit must be >= 0, got {self.gumbel_c_visit}"
+            )
+        if self.gumbel_c_scale <= 0.0:
+            raise ValueError(
+                f"gumbel_c_scale must be > 0, got {self.gumbel_c_scale}"
             )
 
 
@@ -594,6 +648,35 @@ class ChanceOutcome:
 
 
 @dataclass
+class GumbelRootResult:
+    """The Gumbel-AlphaZero root selection result for one search (Sprint C4).
+
+    Captured on the agent after a ``root_selector="gumbel"`` search so
+    ``gen_selfplay`` can build the **completed-Q** policy target
+    ``π = softmax(logits + σ(completedQ))`` (decision: unvisited/un-sampled actions
+    take the root's own normalized value ``root.value`` as their completed-Q). All
+    fields are aligned to ``root.edges`` order.
+
+    Attributes:
+        edges: the root edges (same list object as ``root.edges``).
+        gumbel: ``g_a ~ Gumbel(0)`` per edge (drawn only from ``_search_rng``).
+        logits: ``log P(s,a)`` per edge (the net's log-prior over the kept set).
+        sampled: index list of the ``m`` Gumbel-top-``m`` sampled actions.
+        acted_index: the selected (acted) edge index ``argmax(g + logits + σ(Q̂))``
+            over the Sequential-Halving survivors.
+        root_value_norm: the root's own normalized value ``v̂`` (the completion
+            baseline for unvisited / un-sampled actions).
+    """
+
+    edges: list[Edge]
+    gumbel: list[float]
+    logits: list[float]
+    sampled: list[int]
+    acted_index: int
+    root_value_norm: float
+
+
+@dataclass
 class Node:
     """A search-tree node (README §3 ``Node`` seam).
 
@@ -710,6 +793,11 @@ class MCTSAgent(BaseAgent):
         import random as _random
 
         self._search_rng = _random.Random(0)
+
+        #: The Gumbel root selection result from the most recent search (set only
+        #: when ``config.root_selector == "gumbel"``; ``gen_selfplay`` reads it to
+        #: build the completed-Q target). ``None`` on the PUCT path.
+        self._gumbel_result: GumbelRootResult | None = None
 
         # Cached plan for the current turn (mirrors LookaheadAgent): a full search
         # at the GEAR decision yields the gear AND the cards play to follow.
@@ -918,22 +1006,207 @@ class MCTSAgent(BaseAgent):
         self._clones_this_move = 0
 
         t0 = time.perf_counter()
-        for sim in range(self.config.n_simulations):
-            self._simulate(root, model, turn_seed, sim)
+        self._run_root_search(root, model, turn_seed)
         self.profile.record_move(self._clones_this_move, time.perf_counter() - t0)
 
         gear, cards = self._extract_plan(root, legal_gears, state, player_id)
         self._ply += 1
         return gear, cards
 
+    def _run_root_search(
+        self, root: Node, model: EngineTransitionModel, turn_seed: int
+    ) -> None:
+        """Run ``n_simulations`` from ``root`` under the configured root selector.
+
+        ``root_selector="puct"`` (default) is the byte-for-byte-unchanged C1 path:
+        every simulation selects the root child by log-PUCT. ``"gumbel"`` (Sprint
+        C4) allocates the budget across a Gumbel-sampled top-``m`` via Sequential
+        Halving (the interior descent below the root is identical in both). The
+        Gumbel path records its result on ``self._gumbel_result`` for the
+        completed-Q target; the PUCT path leaves it ``None``.
+        """
+        if self.config.root_selector == "gumbel":
+            self._gumbel_result = self._gumbel_root_search(root, model, turn_seed)
+        else:
+            self._gumbel_result = None
+            for sim in range(self.config.n_simulations):
+                self._simulate(root, model, turn_seed, sim)
+
+    # -- the Gumbel-AlphaZero root selector (Sprint C4) ------------------
+
+    def _gumbel_sigma(self, q_hat: float, max_n: int) -> float:
+        """Danihelka's monotone σ transform over an ALREADY-NORMALIZED Q̂.
+
+        ``σ(q) = (c_visit + max_b N_b) · c_scale · q`` where ``q`` is ``Q̂`` in
+        ``[0,1]`` (``_normalize_q`` output) -- so the unbounded −rounds_remaining
+        scale is already tamed before σ ever runs (the C0 §D hazard, now at the
+        root). ``max_n`` is the largest visit count over the root's sampled actions.
+        """
+        cfg = self.config
+        return (cfg.gumbel_c_visit + float(max_n)) * cfg.gumbel_c_scale * q_hat
+
+    def _gumbel_root_search(
+        self, root: Node, model: EngineTransitionModel, turn_seed: int
+    ) -> GumbelRootResult:
+        """Gumbel top-``m`` sampling + Sequential Halving at the ROOT (Sprint C4).
+
+        The interior descent (everything below the root), the chance-node DPW, the
+        leaf discipline, and the codec are all UNCHANGED -- only the root edge each
+        simulation is forced through is dictated here (Sequential Halving), not by
+        log-PUCT. All randomness draws ONLY from ``self._search_rng`` (seeded off
+        the turn signature in the caller), so the whole search stays a pure
+        function of ``(state, seed)`` -- no global-RNG leak.
+
+        Algorithm (Danihelka et al. 2022):
+          1. Expand the root (build edges from the net prior, set ``root.value``).
+          2. Draw ``g_a ~ Gumbel(0)`` per edge; take the ``m`` edges with the
+             largest ``g_a + logits_a`` (the Gumbel-top-``m`` trick = sampling ``m``
+             actions WITHOUT replacement from ``softmax(logits)``).
+          3. Sequential Halving: split ``n_simulations`` into ``⌈log2(m)⌉`` phases;
+             each phase runs an equal share of sims through every surviving root
+             action, then keeps the top half by ``g_a + logits_a + σ(Q̂_a)``.
+          4. The acted action is ``argmax(g_a + logits_a + σ(Q̂_a))`` over the
+             survivors.
+        """
+        # (1) Expand the root once so the priors + root.value are available before
+        #     any sampling (the C1 loop expands the root lazily on sim 0; the
+        #     Gumbel path needs it up front to read logits / the completion value).
+        if not root.expanded:
+            self._expand_and_evaluate(root, model, turn_seed, sim=0)
+
+        edges = root.edges
+        n_edges = len(edges)
+        logits = [math.log(max(e.prior, 1e-12)) for e in edges]
+
+        # (2) Gumbel-top-m sample (without replacement) from softmax(logits).
+        gumbel = [self._sample_gumbel() for _ in range(n_edges)]
+        m = min(self.config.gumbel_m, n_edges)
+        # Sequential Halving needs at least m sims to give each survivor >= 1; cap
+        # m at the budget so a tiny n_simulations degenerates gracefully (m=1 =>
+        # prior-greedy root, the C1 n_simulations=1 analogue).
+        m = max(1, min(m, self.config.n_simulations))
+        order = sorted(range(n_edges), key=lambda i: (gumbel[i] + logits[i], i), reverse=True)
+        sampled = order[:m]
+
+        budget = self.config.n_simulations
+        sim_counter = 0
+        survivors = list(sampled)
+
+        if m == 1:
+            # Degenerate: a single sampled action; spend the whole budget on it so
+            # its Q̂ is estimated, then it is trivially the acted action.
+            for _ in range(budget):
+                self._simulate(root, model, turn_seed, sim_counter,
+                               forced_root_edge=edges[survivors[0]])
+                sim_counter += 1
+        else:
+            # (3) Sequential Halving over ⌈log2(m)⌉ phases.
+            n_phases = max(1, math.ceil(math.log2(m)))
+            for phase in range(n_phases):
+                k = len(survivors)
+                if k <= 1:
+                    break
+                # Sims allotted to THIS phase, split equally across the k survivors.
+                # The standard SH split: budget / (⌈log2(m)⌉ · k) sims each, with
+                # any remainder absorbed in the final phase by the loop spending
+                # whatever budget is left.
+                remaining_phases = n_phases - phase
+                phase_budget = (budget - sim_counter)
+                if remaining_phases > 1:
+                    phase_budget = phase_budget // remaining_phases
+                per_arm = max(1, phase_budget // k)
+                for _ in range(per_arm):
+                    for idx in survivors:
+                        if sim_counter >= budget:
+                            break
+                        self._simulate(root, model, turn_seed, sim_counter,
+                                       forced_root_edge=edges[idx])
+                        sim_counter += 1
+                    if sim_counter >= budget:
+                        break
+                # Keep the top half by g + logits + σ(Q̂).
+                keep = max(1, k // 2)
+                survivors = self._gumbel_rank(edges, gumbel, logits, survivors)[:keep]
+
+            # Spend any leftover budget on the surviving arms (round-robin) so the
+            # total interior sims == n_simulations exactly (no budget leak).
+            while sim_counter < budget:
+                for idx in survivors:
+                    if sim_counter >= budget:
+                        break
+                    self._simulate(root, model, turn_seed, sim_counter,
+                                   forced_root_edge=edges[idx])
+                    sim_counter += 1
+
+        # (4) Acted action = argmax(g + logits + σ(Q̂)) over the survivors.
+        ranked = self._gumbel_rank(edges, gumbel, logits, survivors)
+        acted_index = ranked[0]
+
+        return GumbelRootResult(
+            edges=edges,
+            gumbel=gumbel,
+            logits=logits,
+            sampled=sampled,
+            acted_index=acted_index,
+            root_value_norm=self._normalize_q(root.value),
+        )
+
+    def _gumbel_rank(
+        self,
+        edges: list[Edge],
+        gumbel: list[float],
+        logits: list[float],
+        indices: list[int],
+    ) -> list[int]:
+        """Rank ``indices`` by ``g_a + logits_a + σ(Q̂_a)`` (descending, stable).
+
+        ``Q̂_a`` is the root edge's normalized mean value (``_normalize_q(edge.q())``
+        -- the SAME min-max the interior PUCT uses) for a visited edge; an unvisited
+        edge is scored with the completion baseline ``v̂`` (the root's own
+        normalized value), matching the completed-Q construction. ``max_n`` for σ is
+        the largest visit count over the ranked set (Danihelka's definition).
+        """
+        max_n = max((edges[i].n for i in indices), default=0)
+        root_v = self._normalize_q(self._root_node.value) if self._root_node else 0.5
+
+        def score(i: int) -> tuple[float, int]:
+            edge = edges[i]
+            q_hat = self._normalize_q(edge.q()) if edge.n > 0 else root_v
+            return (gumbel[i] + logits[i] + self._gumbel_sigma(q_hat, max_n), -i)
+
+        return sorted(indices, key=score, reverse=True)
+
+    def _sample_gumbel(self) -> float:
+        """A single ``Gumbel(0)`` draw from ``_search_rng`` (no global RNG).
+
+        ``-log(-log(u))`` with ``u ~ Uniform(0,1)`` (guarded off 0/1). The agent's
+        deterministic per-turn RNG is the only source, so the Gumbel search stays a
+        pure function of ``(state, seed)`` -- the C1 determinism contract.
+        """
+        u = self._search_rng.random()
+        # Guard the open interval so the double log is finite.
+        u = min(max(u, 1e-12), 1.0 - 1e-12)
+        return -math.log(-math.log(u))
+
     def _simulate(
-        self, root: Node, model: EngineTransitionModel, turn_seed: int, sim: int
+        self,
+        root: Node,
+        model: EngineTransitionModel,
+        turn_seed: int,
+        sim: int,
+        forced_root_edge: "Edge | None" = None,
     ) -> None:
         """One root-to-leaf descent + backup (a single simulation).
 
         Descends by log-PUCT at decision nodes and DPW at chance nodes, expanding
         the first unexpanded node it reaches, evaluating it once, and backing the
         value up the visited path (chance nodes average; decision nodes sum).
+
+        ``forced_root_edge`` (Sprint C4, Gumbel root selector only): if given, the
+        root's child is dictated by Sequential Halving (this exact edge) instead of
+        log-PUCT -- but ONLY at the root; every interior node still descends by the
+        unchanged log-PUCT / DPW machinery. ``None`` (the C1/C2/C3 default) leaves
+        the descent byte-for-byte identical.
         """
         path: list[tuple[Node, object]] = []  # (node, edge-or-outcome) visited
         node = root
@@ -947,7 +1220,10 @@ class MCTSAgent(BaseAgent):
                 break
 
             if node.kind == NodeKind.DECISION:
-                edge = self._select_edge(node)
+                if forced_root_edge is not None and node is root:
+                    edge = forced_root_edge
+                else:
+                    edge = self._select_edge(node)
                 path.append((node, edge))
                 if edge.child is None:
                     # Expand this edge's child by forcing its action.
@@ -1397,6 +1673,18 @@ class MCTSAgent(BaseAgent):
         pure function of ``(state, seed)``. ``temperature_moves=0`` (the C1 eval
         default) skips this entirely -- pure greedy.
         """
+        # Gumbel root selector (Sprint C4): the acted ROOT action is the
+        # Gumbel-selected argmax(g + logits + σ(Q̂)), captured by the search. Used
+        # for the self-play *trajectory* action (gen_selfplay); the agent's eval
+        # acting stays PUCT because root_selector defaults to "puct" (scope #3).
+        if (
+            at_root
+            and self.config.root_selector == "gumbel"
+            and self._gumbel_result is not None
+            and self._gumbel_result.edges is node.edges
+        ):
+            return node.edges[self._gumbel_result.acted_index]
+
         if self.config.act_on_q:
             return max(
                 node.edges,
