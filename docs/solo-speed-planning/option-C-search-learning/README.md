@@ -258,6 +258,21 @@ number.
 > failure cause); rung 4 at small scale is a *stretch*, and C4 is the **enabler**
 > whose green light precedes the deferred scale-up campaign, not the campaign itself.
 
+> **C5 update (added 2026-06-22, post-C4).** C4 *fixed* the policy-target collapse
+> (π-entropy ~0.04 → ~0.46) but the one-cycle loop still did not improve, and C4's
+> clean PUCT control isolated the now-binding constraint to the **value head**: with
+> the policy target good, the critic (predicting `−rounds_remaining`) is what's
+> broken — it regressed to ~40-round MAE because the exploratory Gumbel trajectory
+> spun most episodes to `MAX_ROUNDS`, starving the MC target and emptying the val
+> split. The reserved **A/B-V `LeafEvaluator` warm-start** (§7) was therefore
+> promoted from "not a sprint" to a real sprint, **C5**
+> (`sprint-C5-value-head-warmstart.md`), composed with a data-starvation fix and the
+> val-split/`c_v` tuning fix. C5's honest bar is a **moving loop** (value MAE that
+> stays ~4–5 rounds and does not regress, plus a generation that finally *promotes*
+> under the existing guard), NOT a one-cycle rung-4 win. The TD/bootstrap
+> `value_target` seam stays deferred (a possible **C6**), pulled forward only if
+> MC-target *variance* is shown to be the remaining limiter after C5.
+
 > **Heat-efficiency check (every rung that produces an agent):** also report heat
 > spent vs. distance and cool-downs taken (parent README "shared eval"), to confirm
 > the *budgeting* improved — the whole point of whole-track planning — and not merely
@@ -311,8 +326,13 @@ number.
   deploying.
 - **Warm-start C's value head from an Option-A/B V.** Alternate `LeafEvaluator`
   init: because C's `z` is the *same* `−rounds_remaining` quantity A/B produce, an
-  A/B V is a ready-made warm start / sanity check. Deferred so the core trains V from
-  scratch and measures C's own improvement signal cleanly.
+  A/B V is a ready-made warm start / sanity check. **Promoted to a sprint (C5) after
+  C4** confirmed the value head is the binding constraint once the policy target is
+  fixed (C4's clean control: clean critic + collapsed policy = no improvement;
+  fixed policy + broken critic = no improvement). See
+  `sprint-C5-value-head-warmstart.md` (value warm-start/anchor + the data-starvation
+  fix + the val-split/`c_v` tuning fix). (Originally deferred "so the core trains V
+  from scratch"; C4 supplied the evidence that the from-scratch critic is the limiter.)
 - **KataGo forced-playout + policy-target pruning.** A refinement of the
   `RootActionSelector` target construction that sharpens the policy target at low
   visits. Deferred; note as a seam knob.
