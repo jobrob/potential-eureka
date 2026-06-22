@@ -15,6 +15,26 @@
 > only**: interior PUCT, the chance-node DPW machinery, the frozen codec, the
 > `MCTSAgent` acting contract, and leaf evaluation are untouched.
 
+## Resolved design decisions (2026-06-22)
+
+Three implementation choices were settled before C4 starts; the implementer
+follows these, not their alternatives:
+
+1. **Gumbel constants — use the published defaults, tune later.** Start from the
+   Danihelka et al. (2022) defaults (`gumbel_m = 8`, the `σ` `c_visit`/`c_scale`
+   constants) and retune **only if** the non-collapse / one-cycle-improvement tests
+   fail. No dedicated C0-style constant-fixing pass first.
+2. **Completion value for unsearched actions — the root's own value estimate
+   (standard).** A sampled-but-unvisited / un-sampled action takes the node's own
+   normalized value `v̂` (`root.value`) as its completed-Q value — the standard
+   AlphaZero choice — **not** the interior FPU-reduced parent value. (The interior
+   PUCT FPU is unchanged; this decision is about the *target-construction* completion
+   only.)
+3. **Scope — self-play target generation only.** Gumbel is used solely to build the
+   training targets in `gen_selfplay`; the agent still **acts and is evaluated with
+   the unchanged PUCT search** (`eval_mcts` / `eval_az` need no change). Inference-time
+   Gumbel acting is explicitly deferred (a later toggle, not C4).
+
 ## Goal
 
 Replace, **at the root only and behind a config toggle**, C1/C2's
