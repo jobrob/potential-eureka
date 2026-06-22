@@ -183,10 +183,39 @@ class _SelfPlayBuffer:
 # ---------------------------------------------------------------------------
 
 
+def _greedy_acted_edge(agent: MCTSAgent, root: Node):
+    """The greediest acted edge over the SEARCHED root edges (the C5 traj knob).
+
+    The trajectory-greediness control (C5): instead of the exploratory acted move
+    (Gumbel-sampled, or temperature-sampled in the C1/PUCT window), drive the
+    *trajectory* with the lower-variance greedy move so fewer self-play episodes
+    spin out to MAX_ROUNDS and the MC value target / finished-val split survive.
+    This touches ONLY the *acted* action -- the logged completed-Q / visit-count
+    ``pi`` target is built independently and is byte-identical with this knob on or
+    off (C4's entropy win is preserved; the trajectory is decoupled from the target).
+
+    Greedy = most-visited searched edge (the AZ acting rule, stable on first-seen
+    order). Falls back to ``_best_edge`` if no edge was searched (tiny-sim budget).
+    """
+    searched = [e for e in root.edges if e.n > 0]
+    if not searched:
+        return agent._best_edge(root, at_root=True)
+    best = searched[0]
+    best_key = (-1, 0)
+    for i, e in enumerate(searched):
+        key = (e.n, -i)  # most-visited, ties broken by first-seen order
+        if key > best_key:
+            best_key = key
+            best = e
+    return best
+
+
 def _search_visit_distribution(
     agent: MCTSAgent,
     state: GameState,
     decision: Decision,
+    *,
+    traj_greedy: bool = False,
 ) -> tuple[np.ndarray, object]:
     """Run a C1 MCTS rooted at ``decision`` and return ``(pi, acted_action)``.
 
@@ -239,7 +268,7 @@ def _search_visit_distribution(
     # π = softmax(logits + σ(completedQ)) instead of the visit-count distribution.
     # Same (obs, π, mask, z) output schema; only the *policy* target changes.
     if agent.config.root_selector == "gumbel":
-        return _completed_q_distribution(agent, root, decision)
+        return _completed_q_distribution(agent, root, decision, traj_greedy=traj_greedy)
 
     # Build the visit-distribution policy target over the full flat action space.
     pi = np.zeros(ACTION_DIM, dtype=np.float64)
@@ -281,8 +310,13 @@ def _search_visit_distribution(
             pi_built = True
 
     # The acted action: reuse C1's _best_edge acting rule (temperature sampling in
-    # the window, most-visited after) so the trajectory matches the schedule.
-    acted_edge = agent._best_edge(root, at_root=True)
+    # the window, most-visited after) so the trajectory matches the schedule -- OR,
+    # with the C5 traj_greedy knob, the greedy most-visited edge (lower-variance,
+    # more finishes). The logged pi target above is unchanged either way.
+    if traj_greedy:
+        acted_edge = _greedy_acted_edge(agent, root)
+    else:
+        acted_edge = agent._best_edge(root, at_root=True)
     acted_action = acted_edge.action
 
     if not pi_built:
@@ -302,6 +336,8 @@ def _completed_q_distribution(
     agent: MCTSAgent,
     root: Node,
     decision: Decision,
+    *,
+    traj_greedy: bool = False,
 ) -> tuple[np.ndarray, object]:
     """Build the Gumbel **completed-Q** policy target (Sprint C4).
 
@@ -362,8 +398,14 @@ def _completed_q_distribution(
             pi_built = True
 
     # The acted action: the Gumbel-selected argmax(g + logits + σ(Q̂)) (via
-    # _best_edge's Gumbel-aware root branch).
-    acted_edge = agent._best_edge(root, at_root=True)
+    # _best_edge's Gumbel-aware root branch) -- OR, with the C5 traj_greedy knob,
+    # the greedy most-visited searched survivor (lower-variance, more finishes). The
+    # logged completed-Q pi target above is unchanged either way (C4's entropy win
+    # is preserved; the trajectory is decoupled from the target).
+    if traj_greedy:
+        acted_edge = _greedy_acted_edge(agent, root)
+    else:
+        acted_edge = agent._best_edge(root, at_root=True)
     acted_action = acted_edge.action
 
     if not pi_built:
@@ -418,6 +460,7 @@ def _generate_one_track(
     game_seed: int,
     agent: MCTSAgent,
     buf: _SelfPlayBuffer,
+    traj_greedy: bool = False,
 ) -> tuple[bool, int]:
     """Drive one full solo self-play episode, logging a target at each real choice.
 
@@ -482,7 +525,9 @@ def _generate_one_track(
 
         # Real choice: root a C1 search (exploration ON), log the visit target.
         obs = encode_observation(state, learner_id, decision)
-        pi, acted_action = _search_visit_distribution(agent, state, decision)
+        pi, acted_action = _search_visit_distribution(
+            agent, state, decision, traj_greedy=traj_greedy
+        )
         agent._ply += 1
 
         # Drop-and-count: if the acted action has no codec encoding, it cannot be a
@@ -572,6 +617,10 @@ def generate_dataset(args: argparse.Namespace) -> dict:
         temperature_moves=args.temperature_moves,
         root_selector=getattr(args, "root_selector", "puct"),
     )
+    # C5 trajectory-greediness knob (the data-starvation fix): drive the *acted*
+    # trajectory greedily so fewer races spin to MAX_ROUNDS, while the logged pi
+    # target is unchanged. Default OFF = the C4 exploratory trajectory.
+    traj_greedy = bool(getattr(args, "traj_greedy", False))
 
     bands = [
         ("train", _SELFPLAY_SEED_BASE, args.tracks),
@@ -585,6 +634,11 @@ def generate_dataset(args: argparse.Namespace) -> dict:
     total_clones = 0
     total_moves = 0
     total_search_s = 0.0
+    # Per-split finished-race counts (the C5 val-starvation precondition: the loop
+    # hard-raises when the finished-only val split is empty, never silently trains
+    # an uncontrolled critic -- the exact C4 mechanical bug).
+    races_finished_by_split = {"train": 0, "val": 0}
+    races_total_by_split = {"train": 0, "val": 0}
 
     for split, base, n_tracks in bands:
         for i in range(n_tracks):
@@ -600,11 +654,15 @@ def generate_dataset(args: argparse.Namespace) -> dict:
                 game_seed=args.game_seed + i,
                 agent=agent,
                 buf=buf,
+                traj_greedy=traj_greedy,
             )
             races_total += 1
+            races_total_by_split[split] += 1
             total_unencodable += n_unenc
             if not finished:
                 races_dropped += 1
+            else:
+                races_finished_by_split[split] += 1
             total_clones += agent.profile.clones
             total_moves += agent.profile.moves
             total_search_s += agent.profile.seconds
@@ -681,6 +739,7 @@ def generate_dataset(args: argparse.Namespace) -> dict:
             "gumbel_m": cfg.gumbel_m,
             "gumbel_c_visit": cfg.gumbel_c_visit,
             "gumbel_c_scale": cfg.gumbel_c_scale,
+            "traj_greedy": traj_greedy,
         },
         "selfplay_seed_base": _SELFPLAY_SEED_BASE,
         "train_tracks": args.tracks,
@@ -718,6 +777,12 @@ def generate_dataset(args: argparse.Namespace) -> dict:
         "races_dropped_max_rounds": races_dropped,
         "rows_dropped_max_rounds": n_dropped_rows,
         "unencodable_dropped": total_unencodable,
+        # Per-split finished counts (the C5 val-starvation precondition signal).
+        "races_finished_train": races_finished_by_split["train"],
+        "races_finished_val": races_finished_by_split["val"],
+        "races_total_train": races_total_by_split["train"],
+        "races_total_val": races_total_by_split["val"],
+        "traj_greedy": traj_greedy,
         "z_mean": float(z.mean()),
         "z_min": float(z.min()),
         "pi_entropy_mean": float(ent.mean()),
@@ -745,6 +810,11 @@ def _print_summary(s: dict) -> None:
         f"  races: {s['races_total']} total, {s['races_dropped_max_rounds']} dropped "
         f"(MAX_ROUNDS) -> {s['rows_dropped_max_rounds']} rows dropped; "
         f"{s['unencodable_dropped']} off-table acted moves dropped"
+    )
+    print(
+        f"  finished by split: train {s.get('races_finished_train', '?')}/"
+        f"{s.get('races_total_train', '?')}  val {s.get('races_finished_val', '?')}/"
+        f"{s.get('races_total_val', '?')}  (traj_greedy={s.get('traj_greedy')})"
     )
     print(f"  z (-rounds_remaining, floored): mean={s['z_mean']:.2f} min={s['z_min']:.0f}")
     print(
@@ -785,6 +855,11 @@ def main() -> None:
                         help="root action selector + policy target (C4): 'puct' "
                              "(default, visit-count target) or 'gumbel' "
                              "(Gumbel top-m + Sequential Halving, completed-Q target)")
+    parser.add_argument("--traj-greedy", action="store_true",
+                        help="C5 data-starvation fix: drive the *acted* trajectory "
+                             "greedily (most-visited searched edge) so fewer races "
+                             "spin out; the logged pi target is unchanged (default "
+                             "OFF = the C4 exploratory trajectory)")
     parser.add_argument("--seed", type=int, default=0,
                         help="base agent search seed (mixed per track)")
     parser.add_argument("--game-seed", type=int, default=8000,

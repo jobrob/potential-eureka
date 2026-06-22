@@ -72,6 +72,121 @@ from heat.ml.training import save_checkpoint
 _KIND_NAMES = {0: "GEAR", 1: "CARDS", 2: "REACT", 3: "SLIPSTREAM", 4: "DISCARD"}
 _CARDS_KIND = 1
 
+#: The critic-side module prefixes (share_features_extractor=False makes these
+#: byte-disjoint from the actor's). Identical to mint_warm_prior._CRITIC_PREFIXES
+#: and train_value._critic_parameters -- the one warm-start machinery C5 lifts and
+#: reuses per generation.
+_CRITIC_PREFIXES = (
+    "vf_features_extractor.",
+    "mlp_extractor.value_net.",
+    "value_net.",
+)
+
+
+def _critic_parameters(policy) -> list:
+    """ONLY the critic-side trainable parameters (the actor stays free).
+
+    Identical to ``train_value._critic_parameters``: with
+    ``share_features_extractor=False`` the critic owns the byte-disjoint
+    ``vf_features_extractor`` / ``mlp_extractor.value_net`` / ``value_net`` modules.
+    Used to build the low_lr / freeze_thaw critic param-group.
+    """
+    modules = [
+        policy.vf_features_extractor,
+        policy.mlp_extractor.value_net,
+        policy.value_net,
+    ]
+    params: list = []
+    for m in modules:
+        params += list(m.parameters())
+    return params
+
+
+def _critic_state_dict(policy) -> dict:
+    """Return ONLY the critic-prefixed entries of ``policy.state_dict()`` (clones).
+
+    The byte-disjoint critic set (``vf_features_extractor`` /
+    ``mlp_extractor.value_net`` / ``value_net``) that ``train_value._critic_parameters``
+    optimizes and ``mint_warm_prior._graft_critic`` grafts. Detached CPU clones so
+    the returned dict is a stable snapshot (used as the L2-anchor reference).
+    """
+    return {
+        k: v.detach().cpu().clone()
+        for k, v in policy.state_dict().items()
+        if any(k.startswith(p) for p in _CRITIC_PREFIXES)
+    }
+
+
+def graft_warm_critic(policy, warm_value_path: str, *, device: str = "cpu") -> dict:
+    """Copy the calibrated Option-A critic from ``warm_value_path`` into ``policy``.
+
+    The shared graft (lifted out of ``mint_warm_prior._graft_critic`` so both call
+    sites use one implementation): loads the warm value net, copies every
+    critic-prefixed parameter+buffer into ``policy``'s state dict, and reloads it.
+    The critic prefixes are byte-disjoint from the actor's
+    (``share_features_extractor=False``), so the actor is preserved exactly and only
+    the (random-init) critic is replaced by the trained one. Returns the grafted
+    critic state dict (CPU clones) so the caller can use it as the L2-anchor target
+    ``theta_critic^warm`` without re-reading the file.
+
+    Raises if the warm net lacks a critic key or its shapes disagree (an
+    architecture mismatch between the warm V and the AZ net) -- the same fail-fast
+    ``mint_warm_prior._graft_critic`` performed.
+    """
+    from sb3_contrib import MaskablePPO
+
+    warm = MaskablePPO.load(warm_value_path, device=device)
+    warm_sd = warm.policy.state_dict()
+    tgt_sd = policy.state_dict()
+
+    grafted: dict = {}
+    n = 0
+    for k in tgt_sd:
+        if any(k.startswith(p) for p in _CRITIC_PREFIXES):
+            if k not in warm_sd:
+                raise KeyError(
+                    f"critic key {k!r} missing from the warm value net "
+                    f"{warm_value_path!r} (architecture mismatch)"
+                )
+            if tgt_sd[k].shape != warm_sd[k].shape:
+                raise ValueError(
+                    f"shape mismatch on critic key {k!r}: AZ net "
+                    f"{tuple(tgt_sd[k].shape)} vs warm value "
+                    f"{tuple(warm_sd[k].shape)}"
+                )
+            tgt_sd[k] = warm_sd[k].clone()
+            grafted[k] = warm_sd[k].detach().cpu().clone()
+            n += 1
+    if n == 0:
+        raise RuntimeError(
+            "no critic parameters grafted -- the critic prefixes did not match any "
+            "state-dict key (model architecture changed?)"
+        )
+    policy.load_state_dict(tgt_sd)
+    return grafted
+
+
+def _anchor_loss(policy, warm_critic_sd: dict, device: str) -> torch.Tensor:
+    """L2 anchor ``Sum ||theta_critic - theta_critic^warm||^2`` over the critic set.
+
+    Only the trainable critic *parameters* (not buffers) contribute a gradient; the
+    anchor reference is the warm critic snapshot from :func:`graft_warm_critic`.
+    Pulls the critic toward the calibrated warm V while the MC targets still refine
+    it (the C5 "don't wreck it" lever).
+    """
+    named = dict(policy.named_parameters())
+    terms = []
+    for k, ref in warm_critic_sd.items():
+        if not any(k.startswith(p) for p in _CRITIC_PREFIXES):
+            continue
+        param = named.get(k)
+        if param is None or not param.requires_grad:
+            continue  # buffers / frozen params do not contribute a gradient term
+        terms.append(((param - ref.to(device)) ** 2).sum())
+    if not terms:
+        return torch.zeros((), device=device)
+    return torch.stack(terms).sum()
+
 
 def _load_dataset(path: str) -> dict:
     """Load the self-play ``.npz`` and validate it against the live codec.
@@ -239,6 +354,26 @@ def train_az(args: argparse.Namespace) -> dict:
     policy = model.policy
     policy.to(device)
 
+    # --- C5: warm-start + anchor the critic from the Option-A value net --------
+    # When --warm-value is set, graft the calibrated warm critic into the fresh
+    # policy BEFORE the optimizer is built (so the critic starts from a known-good
+    # ~4.5-round-MAE init, not from scratch / not from the previous collapsed
+    # generation), and record theta_critic^warm for the L2 anchor. With it unset
+    # and --critic-anchor none the trainer is the C4 path byte-for-byte.
+    warm_value = getattr(args, "warm_value", None)
+    critic_anchor = getattr(args, "critic_anchor", "none")
+    warm_critic_sd: dict = {}
+    if warm_value:
+        warm_critic_sd = graft_warm_critic(policy, warm_value, device=device)
+        print(f"warm-start: grafted {len(warm_critic_sd)} critic tensors from "
+              f"{warm_value} (critic-anchor={critic_anchor})")
+    elif critic_anchor != "none":
+        raise ValueError(
+            f"--critic-anchor {critic_anchor} requires --warm-value (the anchor "
+            "needs a warm critic to pull toward); pass --warm-value or use "
+            "--critic-anchor none"
+        )
+
     obs = torch.as_tensor(ds["obs"])
     pi = torch.as_tensor(ds["pi"])
     mask = torch.as_tensor(ds["mask"])
@@ -251,9 +386,45 @@ def train_az(args: argparse.Namespace) -> dict:
     va_obs, va_pi, va_mask, va_z, va_kind = obs[va], pi[va], mask[va], z[va], kind[va]
 
     # weight decay (the wd·‖θ‖² term) folded into Adam.
-    optimizer = torch.optim.Adam(
-        policy.parameters(), lr=args.lr, weight_decay=args.weight_decay
-    )
+    #
+    # C5 critic-protection mechanism (--critic-anchor):
+    #   * "none"        -- one Adam over all params at lr (the C4 path, byte-for-byte);
+    #   * "l2"          -- DEFAULT: same single optimizer, but the joint loss carries
+    #                      an extra c_anchor*||theta_critic - theta_critic^warm||^2 term;
+    #   * "low_lr"      -- two param-groups: actor at lr, critic at lr_critic (< lr);
+    #   * "freeze_thaw" -- critic frozen (requires_grad=False) for freeze_critic_epochs,
+    #                      then thawed at lr_critic.
+    # The actor/critic parameter sets are byte-disjoint (share_features_extractor=False).
+    c_anchor = float(getattr(args, "c_anchor", 0.0))
+    lr_critic = float(getattr(args, "lr_critic", args.lr))
+    freeze_critic_epochs = int(getattr(args, "freeze_critic_epochs", 0))
+
+    critic_params = _critic_parameters(policy)
+    critic_param_ids = {id(p) for p in critic_params}
+    actor_params = [p for p in policy.parameters() if id(p) not in critic_param_ids]
+
+    if critic_anchor in ("low_lr", "freeze_thaw"):
+        optimizer = torch.optim.Adam(
+            [
+                {"params": actor_params, "lr": args.lr},
+                {"params": critic_params, "lr": lr_critic},
+            ],
+            weight_decay=args.weight_decay,
+        )
+        if critic_anchor == "freeze_thaw" and freeze_critic_epochs > 0:
+            for p in critic_params:
+                p.requires_grad_(False)
+            print(f"freeze_thaw: critic frozen for the first {freeze_critic_epochs} "
+                  f"epochs, then thawed at lr_critic={lr_critic}")
+    else:
+        optimizer = torch.optim.Adam(
+            policy.parameters(), lr=args.lr, weight_decay=args.weight_decay
+        )
+        if critic_anchor == "l2":
+            print(f"l2 anchor: c_anchor={c_anchor} pulling the critic toward the "
+                  f"warm V over {len(warm_critic_sd)} tensors")
+    use_l2_anchor = critic_anchor == "l2" and c_anchor > 0.0 and bool(warm_critic_sd)
+
     rng = np.random.default_rng(args.seed)
     n_train = len(tr)
     have_val = len(va) > 0
@@ -273,6 +444,13 @@ def train_az(args: argparse.Namespace) -> dict:
     t0 = time.perf_counter()
     for epoch in range(args.epochs):
         policy.set_training_mode(True)
+        # freeze_thaw: thaw the critic at the configured epoch (C5 schedule).
+        if (critic_anchor == "freeze_thaw" and freeze_critic_epochs > 0
+                and epoch == freeze_critic_epochs):
+            for p in critic_params:
+                p.requires_grad_(True)
+            print(f"freeze_thaw: thawed the critic at epoch {epoch + 1} "
+                  f"(lr_critic={lr_critic})")
         order = rng.permutation(n_train)
         epoch_loss = 0.0
         seen = 0
@@ -288,6 +466,8 @@ def train_az(args: argparse.Namespace) -> dict:
             v = policy.predict_values(ob).reshape(-1)
             mse = ((v - zt) ** 2).mean()
             loss = ce + args.c_v * mse
+            if use_l2_anchor:
+                loss = loss + c_anchor * _anchor_loss(policy, warm_critic_sd, device)
 
             optimizer.zero_grad()
             loss.backward()
@@ -373,6 +553,14 @@ def train_az(args: argparse.Namespace) -> dict:
         "best_metric": best_metric if best_metric != float("inf") else float("nan"),
         "best_val": best_val,
         "stopped_early": stopped_early,
+        # C5 provenance + the first-class value-head gate signal. v_mae_rounds is
+        # the single number az_loop watches to catch a critic regression the
+        # generation it happens (the C4 4.8 -> 6.5 -> 40 collapse, surfaced).
+        "warm_value": warm_value,
+        "critic_anchor": critic_anchor,
+        "c_anchor": c_anchor,
+        "v_mae_rounds": (best_val.get("v_mae_rounds", float("nan"))
+                         if best_val else float("nan")),
     }
     return summary
 
@@ -399,11 +587,31 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto",
                         help="auto|cuda|cpu (resolve_device handles fallback)")
     parser.add_argument("--seed", type=int, default=0)
+    # --- C5: critic warm-start + anchor (default OFF == the C4 path) -----------
+    parser.add_argument("--warm-value", type=str, default=None,
+                        help="path to the calibrated Option-A value net; its critic "
+                             "is grafted into the fresh policy as the warm-start "
+                             "(None = C4 behaviour, random-init critic)")
+    parser.add_argument("--critic-anchor", type=str, default="none",
+                        choices=["none", "l2", "low_lr", "freeze_thaw"],
+                        help="critic-protection mechanism (requires --warm-value): "
+                             "'l2' (default lever) adds c_anchor*||theta_critic - "
+                             "warm||^2; 'low_lr' trains the critic at lr_critic; "
+                             "'freeze_thaw' freezes it then thaws at lr_critic; "
+                             "'none' = the C4 trainer byte-for-byte")
+    parser.add_argument("--c-anchor", type=float, default=1.0,
+                        help="L2-anchor weight (used by --critic-anchor l2)")
+    parser.add_argument("--lr-critic", type=float, default=3e-5,
+                        help="critic learning rate (used by low_lr / freeze_thaw)")
+    parser.add_argument("--freeze-critic-epochs", type=int, default=0,
+                        help="epochs to freeze the critic before thawing "
+                             "(used by --critic-anchor freeze_thaw)")
     args = parser.parse_args()
 
     print(
         f"train_az: data={args.data} epochs={args.epochs} batch={args.batch} "
         f"lr={args.lr} c_v={args.c_v} wd={args.weight_decay} net={args.net} "
+        f"warm_value={args.warm_value} critic_anchor={args.critic_anchor} "
         f"(codec v{CODEC_VERSION})"
     )
     summary = train_az(args)

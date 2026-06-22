@@ -198,6 +198,7 @@ def _generate(
     seed: int,
     game_seed: int,
     root_selector: str = "puct",
+    traj_greedy: bool = False,
 ) -> dict:
     """Generate one generation of self-play targets with the current-best net.
 
@@ -206,6 +207,9 @@ def _generate(
     ``gen_selfplay._SELFPLAY_SEED_BASE`` (the module reads it at call time) AFTER
     asserting the slice is disjoint from every other band. Restores the C2 default
     afterward so the module is left untouched for other callers.
+
+    ``traj_greedy`` (C5) drives the *acted* trajectory greedily so fewer races spin
+    to MAX_ROUNDS (the val-starvation fix); the logged pi target is unchanged.
     """
     _assert_c3_band_disjoint(generation, tracks + val_tracks)
     base = _gen_selfplay_base(generation)
@@ -216,7 +220,7 @@ def _generate(
             out=out, model=model_path, tracks=tracks, val_tracks=val_tracks,
             sims=sims, dirichlet_eps=0.25, dirichlet_alpha=0.5,
             temperature_moves=10, seed=seed + generation, game_seed=game_seed + generation,
-            root_selector=root_selector,
+            root_selector=root_selector, traj_greedy=traj_greedy,
         ))
     finally:
         gen_selfplay._SELFPLAY_SEED_BASE = saved
@@ -266,12 +270,21 @@ def _aggregate(npz_paths: list[str], out: str) -> dict:
 
 
 def _train(*, data: str, out: str, epochs: int, c_v: float, device: str,
-           net: str, seed: int) -> dict:
-    """Train a new AZ net on the aggregated buffer via C2's ``train_az``."""
+           net: str, seed: int, warm_value: str | None = None,
+           critic_anchor: str = "none", c_anchor: float = 1.0,
+           lr_critic: float = 3e-5, freeze_critic_epochs: int = 0) -> dict:
+    """Train a new AZ net on the aggregated buffer via C2's ``train_az``.
+
+    C5 passes the critic warm-start (``warm_value``) + protection mechanism
+    (``critic_anchor`` and its knobs) through to ``train_az``; with ``warm_value``
+    unset and ``critic_anchor="none"`` this is the C4 trainer byte-for-byte.
+    """
     return train_az.train_az(argparse.Namespace(
         data=data, out=out, epochs=epochs, batch=256, lr=3e-4, c_v=c_v,
         weight_decay=1e-4, eval_every=max(1, epochs // 2), patience=8,
         net=net, device=device, seed=seed,
+        warm_value=warm_value, critic_anchor=critic_anchor, c_anchor=c_anchor,
+        lr_critic=lr_critic, freeze_critic_epochs=freeze_critic_epochs,
     ))
 
 
@@ -319,6 +332,9 @@ class GenRecord:
     net_only: LoopGate
     promoted: bool
     reason: str
+    value_mae_rounds: float = float("nan")
+    val_finished: int = 0
+    val_total: int = 0
 
 
 def run_loop(args: argparse.Namespace) -> dict:
@@ -362,10 +378,32 @@ def run_loop(args: argparse.Namespace) -> dict:
             tracks=args.tracks, val_tracks=args.val_tracks, sims=args.sims,
             seed=args.seed, game_seed=args.game_seed,
             root_selector=getattr(args, "root_selector", "puct"),
+            traj_greedy=getattr(args, "traj_greedy", False),
         )
+        # C5 val-starvation signals (a real gen_selfplay reports both; a legacy /
+        # mocked generator may omit them -- then the precondition is inert).
+        val_finished = gen_summary.get("races_finished_val")
+        val_rows = gen_summary.get("n_val")
+        val_total = gen_summary.get("races_total_val", args.val_tracks)
         print(f"        logged {gen_summary['n_rows']} targets "
               f"(pi_entropy={gen_summary['pi_entropy_mean']:.3f}, "
-              f"{gen_summary['races_dropped_max_rounds']} races dropped)")
+              f"{gen_summary['races_dropped_max_rounds']} races dropped; "
+              f"val finished {val_finished}/{val_total})")
+
+        # C5 HARD precondition: a non-empty finished-only val split. When every val
+        # episode drops to MAX_ROUNDS the critic would train uncontrolled with
+        # early-stopping silently disabled -- the exact C4 mechanical bug. We
+        # raise loudly rather than ship an uncontrolled critic. Only fires when the
+        # generator actually reported an empty finished-val split.
+        if val_finished == 0 or val_rows == 0:
+            raise RuntimeError(
+                f"generation {gen}: the finished-only VAL split is EMPTY "
+                f"({val_finished} val races finished, {val_rows} val rows). "
+                "Training the critic without a val split silently disables "
+                "early-stopping and lets it collapse uncontrolled (the C4 bug). "
+                "Raise --val-tracks and/or enable --traj-greedy so val episodes "
+                "finish, then re-run."
+            )
 
         # (2) train on the recency-windowed aggregate (DAgger-style).
         buffer_paths.append(data_path)
@@ -376,7 +414,15 @@ def run_loop(args: argparse.Namespace) -> dict:
         train_summary = _train(
             data=agg_path, out=model_path, epochs=args.epochs, c_v=args.c_v,
             device=args.device, net=args.net, seed=args.seed,
+            warm_value=getattr(args, "warm_value", None),
+            critic_anchor=getattr(args, "critic_anchor", "none"),
+            c_anchor=getattr(args, "c_anchor", 1.0),
+            lr_critic=getattr(args, "lr_critic", 3e-5),
+            freeze_critic_epochs=getattr(args, "freeze_critic_epochs", 0),
         )
+        v_mae = train_summary.get("v_mae_rounds", float("nan"))
+        print(f"        value-head MAE (the first-class gate signal): "
+              f"{v_mae:.2f} rounds")
 
         # (3) gate in-search + net-only, apply the CI promotion rule.
         print("  [3/3] gating new net on the held-out solo band (in-search + net-only)")
@@ -409,6 +455,9 @@ def run_loop(args: argparse.Namespace) -> dict:
             generation=gen, data_path=data_path, model_path=model_path,
             train_summary=train_summary, in_search=in_search, net_only=net_only,
             promoted=promoted, reason=reason,
+            value_mae_rounds=v_mae,
+            val_finished=val_finished if val_finished is not None else -1,
+            val_total=val_total,
         ))
 
         if non_improving >= args.stop_patience:
@@ -447,6 +496,10 @@ def run_loop(args: argparse.Namespace) -> dict:
                 "model_path": r.model_path,
                 "val_loss_best": r.train_summary.get("best_metric"),
                 "val": r.train_summary.get("best_val", {}),
+                # C5: the first-class value-head gate signal + the finished-val count.
+                "value_mae_rounds": r.value_mae_rounds,
+                "val_finished": r.val_finished,
+                "val_total": r.val_total,
             }
             for r in records
         ],
@@ -466,9 +519,18 @@ def _print_report(report: dict) -> None:
     for g in report["generations"]:
         tag = "PROMOTED" if g["promoted"] else "kept incumbent"
         isg = g["in_search"]
+        vmae = g.get("value_mae_rounds", float("nan"))
         print(f"    gen {g['generation']}: in-search spins="
               f"{isg['spins']['point']:.3f} rounds={isg['rounds']['point']:.3f} "
-              f"finish={isg['finish_rate'] * 100:.0f}%  [{tag}]")
+              f"finish={isg['finish_rate'] * 100:.0f}%  "
+              f"v_mae={vmae:.2f}r val_fin={g.get('val_finished', '?')}/"
+              f"{g.get('val_total', '?')}  [{tag}]")
+    # The single number to watch (the C4 4.8 -> 6.5 -> 40 collapse): does the
+    # value-head MAE stay low and NOT regress generation-over-generation?
+    mae_curve = [g.get("value_mae_rounds", float("nan"))
+                 for g in report["generations"]]
+    print(f"  value-head MAE curve (rounds, the C5 binding-constraint signal): "
+          f"{[round(m, 2) for m in mae_curve]}")
     src = "WARM gen-0 (no generation improved)" if report["best_is_warm"] \
         else report["best_model_source"]
     print(f"  best-gating net: {src}")
@@ -520,6 +582,28 @@ def main() -> None:
                         help="self-play root action selector + policy target (C4): "
                              "'puct' (default, visit-count target) or 'gumbel' "
                              "(Gumbel top-m + Sequential Halving, completed-Q target)")
+    # --- C5: value-head warm-start + anchor + the trajectory data fix ----------
+    parser.add_argument("--warm-value", type=str, default=None,
+                        help="C5: path to the calibrated Option-A value net; its "
+                             "critic is grafted into EACH generation's fresh policy "
+                             "(per-generation warm-start, not from the previous "
+                             "collapsed critic). None = the C4 loop unchanged")
+    parser.add_argument("--critic-anchor", type=str, default="none",
+                        choices=["none", "l2", "low_lr", "freeze_thaw"],
+                        help="C5 critic-protection mechanism (requires --warm-value): "
+                             "'l2' is the default lever; 'low_lr'/'freeze_thaw' are "
+                             "the wired alternates; 'none' = no protection")
+    parser.add_argument("--c-anchor", type=float, default=1.0,
+                        help="C5 L2-anchor weight (used by --critic-anchor l2)")
+    parser.add_argument("--lr-critic", type=float, default=3e-5,
+                        help="C5 critic lr (used by low_lr / freeze_thaw)")
+    parser.add_argument("--freeze-critic-epochs", type=int, default=0,
+                        help="C5: epochs to freeze the critic before thawing "
+                             "(freeze_thaw)")
+    parser.add_argument("--traj-greedy", action="store_true",
+                        help="C5 data-starvation fix: drive the self-play *acted* "
+                             "trajectory greedily so fewer races spin to MAX_ROUNDS "
+                             "(the logged pi target is unchanged). Default OFF")
     parser.add_argument("--net", type=str, default="default",
                         choices=["default", "small", "large"])
     parser.add_argument("--device", type=str, default="auto",
@@ -547,6 +631,8 @@ def main() -> None:
         f"az_loop: warm={args.warm} generations={args.generations} "
         f"tracks={args.tracks} val={args.val_tracks} sims={args.sims} "
         f"window={args.buffer_window} gate_games={args.gate_games} "
+        f"root_selector={args.root_selector} warm_value={args.warm_value} "
+        f"critic_anchor={args.critic_anchor} traj_greedy={args.traj_greedy} "
         f"(codec v{CODEC_VERSION}, OBS_DIM={OBS_DIM}, ACTION_DIM={ACTION_DIM})"
     )
     report = run_loop(args)

@@ -108,34 +108,13 @@ def _graft_critic(bc_path: str, value_path: str, out: str, *, seed: int) -> str:
     from sb3_contrib import MaskablePPO
     from heat.ml.model import PPOConfig
     from heat.ml.training import save_checkpoint
+    from train_az import graft_warm_critic
 
     bc = MaskablePPO.load(bc_path, device="cpu")
-    value = MaskablePPO.load(value_path, device="cpu")
-
-    bc_sd = bc.policy.state_dict()
-    val_sd = value.policy.state_dict()
-
-    grafted = 0
-    for k in bc_sd:
-        if any(k.startswith(p) for p in _CRITIC_PREFIXES):
-            if k not in val_sd:
-                raise KeyError(
-                    f"critic key {k!r} missing from the value net state dict "
-                    "(architecture mismatch between BC and value checkpoints)"
-                )
-            if bc_sd[k].shape != val_sd[k].shape:
-                raise ValueError(
-                    f"shape mismatch on critic key {k!r}: BC {tuple(bc_sd[k].shape)} "
-                    f"vs value {tuple(val_sd[k].shape)}"
-                )
-            bc_sd[k] = val_sd[k].clone()
-            grafted += 1
-    if grafted == 0:
-        raise RuntimeError(
-            "no critic parameters grafted -- the critic prefixes did not match any "
-            "state-dict key (model architecture changed?)"
-        )
-    bc.policy.load_state_dict(bc_sd)
+    # Graft the value net's calibrated critic into the BC net's policy (the
+    # shared, byte-disjoint critic copy lifted into train_az.graft_warm_critic; the
+    # BC actor is preserved exactly and only the init critic is replaced).
+    graft_warm_critic(bc.policy, value_path, device="cpu")
 
     # Re-save through the standard contract-sidecar path so MLAgent / NetAdapter
     # load it unchanged. The combined net IS the warm gen-0 prior.
