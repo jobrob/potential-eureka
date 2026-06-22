@@ -16,8 +16,11 @@ We are expanding the three highest-value options into full plans:
   drive it cheaply" approach; exploits the known track.
 - **[Option C — Search + learning (solo AlphaZero/MuZero)](option-C-search-learning/README.md)**
   — search and a policy+value net co-improve. The only option that can *surpass*
-  today's search. Planned **foundations-first**: a minimal, correct core we can
-  extend, not a sprawling one-shot.
+  today's search. Planned **complete-core, foundations-first**: the full AlphaZero
+  algorithm (in-tree stochastic chance nodes, the exploration machinery, MC value
+  targets) built correctly and gated hard, with the genuine forks (MuZero,
+  opponents, Gumbel) deferred *behind explicit seams* — not a sprawling one-shot,
+  but not a half measure either.
 
 D / E / F are kept as brief stubs at the bottom for later expansion.
 
