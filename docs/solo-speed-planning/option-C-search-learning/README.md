@@ -273,6 +273,25 @@ number.
 > `value_target` seam stays deferred (a possible **C6**), pulled forward only if
 > MC-target *variance* is shown to be the remaining limiter after C5.
 
+> **C6 update (added 2026-06-22, post-C5 — the pivot).** C5 eliminated the
+> value-head *plumbing* collapse (init / anchor / starvation / val-split) and the
+> **solo** loop is *still flat* — so the gap to rung 1 is **structural**, not a
+> fixable bottleneck in the solo pipeline (C5-findings: the four differences vs
+> Go/chess — no adversary, thin search-over-net gap, low already-reached ceiling,
+> noisy/unbounded/missing value). Rather than a third value lever (the
+> originally-reserved "C6" TD/bootstrap target, which C5's diagnostics down-ranked
+> because the limiter is *distribution shift*, not MC-target variance), **C6 is
+> re-scoped to the pivot the §7 "re-introduce opponents" paragraph and the `Node`
+> seam were built for**: a **perfect-information 1v1, win/loss-valued** AlphaZero on
+> the C-machinery (`sprint-C6-perfect-info-1v1-winloss.md`). It tests whether an
+> **adversary** (restoring the self-play curriculum) + a **clean ±1 win/loss value**
+> (always defined at game end) produce a *moving* loop where solo could not — the
+> cheap go/no-go that gates the project's hardest deferred bet (hidden information),
+> which stays out of scope here (`_determinize_opponents` ready for a C7 follow-on
+> only if C6 validates). C6's honest bar is a **moving loop** (seat-neutral,
+> CI-gated win-rate climbing gen-over-gen + a calibrating value head), with a
+> compute-tiered plan (Tier 0 go/no-go → Tier 1 larger run on a stated trigger).
+
 > **Heat-efficiency check (every rung that produces an agent):** also report heat
 > spent vs. distance and cool-downs taken (parent README "shared eval"), to confirm
 > the *budgeting* improved — the whole point of whole-track planning — and not merely
@@ -307,7 +326,14 @@ number.
   determinization belief composes cleanly (`_determinize_opponents`: pool
   `hand+draw_pile`, keep discard fixed, multiset-preserving), so the spine is built
   for this — but solo isolates the driving skill and removes the hardest piece, so
-  opponents stay out of the core.
+  opponents stay out of the core. **Promoted to a sprint (C6) after C5** confirmed
+  the *solo* loop is structurally flat (no adversary, missing value): C6 activates
+  the **opponent decision node + zero-sum minimax backup** in the **perfect-info**
+  setting with a **win/loss value**, deliberately *without* determinization, to
+  isolate whether the adversary alone moves the loop. See
+  `sprint-C6-perfect-info-1v1-winloss.md`. The **hidden-info determinization**
+  half of this seam stays deferred (a C7 follow-on, `_determinize_opponents`
+  ready), pulled forward only if C6's perfect-info loop validates.
 - **Gumbel-AlphaZero / sampled-MCTS.** Alternate `RootActionSelector`: Gumbel top-k
   action sampling + completed-Q policy target gives a low-visit-count guarantee of
   improvement and would cut the per-move budget on the wide CARDS branch. **Promoted
