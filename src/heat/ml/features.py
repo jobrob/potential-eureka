@@ -229,11 +229,35 @@ def _opponent_slots(state: GameState, player: PlayerState, track) -> list[float]
     return slots
 
 
+#: Soft cap for normalizing ``round_num`` into [0, 1] (index 9 of the phase
+#: block). Module-level so the always-encode path in :func:`encode_observation`
+#: and any future reader share the one constant.
+_ROUND_CAP: float = 50.0
+
+#: Index of the ``round_num`` feature within the phase-context block. It is the
+#: ONLY non-decision-context field in that block, so it is written by
+#: :func:`encode_observation` (always), not by :func:`_phase_context` (which is
+#: gated on a real ``decision``). Indices 0..8 are the genuine decision context.
+_PHASE_ROUND_NUM_INDEX: int = 9
+
+
 def _phase_context(state: GameState, decision: "Decision | None") -> list[float]:
-    """BLOCK_PHASE_CONTEXT floats: one-hot decision kind (5), react-context bits
-    (can_boost, has_adrenaline, max_cooldown/3), slipstream-available flag,
-    round_num/cap, then explicit zero-padding to fill the block. ``decision is
-    None`` (reset) yields an all-zero block."""
+    """BLOCK_PHASE_CONTEXT floats of *decision-specific* context only: one-hot
+    decision kind (indices 0..4), react-context bits (5..7: can_boost,
+    has_adrenaline, max_cooldown/3), the slipstream-available flag (8), then
+    explicit zero-padding to fill the block. ``decision is None`` (reset / the
+    value-path) yields an all-zero block.
+
+    NOTE (obs purity, code-review 2026-06-22 #1): ``round_num`` is pure game
+    state, NOT decision context, so it is deliberately NOT written here -- it is
+    written unconditionally by :func:`encode_observation` (at
+    ``_PHASE_ROUND_NUM_INDEX``) so the encoding is identical whether ``decision``
+    is a real decision or ``None``. Were it set here, the value path
+    (``decision=None``) and the policy/prior path would encode the SAME state
+    differently, breaking the "observation is a pure function of game state"
+    contract that Option C's value head depends on. Indices 0..8 remain the only
+    decision-gated fields.
+    """
     block = [0.0] * spaces.BLOCK_PHASE_CONTEXT
     if decision is None:
         return block
@@ -261,10 +285,7 @@ def _phase_context(state: GameState, decision: "Decision | None") -> list[float]
     if decision.kind == DecisionKind.SLIPSTREAM:
         block[8] = 1.0
 
-    # round_num / cap (index 9). Use a soft cap; clipped to [0, 1].
-    round_cap = 50.0
-    block[9] = _clip01(state.round_num / round_cap)
-
+    # index 9 (round_num) is set by encode_observation, NOT here (see docstring).
     # indices 10..end remain explicit zero-padding.
     return block
 
@@ -291,7 +312,27 @@ def encode_observation(
     values += _track_block(player, track)          # BLOCK_TRACK (36)
     values += _adrenaline_context(state, player)   # 2
     values += _opponent_slots(state, player, track)  # 25
-    values += _phase_context(state, decision)      # BLOCK_PHASE_CONTEXT
+    phase_block_start = len(values)
+    phase = _phase_context(state, decision)        # BLOCK_PHASE_CONTEXT
+    # round_num is PURE GAME STATE, not decision context, so it is written here
+    # (unconditionally) rather than inside the decision-gated _phase_context.
+    # This guarantees the observation is a pure function of game state: encoding
+    # the same `state` with decision=None (Option C's value path) and with a real
+    # decision (the policy/prior path) is identical on every index EXCEPT the
+    # genuine decision-context bits 0..8 (code-review 2026-06-22 #1). Soft-capped
+    # and clipped to [0, 1].
+    #
+    # Leak tradeoff (considered, accepted): because the value target is
+    # `-rounds_remaining`, exposing the round counter lets the value net partly
+    # memorize the counter instead of learning a genuine cost-to-go. We keep
+    # round_num IN the observation -- removing it is a separate decision -- but
+    # make it state-pure here so train-time and search-time encodings match.
+    phase[_PHASE_ROUND_NUM_INDEX] = _clip01(state.round_num / _ROUND_CAP)
+    values += phase
+    assert phase_block_start + spaces.BLOCK_PHASE_CONTEXT == OBS_DIM, (
+        "phase block must be the final block for the round_num index to be "
+        "absolute-stable"
+    )
 
     vec = np.asarray(values, dtype=np.float32)
     assert vec.shape == (OBS_DIM,), (

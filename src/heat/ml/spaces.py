@@ -35,7 +35,13 @@ from heat.models.game_state import GameState
 #: v2 (Sprint B): replaced the 4-dim next-corner lookahead with an all-corners
 #: ego-centric track block (Option A whole-track obs). OBS_DIM 72 -> 104. v1
 #: checkpoints are intentionally rejected by the MLAgent version tripwire.
-CODEC_VERSION: int = 2
+#: v3 (Option C prep, code-review 2026-06-22 #1): made the observation a pure
+#: function of game state -- ``round_num`` (phase-block index 9) is now encoded
+#: unconditionally by ``features.encode_observation`` instead of only when a real
+#: ``decision`` is present. OBS_DIM/ACTION_DIM unchanged; only the value written
+#: at index 9 changes (it is now identical for ``decision=None`` and a real
+#: decision). v1/v2 checkpoints are rejected by the MLAgent version tripwire.
+CODEC_VERSION: int = 3
 
 # ---------------------------------------------------------------------------
 # Observation space (§3.1)

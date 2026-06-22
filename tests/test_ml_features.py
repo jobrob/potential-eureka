@@ -156,6 +156,56 @@ class TestPlayerCountInvariance:
         assert np.all(absent == 0.0)
 
 
+class TestStatePurity:
+    """The observation must be a pure function of game state: encoding the same
+    `state` with `decision=None` (Option C's value path) and with a real decision
+    (the policy/prior path) must be identical on EVERY index except the genuine
+    decision-context bits (indices 0..8 of the phase block). In particular
+    `round_num` (phase-block index 9) is pure game state and must be encoded
+    consistently regardless of `decision` (code-review 2026-06-22 #1)."""
+
+    def test_round_num_encoded_when_decision_is_none(self) -> None:
+        from heat.ml import features as feat
+        from heat.ml import spaces as sp
+
+        state = GameState.create(_track(), 4, seed=5)
+        # Force a non-zero round_num so the index is observably set.
+        state.round_num = 7
+        vec = feat.encode_observation(state, 0, None)
+        round_idx = OBS_DIM - sp.BLOCK_PHASE_CONTEXT + feat._PHASE_ROUND_NUM_INDEX
+        assert vec[round_idx] == feat._clip01(7 / feat._ROUND_CAP)
+        assert vec[round_idx] > 0.0  # actually populated, not zero-padding
+
+    def test_decision_none_matches_real_decision_except_context_bits(self) -> None:
+        from heat.ml import spaces as sp
+
+        rng = random.Random(99)
+        phase_start = OBS_DIM - sp.BLOCK_PHASE_CONTEXT
+        # Indices 0..8 of the phase block are the only legitimate decision-context
+        # bits (kind one-hot 0..4, react 5..7, slipstream 8). Everything else --
+        # including round_num at index 9 -- must be decision-invariant.
+        context_abs = set(range(phase_start, phase_start + 9))
+
+        for trial in range(20):
+            state = GameState.create(_track(), 4, seed=trial)
+            _randomize(state, rng)
+            state.round_num = rng.randint(0, 60)
+            for pid in range(state.num_players):
+                base = features.encode_observation(state, pid, None)
+                for decision in _sample_decisions(state, pid):
+                    if decision is None:
+                        continue
+                    other = features.encode_observation(state, pid, decision)
+                    for i in range(OBS_DIM):
+                        if i in context_abs:
+                            continue
+                        assert other[i] == base[i], (
+                            f"trial {trial} pid {pid} kind {decision.kind} "
+                            f"index {i}: {other[i]} != {base[i]} -- observation "
+                            f"is not a pure function of game state"
+                        )
+
+
 class TestHiddenInfo:
     def test_opponent_hand_permutation_invariant(self) -> None:
         state = GameState.create(_track(), 4, seed=21)

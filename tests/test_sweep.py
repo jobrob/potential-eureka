@@ -477,7 +477,12 @@ def test_report_states_caveats():
 
 
 def test_codec_unchanged_8d():
-    """8D never edits spaces.py: the obs/action/codec contract is frozen."""
+    """8D never edits spaces.py: the obs/action/codec contract is frozen.
+
+    The frozen contract is the obs/action *dimensions*. CODEC_VERSION has since
+    advanced past 2 (v3: the Option-C obs-purity fix, code-review 2026-06-22 #1),
+    a later intentional layout change -- asserted monotonic, not pinned to 2.
+    """
     assert spaces.OBS_DIM == 104
     assert spaces.ACTION_DIM == 516
-    assert spaces.CODEC_VERSION == 2
+    assert spaces.CODEC_VERSION >= 2

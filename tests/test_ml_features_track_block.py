@@ -256,7 +256,9 @@ class TestBlockAccounting:
         assert sp.BLOCK_TRACK == 36
 
     def test_codec_version_bumped(self) -> None:
-        assert sp.CODEC_VERSION == 2
+        # v3 (Option C prep, code-review 2026-06-22 #1): round_num is now encoded
+        # unconditionally so the observation is a pure function of game state.
+        assert sp.CODEC_VERSION == 3
 
     def test_corner_len_normalized_by_max_corner_len(self) -> None:
         # Freeze the corner_len normalization choice (/ max_corner_len, relative).

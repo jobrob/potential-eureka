@@ -31,6 +31,68 @@ from heat.ml.spaces import MAX_PLAYERS
 #: Default bounded retry budget for generate-then-validate.
 _MAX_RETRIES: int = 200
 
+#: Track-seed space modulus. Generated track seeds live in ``[0, 2**31)`` to
+#: match ``random.Random``'s comfortable integer range.
+_TRACK_SEED_MOD: int = 2**31
+
+#: Boundary that partitions the track-seed space into two structurally-disjoint
+#: regions (code-review 2026-06-22 #6, "seed-band leakage"):
+#:
+#:   * the LOW region ``[0, _NAMESPACE_SPLIT)`` is the ``base_seed == 0``
+#:     *identity / eval namespace*: ``track_seed = seed % _NAMESPACE_SPLIT``.
+#:     The held-out eval band (``eval_search._HELDOUT_BASE = 900_000`` + offsets,
+#:     used as direct ``generate_track`` seeds) lives here and is reachable ONLY
+#:     from ``base_seed == 0``.
+#:   * the HIGH region ``[_NAMESPACE_SPLIT, _TRACK_SEED_MOD)`` is where EVERY
+#:     non-zero ``base_seed`` (training / self-play namespaces) lands, via a
+#:     stable hash fold of ``(base_seed, seed)``. Because every training seed is
+#:     ``>= _NAMESPACE_SPLIT`` and the held-out band is far below it
+#:     (``900_000 << 2**30``), no training campaign can EVER regenerate a
+#:     held-out eval track -- the disjointness is by construction, not by hoping
+#:     additive seeds don't collide.
+#:
+#: 2**30 leaves ~1.07e9 identity seeds (the eval/base-0 stream) and ~1.07e9
+#: training seeds, both far larger than any campaign needs.
+_NAMESPACE_SPLIT: int = 2**30
+
+
+def _namespaced_track_seed(base_seed: int, seed: int) -> int:
+    """Map ``(base_seed, episode_seed)`` to a track seed with namespace disjointness.
+
+    The disjointness guarantee (code-review 2026-06-22 #6):
+
+      * ``base_seed == 0`` is the *identity / eval* namespace and returns
+        ``seed % _NAMESPACE_SPLIT`` -- so ``base_seed=0`` reproduces the legacy
+        "track is a deterministic function of the episode seed" contract for
+        every ``seed < _NAMESPACE_SPLIT`` (which includes the held-out eval band
+        at ``900_000+``). This is the ONLY namespace that can reach the LOW
+        region, hence the only one that can reach the held-out band.
+      * any non-zero ``base_seed`` (a training / self-play namespace) folds
+        ``(base_seed, seed)`` into the HIGH region ``[_NAMESPACE_SPLIT,
+        _TRACK_SEED_MOD)`` with a stable, platform-independent integer hash (the
+        ``LookaheadAgent._turn_seed`` hand-fold style -- NOT Python's
+        ``PYTHONHASHSEED``-salted ``hash()``). Distinct ``base_seed`` values
+        therefore produce structurally separated (and, for the same episode
+        seed, distinct) track-seed streams, and none of them can collide with
+        the eval band.
+
+    Determinism: a pure function of ``(base_seed, seed)`` -- same inputs always
+    yield the same track seed, in-process or across a ``SubprocVecEnv`` worker.
+    """
+    base = int(base_seed)
+    s = int(seed)
+    if base == 0:
+        # Identity / eval namespace: legacy "track == f(episode seed)" contract.
+        return s % _NAMESPACE_SPLIT
+
+    # Training namespace: stable hand-folded hash of (base_seed, seed), mapped
+    # into the HIGH region so it can never reach the eval band. The fold mirrors
+    # search_agent._turn_seed (survives PYTHONHASHSEED; platform-independent).
+    acc = (base & 0x7FFFFFFF) * 2654435761
+    acc = (acc * 1000003 + (s & 0x7FFFFFFF)) & 0x7FFFFFFF
+    high_span = _TRACK_SEED_MOD - _NAMESPACE_SPLIT
+    return _NAMESPACE_SPLIT + (acc % high_span)
+
 
 @dataclass(frozen=True)
 class TrackGenParams:
@@ -254,18 +316,31 @@ class TrackSampler:
 
     A top-level class (not a closure) so it survives ``SubprocVecEnv`` ``spawn``
     pickling on Windows -- the env's ``track`` source is shipped to each worker,
-    and a closure cannot be pickled. Seed derivation is identical to the closure
-    form: a generated track is a deterministic function of the episode seed, so
-    ``reset(seed)`` reproduces BOTH the track AND the deck shuffle. When the env
-    passes ``seed=None`` (unseeded reset), a private RNG draws a fresh track seed
-    so successive resets vary. ``random.Random`` pickles its state, so a pickled
-    sampler resumes its fallback stream consistently in each worker.
+    and a closure cannot be pickled. A generated track is a deterministic
+    function of ``(base_seed, episode seed)`` via :func:`_namespaced_track_seed`,
+    so ``reset(seed)`` reproduces BOTH the track AND the deck shuffle. When the
+    env passes ``seed=None`` (unseeded reset), a private RNG draws a fresh track
+    seed so successive resets vary. ``random.Random`` pickles its state, so a
+    pickled sampler resumes its fallback stream consistently in each worker.
+
+    Namespace disjointness (code-review 2026-06-22 #6): track seeds are NOT a
+    plain additive ``seed + base_seed`` mix (which could let a long training
+    campaign silently regenerate the held-out eval tracks). Instead
+    :func:`_namespaced_track_seed` partitions the seed space so the held-out eval
+    band (``base_seed == 0``, the identity namespace, seeds ``900_000+``) and any
+    non-zero training ``base_seed`` land in structurally disjoint regions -- a
+    training namespace can never collide with the eval band, and two different
+    ``base_seed`` values never share a track for the same episode seed.
 
     Args:
         params: generation bounds, forwarded to :func:`generate_track`.
-        base_seed: offset mixed into the derived seed (lets distinct vec-env
-            workers / samplers cover disjoint track streams from the same
-            episode seeds).
+        base_seed: the *namespace* selector for seed derivation. ``0`` is the
+            identity / eval namespace (``track_seed = seed`` for seeds in the low
+            region, including the held-out ``900_000+`` band); any non-zero value
+            selects a disjoint training namespace in the high seed region. Lets
+            distinct vec-env workers / samplers cover provably non-overlapping
+            track streams, and keeps self-play streams disjoint from the eval
+            band BY CONSTRUCTION (not by hoping additive seeds don't overlap).
     """
 
     def __init__(
@@ -279,8 +354,9 @@ class TrackSampler:
         if seed is None:
             track_seed = self._fallback_rng.randrange(2**31)
         else:
-            # Combine episode seed with base_seed deterministically.
-            track_seed = (int(seed) + self.base_seed) % (2**31)
+            # Namespaced derivation: base_seed selects a disjoint seed region so
+            # a training namespace can never regenerate the held-out eval band.
+            track_seed = _namespaced_track_seed(self.base_seed, seed)
         return generate_track(track_seed, self.params)
 
 
@@ -297,9 +373,11 @@ def track_sampler(
 
     Args:
         params: generation bounds, forwarded to :func:`generate_track`.
-        base_seed: offset mixed into the derived seed (lets distinct vec-env
-            workers / samplers cover disjoint track streams from the same
-            episode seeds).
+        base_seed: the *namespace* selector for seed derivation (see
+            :class:`TrackSampler`). ``0`` is the identity / eval namespace
+            (reaches the held-out ``900_000+`` band); any non-zero value selects
+            a disjoint training namespace, so self-play streams cannot collide
+            with the held-out eval band by construction.
     """
     return TrackSampler(params, base_seed=base_seed)
 
@@ -414,8 +492,9 @@ class StepAwareTrackSampler:
 
     Args:
         schedule: the easy->full difficulty schedule.
-        base_seed: offset mixed into the derived track seed (as in
-            :class:`TrackSampler`).
+        base_seed: namespace selector for the derived track seed (as in
+            :class:`TrackSampler`); ``0`` is the identity / eval namespace, any
+            non-zero value a disjoint training namespace.
         step: the initial global training step (pins the difficulty for staged
             rebuilds; a fresh sampler per stage carries that stage's step).
     """
@@ -449,5 +528,8 @@ class StepAwareTrackSampler:
         if seed is None:
             track_seed = self._fallback_rng.randrange(2**31)
         else:
-            track_seed = (int(seed) + self.base_seed) % (2**31)
+            # Same namespaced derivation as TrackSampler (code-review #6): the
+            # base_seed selects a disjoint seed region, so a training namespace
+            # can never regenerate the held-out eval band.
+            track_seed = _namespaced_track_seed(self.base_seed, seed)
         return generate_track(track_seed, params)

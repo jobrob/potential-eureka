@@ -192,6 +192,50 @@ class TestTrackSampler:
     def test_track_sampler_returns_picklable_class(self) -> None:
         assert isinstance(track_sampler(), TrackSampler)
 
+    def test_base_zero_is_identity_namespace(self) -> None:
+        # base_seed == 0 is the identity / eval namespace: the derived track seed
+        # equals the episode seed (low region), so the held-out eval band
+        # (900_000+, used as direct generate_track seeds) is reproduced exactly.
+        from heat.tracks.generator import _namespaced_track_seed
+
+        for seed in (0, 55, 900_000, 900_023, 1_000_000):
+            assert _namespaced_track_seed(0, seed) == seed
+        # And the sampler at base 0 reproduces generate_track(seed) on the band.
+        sampler = track_sampler(base_seed=0)
+        held = sampler(900_007)
+        direct = generate_track(900_007)
+        assert held.corners == direct.corners
+        assert held.start_positions == direct.start_positions
+
+    def test_training_namespaces_cannot_reach_heldout_band(self) -> None:
+        # No non-zero (training) base_seed can produce a track seed inside the
+        # held-out eval band for a large sweep of episode seeds: training seeds
+        # live in the HIGH region [2**30, 2**31), far above the band at 900_000+.
+        from heat.tracks.generator import (
+            _NAMESPACE_SPLIT,
+            _namespaced_track_seed,
+        )
+
+        _HELDOUT_BASE = 900_000
+        band = set(range(_HELDOUT_BASE, _HELDOUT_BASE + 10_000))
+        for base in (1, 2, 17, 1000, 123_456, 2**20, 2**29):
+            for seed in range(5000):
+                ts = _namespaced_track_seed(base, seed)
+                assert ts >= _NAMESPACE_SPLIT  # always in the HIGH region
+                assert ts not in band  # never collides with the held-out band
+
+    def test_distinct_base_seeds_never_share_track_for_same_seed(self) -> None:
+        # Two different base_seed namespaces must not map the same episode seed
+        # to the same track seed (no cross-namespace collision for a fixed seed).
+        from heat.tracks.generator import _namespaced_track_seed
+
+        bases = [0, 1, 2, 17, 1000, 123_456]
+        for seed in range(0, 2000, 7):
+            derived = [_namespaced_track_seed(b, seed) for b in bases]
+            assert len(set(derived)) == len(bases), (
+                f"seed {seed}: cross-namespace collision among {bases}"
+            )
+
     def test_sampler_picklable_and_consistent_after_pickle(self) -> None:
         # The sampler crosses the SubprocVecEnv (spawn) process boundary, so it
         # must pickle and reproduce the same seeded tracks afterwards.

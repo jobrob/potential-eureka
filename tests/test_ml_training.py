@@ -686,10 +686,16 @@ def _tiny_8c_curriculum(tmp_path, **overrides) -> CurriculumConfig:
 
 
 def test_codec_unchanged_8c() -> None:
-    """8C must not touch the obs/action/codec contract (§4.5 / DoD f)."""
+    """8C must not touch the obs/action/codec contract (§4.5 / DoD f).
+
+    The contract 8C froze is the obs/action *dimensions*. CODEC_VERSION has since
+    advanced past 2 (v3: the Option-C obs-purity fix, code-review 2026-06-22 #1),
+    which is a later, intentional layout change -- so the version is asserted
+    monotonic, not pinned to 2.
+    """
     assert spaces.OBS_DIM == 104
     assert spaces.ACTION_DIM == 516
-    assert spaces.CODEC_VERSION == 2
+    assert spaces.CODEC_VERSION >= 2
 
 
 def test_sprint_8c_preset_levers() -> None:
