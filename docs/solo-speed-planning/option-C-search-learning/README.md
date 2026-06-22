@@ -248,6 +248,16 @@ not beat), that is a legitimate honest stop — report the gap and fall back to 
 A/B/E options on the spine, do **not** paper over it with finish-rate or a USA-only
 number.
 
+> **C4 update (added 2026-06-22, post-C3).** C3 *did* plateau — but the isolated
+> cause was the visit-count policy target collapsing at the C0 sim budget
+> (π-entropy ~0.04), not loop plumbing. The reserved **Gumbel-AlphaZero**
+> `RootActionSelector` fix (§7) was therefore promoted from "not a sprint" to a real
+> sprint, **C4** (`sprint-C4-gumbel-rootselector.md`). C4's *narrow* bar is the
+> **mechanism** rung — a non-collapsed completed-Q target plus a CI-separated
+> one-cycle improvement the C2/C3 PUCT loop could not produce (fixing rung-3's
+> failure cause); rung 4 at small scale is a *stretch*, and C4 is the **enabler**
+> whose green light precedes the deferred scale-up campaign, not the campaign itself.
+
 > **Heat-efficiency check (every rung that produces an agent):** also report heat
 > spent vs. distance and cool-downs taken (parent README "shared eval"), to confirm
 > the *budgeting* improved — the whole point of whole-track planning — and not merely
@@ -285,9 +295,11 @@ number.
   opponents stay out of the core.
 - **Gumbel-AlphaZero / sampled-MCTS.** Alternate `RootActionSelector`: Gumbel top-k
   action sampling + completed-Q policy target gives a low-visit-count guarantee of
-  improvement and would cut the per-move budget on the wide CARDS branch. Built
-  *after* C0 measures whether the naive PUCT visit budget actually binds — committing
-  before then is premature; the seam makes it a drop-in if it does.
+  improvement and would cut the per-move budget on the wide CARDS branch. **Promoted
+  to a sprint (C4) after C3** confirmed the visit-count target collapses at the C0
+  budget (π-entropy ~0.04) — the exact case the low-visit guarantee addresses. See
+  `sprint-C4-gumbel-rootselector.md`. (Originally "built only if C0 shows the PUCT
+  visit budget binds"; C3 supplied that evidence.)
 - **Deeper / larger nets and a full multi-hour GPU campaign.** The core uses the
   `small` profile at small scale on the RTX 4080 (torch cu126); the `large` profile
   and a long campaign are the scale-up once C3's loop is proven to improve
