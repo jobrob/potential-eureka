@@ -272,6 +272,28 @@ Either way the sweep is cheap, uses code already in the repo, and de-risks the
 sprint by confirming the diagnosis before the implementation cost — it is decision
 support, not a gated deliverable.
 
+### Sweep result (run 2026-06-22) — collapse is NOT budget-bound; Gumbel confirmed necessary
+
+The diagnostic was run off the C3 warm prior (`checkpoints/c3_warm_gen0.zip`), a
+2-generation mini-loop at each sim level (`--tracks 12 --gate-games 8`, CUDA):
+
+| sims | gen-1 π-entropy | gen-2 π-entropy | any generation promoted? |
+|---|---|---|---|
+| 16 (baseline) | 0.037 | 0.050 | no — plateau, kept warm prior |
+| 64 | 0.021 | 0.017 | no — plateau, kept warm prior |
+| 128 | 0.027 | 0.021 | no — plateau, kept warm prior |
+
+**Raising sims did not lift the entropy — it slightly *lowered* it** (~0.02 at
+64/128 vs ~0.04 at 16), and **no trained generation cleared the promotion guard at
+any budget**. This is the **structural** branch above, in its strongest form: with
+plain PUCT + a visit-count target, more simulations make the search *exploit
+harder*, so the visit distribution gets *sharper* (more one-hot), not flatter — the
+textbook reason visit counts are a poor policy target at low-to-moderate sim counts,
+and exactly what Gumbel's completed-Q target sidesteps. The value side degraded too
+(at 64 sims val MSE ~3000 / MAE ~40 rounds, 8–11 of 24 races spin-spiraling to
+MAX_ROUNDS), so a brute-force scale-up would buy a more expensive plateau, not a
+fix. **Decision: proceed with C4 (Gumbel); do not pursue a sim-only scale-up.**
+
 ## Risks & mitigations
 
 - **Risk: the completed-Q target is mis-constructed (e.g. completes unvisited
