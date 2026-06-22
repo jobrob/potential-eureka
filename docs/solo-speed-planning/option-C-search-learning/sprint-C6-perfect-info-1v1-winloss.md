@@ -456,28 +456,23 @@ is about.
 Total: comparable to C4/C5 in code surface, with the experiment (not the code) as
 the deliverable — the cheap go/no-go before any hidden-information investment.
 
-## Open questions (for the user to decide before implementation)
+## Resolved sub-decisions (settled 2026-06-22 — the implementer follows these)
 
-1. **Pure win/loss vs a hybrid (win/loss + small dense shaping).** Pure ±1 is clean
-   but sparse; a small dense progress/anti-spin shaping term (the project's
-   `shaping_weight` precedent) thickens the early gradient at the cost of a biased
-   value and a re-introduced reward-design surface. **Recommendation: default pure
-   win/loss for Tier 0** (isolate the clean signal — it is the whole point of the
-   pivot), and hold the hybrid as the **first Tier-1 lever** if Tier 0's value head
-   calibrates slowly. But this is a genuine fork (it changes what "the value" means)
-   and is surfaced rather than silently chosen.
-2. **Self-play vs current only, vs the frozen-snapshot league from gen 1.** The
-   league is the anti-collapse insurance but adds opponent-pool bookkeeping and
-   slows each generation (more matchups). **Recommendation: league from gen 1**
-   (the nemesis history makes the insurance worth the cost up front), but a leaner
-   "current + strong-heuristic anchor only" start is defensible if Tier 0 wall-clock
-   is tight — surfaced for the user.
-3. **The `MAX_ROUNDS` tie rule.** "Every game finishes" needs a definite 1v1
-   outcome when both cars hit `MAX_ROUNDS` without crossing. Options: decide by race
-   progress (further-along wins), or score it a draw (`z = 0`). **Recommendation:
-   decide by progress** (a definite ±1 keeps the signal binary and avoids a
-   z=0-dominated dataset if the early nets stall), with a draw fallback only on an
-   exact progress tie — but flagged because it subtly shapes what the value learns.
-4. **MSE-on-±1 (`tanh`) vs BCE (sigmoid) value head.** Recommendation MSE-on-±1
-   (AlphaZero's own, smallest diff). Revisit only if the calibration read argues a
-   probabilistic (BCE) head calibrates materially better.
+These four were surfaced as open and are now decided (the user chose 1 and 2; the
+designer's recommended defaults stand for 3 and 4):
+
+1. **Value signal — PURE win/loss for Tier 0.** Tier 0 uses only the clean ±1
+   outcome (isolate whether the adversary + clean value alone fix the flatness — the
+   whole point of the pivot). The **hybrid** (win/loss + a small dense progress/
+   anti-spin shaping term, the project's `shaping_weight` precedent) is held as the
+   **first Tier-1 lever**, pulled in only if Tier 0's value head calibrates slowly.
+2. **Opponent pool — frozen-snapshot league from generation 1.** Play vs the current
+   net AND periodic frozen past snapshots (+ heuristic anchors) from the start — the
+   AlphaStar-style anti-cycle insurance, worth the up-front bookkeeping/matchup cost
+   given the Sprint-5/8C self-play-collapse history.
+3. **`MAX_ROUNDS` tie rule — decide by race progress** (further-along wins), with a
+   draw (`z = 0`) only on an exact progress tie. Keeps the signal binary and avoids a
+   `z=0`-dominated dataset if early nets stall.
+4. **Value head — MSE-on-±1 with a `tanh` head** (AlphaZero's own; smallest diff from
+   the existing trainer). Revisit a probabilistic BCE/sigmoid head only if the
+   calibration read materially favors it.
