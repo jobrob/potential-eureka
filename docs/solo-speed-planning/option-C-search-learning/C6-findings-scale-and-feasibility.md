@@ -127,6 +127,73 @@ parallel games.)
    scale before scaling up.
 4. **Then** a genuinely larger run, only once #1 makes it affordable.
 
+## Point-1 analysis — where the per-move time actually goes (measured 2026-06-23)
+
+The question: why is our self-play so much slower than the Connect4 reproduction,
+*even accounting for 516 actions vs 7*? Profiled with `cProfile` on a steady-state
+(warm, post-model-load) two-player 1v1 search game at 16 sims (focal MCTS vs a
+heuristic), `experiments`-level, single process, CPU inference.
+
+**Headline: it is NOT clone/engine-bound. It is neural-net-evaluation-bound.** My
+a-priori guess (full-`GameState` cloning + the real rules engine per transition)
+was *wrong*. Cloning is cheap (~11.8 µs) and the engine step is cheap.
+
+Steady-state, per focal search-move (one full 16-sim search ≈ **17 ms**):
+
+| Cost | per game | share of attributed compute |
+|---|---|---|
+| Feature encoding (pure-Python obs build) | 57 ms | ~36% |
+| Torch `linear` (net forward, **batch-1, CPU**) | 54 ms | ~34% |
+| `logsumexp` / Categorical over **516** logits | 34 ms | ~21% |
+| `run_round_driver` (the engine) | 9.5 ms | ~6% |
+| `GameState`/`PlayerState`/deck clone | 6.4 ms | ~4% |
+
+→ **~90% of the work is the neural-net path; cloning + engine is ~10%.** Per move:
+**15.6 net evals, 15.2 clones, 116 engine steps**, 17 ms wall.
+
+### Why each simulation is ~15–20× more expensive than Connect4's
+
+Connect4 (AlphaZero.jl) sustains ≈19,000 sims/s; we sustain ≈940 sims/s
+(16 sims / 17 ms). The gap is **not** the game logic — it is *how the network is
+evaluated*:
+
+1. **Batch-1 CPU inference (the dominant gap).** We do 15.6 separate forward passes
+   per move, one position at a time, on CPU, through the SB3 `MaskablePPO` stack.
+   Connect4 batches hundreds of leaf positions from many parallel self-play games
+   into **one GPU forward pass** (an inference server). This alone is ~10×+.
+2. **Pure-Python feature encoding rebuilt every eval** (~1.85 ms/move; 156k feature
+   genexpr calls/game). Connect4's state *is* the network input tensor (a 6×7×3
+   array) — zero encoding cost.
+3. **516-wide softmax/`logsumexp` per eval** (~1.1 ms/move). *This* is where the
+   516-vs-7 action space actually costs — in the **eval width**, not the branching
+   (Gumbel caps root expansion at `m=8` regardless of action count). Connect4's
+   7-wide softmax is effectively free. So the action space is a real but **secondary**
+   factor (~20% of per-move), not a 70× multiplier.
+4. **Per-game model reload from disk (the loop's real killer).** `gen_selfplay`
+   constructs a **fresh `MCTSAgent` per game** (`gen_selfplay.py:831`), and each
+   reloads the SB3 model from its `.zip` on first use (~1.3 s, measured cold), plus
+   the frozen-snapshot opponent reloads too. This ~1.3 s/game tax explains the gap
+   between the ~1 s/game *compute* and the ~13 s/game the loop actually spent.
+5. Python interpreter overhead throughout, vs compiled Julia/C++.
+
+### Implication: the bottleneck is standard engineering, not fundamental
+
+None of the top costs are intrinsic to Heat. The compounding wins, in order:
+
+- **Batched GPU leaf evaluation** (a queue collecting leaf positions across parallel
+  self-play games into one forward pass) — the single biggest lever (~10×+).
+- **Cache/reuse the loaded model across games** (kill the per-game reload tax) — the
+  easiest win and likely the biggest *loop-level* speedup.
+- **Vectorized / tensor-native observation encoding** — removes the ~36% Python
+  feature cost.
+- **Parallel self-play workers** — near-linear throughput in cores.
+
+Together these plausibly buy 20–100× generation throughput, which is what would move
+a real-scale run from "years" toward "feasible". The 516-wide head is a minor,
+optional follow-on (e.g. a narrower factored action head). **Conclusion for point 1:
+our per-game time is long because of batch-1 CPU inference + Python feature encoding +
+a per-game model-reload tax — all fixable — not because the engine/clone is slow.**
+
 ## Sources
 
 - [AlphaZero.jl — Connect Four tutorial (training params, RTX 2070)][c4]
