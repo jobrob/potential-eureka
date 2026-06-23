@@ -68,6 +68,7 @@ def _generate_1v1(
     seed: int,
     game_seed: int,
     traj_greedy: bool = False,
+    workers: int = 1,
 ) -> dict:
     """Generate one generation of 1v1 win/loss self-play with the current net.
 
@@ -87,7 +88,7 @@ def _generate_1v1(
             temperature_moves=10, seed=seed + generation,
             game_seed=game_seed + generation, root_selector="puct",
             traj_greedy=traj_greedy, two_player=True,
-            opponent_snapshot=opponent_snapshot,
+            opponent_snapshot=opponent_snapshot, workers=workers,
         ))
     finally:
         gen_selfplay._SELFPLAY_SEED_BASE = saved
@@ -223,7 +224,7 @@ def run_loop(args: argparse.Namespace) -> dict:
                 model_path=current_model, opponent_snapshot=opp, out=member_out,
                 tracks=per_member, val_tracks=per_member_val, sims=args.sims,
                 seed=args.seed, game_seed=args.game_seed,
-                traj_greedy=args.traj_greedy,
+                traj_greedy=args.traj_greedy, workers=args.workers,
             )
             per_member_paths.append(member_out)
 
@@ -393,6 +394,10 @@ def main() -> None:
                         help="held-out tracks (x2 seats = seat-neutral 1v1 games)")
     parser.add_argument("--stop-patience", type=int, default=2)
     parser.add_argument("--traj-greedy", action="store_true")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="C7: parallel self-play workers for generation "
+                             "(threaded through to gen_selfplay; default 1 = "
+                             "serial, byte-for-byte unchanged)")
     parser.add_argument("--net", type=str, default="small",
                         choices=["default", "small", "large"])
     parser.add_argument("--device", type=str, default="auto")

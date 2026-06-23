@@ -80,6 +80,7 @@ without touching the search. The agent pickles **by path** (the model is nulled 
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Protocol
@@ -582,6 +583,54 @@ class EngineTransitionModel:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Sprint C7: process-level model cache (kill the per-game reload tax)
+# ---------------------------------------------------------------------------
+#
+# C6's profile (C6-findings §Point-1, item 4) showed the loop's real killer is a
+# per-GAME model reload: ``gen_selfplay`` builds a fresh ``MCTSAgent`` per game,
+# each of which reloads the SB3 ``.zip`` from disk on first use (~1.3 s measured).
+# The loaded SB3 ``MaskablePPO`` policy is used READ-ONLY for inference (the
+# search never mutates weights), so it can be loaded ONCE per process and shared
+# across every game in that process. The cache is keyed by ``(abspath, mtime)``
+# so a re-trained checkpoint written to the same path is reloaded automatically
+# (the mtime changes), and so two adapters pointing at the same checkpoint share
+# one module. Per-game MUTABLE state (the agent's ``_search_rng``/seed, ``_ply``,
+# ``SearchProfile``) is reset per game by the agent -- never the weights -- so
+# determinism is unchanged. On Windows (spawn) each worker re-imports this module
+# and so gets its own cache; the first game in each worker pays the load once, and
+# every later game in that worker reuses it (the benchmark reports the amortized,
+# not cold, throughput).
+#:
+#: Module-level so it is shared across all ``NetAdapter`` instances in a process.
+_MODEL_CACHE: dict[tuple[str, float], object] = {}
+
+
+def _load_cached_model(model_path: str):
+    """Load (or reuse) the SB3 ``MaskablePPO`` for ``model_path``, cached by
+    ``(abspath, mtime)`` at process scope.
+
+    The cache key includes the file mtime so a re-trained checkpoint at the same
+    path is reloaded (its mtime advances); a missing file falls back to ``mtime
+    = 0.0`` so a path that cannot be ``stat``-ed still keys deterministically (the
+    subsequent ``MaskablePPO.load`` raises the real error). The returned module is
+    used read-only for inference and shared across the process's games.
+    """
+    from sb3_contrib import MaskablePPO
+
+    abspath = os.path.abspath(model_path)
+    try:
+        mtime = os.path.getmtime(abspath)
+    except OSError:
+        mtime = 0.0
+    key = (abspath, mtime)
+    model = _MODEL_CACHE.get(key)
+    if model is None:
+        model = MaskablePPO.load(abspath, device="cpu")
+        _MODEL_CACHE[key] = model
+    return model
+
+
 class NetAdapter:
     """Thin policy+value adapter over a loaded SB3 ``MaskablePPO`` checkpoint.
 
@@ -595,6 +644,13 @@ class NetAdapter:
     §3.4 ``.meta.json`` contract tripwire (``CheckpointMismatchError`` on a stale
     ``obs_dim`` / ``action_dim`` / ``codec_version``). The heavy model is nulled
     in ``__getstate__`` so the adapter (and the owning agent) pickle by path.
+
+    Sprint C7: the loaded SB3 module is fetched from a process-level cache
+    (:func:`_load_cached_model`, keyed by ``(abspath, mtime)``) so the policy
+    loads ONCE per process and is shared READ-ONLY across every game -- killing
+    the per-game reload tax the C6 profile identified as the loop's real killer.
+    Inference does not mutate the weights, so the share is safe; the ``.meta.json``
+    tripwire still validates the contract on first use.
     """
 
     def __init__(self, model_path: str) -> None:
@@ -647,10 +703,11 @@ class NetAdapter:
 
     def _get_model(self):
         if self._model is None:
-            from sb3_contrib import MaskablePPO
-
+            # Sprint C7: validate the contract (cheap, reads the small .meta.json)
+            # then fetch the heavy SB3 module from the process-level cache so the
+            # policy loads ONCE per process and is shared read-only across games.
             self._validate_meta()
-            self._model = MaskablePPO.load(self.model_path, device="cpu")
+            self._model = _load_cached_model(self.model_path)
         return self._model
 
     # -- the two seam methods -------------------------------------------

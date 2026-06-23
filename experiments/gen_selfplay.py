@@ -69,7 +69,14 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from heat.agents.mcts_agent import MCTSAgent, MCTSConfig, EngineTransitionModel, Node, NodeKind
+from heat.agents.mcts_agent import (
+    MCTSAgent,
+    MCTSConfig,
+    EngineTransitionModel,
+    NetAdapter,
+    Node,
+    NodeKind,
+)
 from heat.engine.driver import Decision, DecisionKind, run_round_driver
 from heat.engine.game import MAX_ROUNDS
 from heat.models.game_state import GameState
@@ -778,6 +785,157 @@ def _lone_legal_action(decision: Decision, state: GameState, mask: np.ndarray) -
     return EngineTransitionModel._legal_default(decision)
 
 
+# ---------------------------------------------------------------------------
+# Sprint C7: per-game work unit + the process-level cached NetAdapter (model
+# reuse), so the per-game model-reload tax is gone and games can be distributed
+# across a process pool with a DETERMINISTIC, byte-identical merge.
+# ---------------------------------------------------------------------------
+
+
+#: Process-level shared NetAdapter, keyed by model path. The adapter's heavy SB3
+#: module comes from the agent's process-level ``_MODEL_CACHE`` (mcts_agent), so
+#: the policy loads ONCE per process; reusing one adapter also amortizes the cheap
+#: ``.meta.json`` validation. Shared read-only across the process's games -- the
+#: search never mutates the weights, so this is safe and determinism is unchanged.
+_NET_ADAPTER_CACHE: dict[str, NetAdapter] = {}
+
+
+def _cached_net_adapter(model_path: str) -> NetAdapter:
+    """Return a process-shared :class:`NetAdapter` for ``model_path`` (Sprint C7).
+
+    The first game in a process builds the adapter and (on its first leaf eval)
+    loads the SB3 module into the process model cache; every later game in that
+    process reuses the same adapter and the cached module -- no per-game reload.
+    """
+    adapter = _NET_ADAPTER_CACHE.get(model_path)
+    if adapter is None:
+        adapter = NetAdapter(model_path)
+        _NET_ADAPTER_CACHE[model_path] = adapter
+    return adapter
+
+
+@dataclass
+class _GameSpec:
+    """An immutable, picklable description of one self-play game to run.
+
+    Carries only plain data (the model PATH, seeds, the search config, the
+    split/track key) so it ships into a ``multiprocessing`` worker by value -- the
+    NetAdapter pickle-by-path contract. The per-game agent seed / game seed are
+    captured here exactly as the serial loop derived them (``args.seed + i`` /
+    ``args.game_seed + i`` with ``i`` the per-band index), so a worker reproduces
+    the byte-identical game.
+    """
+
+    split: str
+    track_seed: int
+    agent_seed: int
+    game_seed: int
+    model_path: str
+    cfg: MCTSConfig
+    two_player: bool
+    opponent_snapshot: str | None
+    log_seats: tuple[int, ...]
+    traj_greedy: bool
+
+
+@dataclass
+class _GameResult:
+    """The byte-identical result of running one :class:`_GameSpec`.
+
+    The per-game :class:`_SelfPlayBuffer` keeps the rows in driver order; the
+    deterministic merge concatenates results sorted by ``(split_rank, track_seed)``
+    so the assembled dataset is identical regardless of ``--workers``. The profile
+    counts are summed across games (the accounting preserved across workers).
+    """
+
+    split: str
+    track_seed: int
+    buf: _SelfPlayBuffer
+    finished: bool
+    n_unencodable: int
+    clones: int
+    moves: int
+    seconds: float
+
+
+def _run_one_game(spec: _GameSpec) -> _GameResult:
+    """Run one self-play game and return its rows + profile (Sprint C7 work unit).
+
+    A fresh :class:`MCTSAgent` per game (clean per-game profile / ply / RNG) -- the
+    C2-C6 contract -- but the heavy net is the process-shared cached
+    :class:`NetAdapter` (``net=``), so NO model reload happens per game. The search
+    is the byte-identical pure function of ``(state, seed)``; the only change is
+    where the weights come from. Runs serially in the main process (``workers=1``)
+    or inside a pool worker (``workers>1``); identical either way.
+    """
+    cfg = spec.cfg
+    agent = MCTSAgent(
+        net=_cached_net_adapter(spec.model_path),
+        model_path=spec.model_path,
+        config=cfg,
+        seed=spec.agent_seed,
+        name="MCTSGen",
+    )
+    buf = _SelfPlayBuffer()
+    if spec.two_player:
+        opponent = _make_opponent(spec.opponent_snapshot)
+        finished, n_unenc = _generate_one_1v1(
+            spec.track_seed,
+            spec.split,
+            game_seed=spec.game_seed,
+            agent=agent,
+            opponent=opponent,
+            buf=buf,
+            log_seats=spec.log_seats,
+            traj_greedy=spec.traj_greedy,
+        )
+    else:
+        finished, n_unenc = _generate_one_track(
+            spec.track_seed,
+            spec.split,
+            game_seed=spec.game_seed,
+            agent=agent,
+            buf=buf,
+            traj_greedy=spec.traj_greedy,
+        )
+    return _GameResult(
+        split=spec.split,
+        track_seed=spec.track_seed,
+        buf=buf,
+        finished=finished,
+        n_unencodable=n_unenc,
+        clones=agent.profile.clones,
+        moves=agent.profile.moves,
+        seconds=agent.profile.seconds,
+    )
+
+
+#: The split order in the assembled dataset (train rows then val rows), matching
+#: the serial band loop so the deterministic merge reproduces the serial layout.
+_SPLIT_RANK: dict[str, int] = {"train": 0, "val": 1}
+
+
+def _merge_into(buf: _SelfPlayBuffer, results: list[_GameResult]) -> None:
+    """Append every game's rows into ``buf`` in the DETERMINISTIC serial order.
+
+    Sorted by ``(split_rank, track_seed)`` -- exactly the order the serial band
+    loop produces (train band ascending, then val band ascending) -- with each
+    game's rows kept in their original driver order. So the assembled arrays are
+    byte-identical regardless of ``--workers`` (the hard determinism contract).
+    """
+    ordered = sorted(results, key=lambda r: (_SPLIT_RANK[r.split], r.track_seed))
+    for r in ordered:
+        gb = r.buf
+        buf.obs.extend(gb.obs)
+        buf.pi.extend(gb.pi)
+        buf.mask.extend(gb.mask)
+        buf.kind.extend(gb.kind)
+        buf.round_num.extend(gb.round_num)
+        buf.z.extend(gb.z)
+        buf.track_seed.extend(gb.track_seed)
+        buf.split.extend(gb.split)
+
+
 def generate_dataset(args: argparse.Namespace) -> dict:
     """Generate the train+val self-play dataset; return a stats summary."""
     _assert_seed_bands_disjoint(args.tracks + args.val_tracks)
@@ -801,6 +959,12 @@ def generate_dataset(args: argparse.Namespace) -> dict:
     # target is unchanged. Default OFF = the C4 exploratory trajectory.
     traj_greedy = bool(getattr(args, "traj_greedy", False))
 
+    # Sprint C7: number of parallel self-play workers. Default 1 == the serial
+    # C2-C6 path, byte-for-byte. >1 distributes the per-track games across a
+    # multiprocessing pool; the deterministic seed-sorted merge below makes the
+    # assembled dataset byte-identical regardless of this value.
+    workers = max(1, int(getattr(args, "workers", 1) or 1))
+
     bands = [
         ("train", _SELFPLAY_SEED_BASE, args.tracks),
         ("val", _SELFPLAY_SEED_BASE + args.tracks, args.val_tracks),
@@ -823,45 +987,51 @@ def generate_dataset(args: argparse.Namespace) -> dict:
     # current-net seat (the snapshot is a fixed adversary, not a learner).
     log_seats = (0,) if (two_player and opponent_snapshot) else (0, 1)
 
+    # Build the per-game specs in the serial band order (the per-band index ``i``
+    # derives the agent/game seeds exactly as the serial loop did).
+    specs: list[_GameSpec] = []
     for split, base, n_tracks in bands:
         for i in range(n_tracks):
-            track_seed = base + i
-            # Fresh agent per track (clean per-game profile/ply/RNG), net loads
-            # lazily by path through the NetAdapter tripwire (codec v3).
-            agent = MCTSAgent(
-                model_path=args.model, config=cfg, seed=args.seed + i, name="MCTSGen"
-            )
-            if two_player:
-                opponent = _make_opponent(opponent_snapshot)
-                finished, n_unenc = _generate_one_1v1(
-                    track_seed,
-                    split,
-                    game_seed=args.game_seed + i,
-                    agent=agent,
-                    opponent=opponent,
-                    buf=buf,
-                    log_seats=log_seats,
-                    traj_greedy=traj_greedy,
-                )
-            else:
-                finished, n_unenc = _generate_one_track(
-                    track_seed,
-                    split,
-                    game_seed=args.game_seed + i,
-                    agent=agent,
-                    buf=buf,
-                    traj_greedy=traj_greedy,
-                )
-            races_total += 1
-            races_total_by_split[split] += 1
-            total_unencodable += n_unenc
-            if not finished:
-                races_dropped += 1
-            else:
-                races_finished_by_split[split] += 1
-            total_clones += agent.profile.clones
-            total_moves += agent.profile.moves
-            total_search_s += agent.profile.seconds
+            specs.append(_GameSpec(
+                split=split,
+                track_seed=base + i,
+                agent_seed=args.seed + i,
+                game_seed=args.game_seed + i,
+                model_path=args.model,
+                cfg=cfg,
+                two_player=two_player,
+                opponent_snapshot=opponent_snapshot,
+                log_seats=log_seats,
+                traj_greedy=traj_greedy,
+            ))
+
+    if workers == 1:
+        results = [_run_one_game(spec) for spec in specs]
+    else:
+        # Spawn-safe pool (Windows): each worker re-imports this module and loads
+        # the model ONCE via the process-level cache, then reuses it for its share
+        # of games. ``imap_unordered`` is fine -- the merge re-sorts by seed, so
+        # completion order does not affect the assembled (deterministic) dataset.
+        import multiprocessing as mp
+
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=min(workers, len(specs)) or 1) as pool:
+            results = list(pool.imap_unordered(_run_one_game, specs))
+
+    _merge_into(buf, results)
+
+    # Accounting (summed across workers, deterministic-order for the race counts).
+    for r in sorted(results, key=lambda r: (_SPLIT_RANK[r.split], r.track_seed)):
+        races_total += 1
+        races_total_by_split[r.split] += 1
+        total_unencodable += r.n_unencodable
+        if not r.finished:
+            races_dropped += 1
+        else:
+            races_finished_by_split[r.split] += 1
+        total_clones += r.clones
+        total_moves += r.moves
+        total_search_s += r.seconds
 
     elapsed = time.perf_counter() - t0
 
@@ -1081,6 +1251,13 @@ def main() -> None:
                              "FrozenSnapshotAgent checkpoint path, or 'strong'/'weak' "
                              "for the heuristic anchors). Omit for net-vs-net (both "
                              "seats are the current net and both log)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="C7: parallel self-play workers (multiprocessing pool). "
+                             "Default 1 = serial (byte-for-byte the C2-C6 path); >1 "
+                             "distributes per-track games across cores with a "
+                             "deterministic seed-sorted merge (dataset byte-identical "
+                             "regardless of --workers). Each worker loads the model "
+                             "once via the process-level cache (no per-game reload)")
     parser.add_argument("--seed", type=int, default=0,
                         help="base agent search seed (mixed per track)")
     parser.add_argument("--game-seed", type=int, default=8000,

@@ -105,6 +105,77 @@ def _deck_composition(player: PlayerState) -> list[float]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Sprint C7: per-track precompute of the STATE-INVARIANT corner arrays.
+# ---------------------------------------------------------------------------
+#
+# The C6 profile (C6-findings §Point-1, item 2) measured ``_track_block`` rebuilt
+# on EVERY leaf eval (~968x/game) though the track is constant within a game.
+# Most of the per-corner work is a pure function of the TRACK, not the player:
+# the normalization maxes (``max_limit``/``max_clen``/``max_lanes``) and each
+# corner's intrinsic ``(speed_limit, corner_len, entry_lanes)`` never change as
+# the car moves. Only the forward-distance ordering (``fwd_dist``), the per-slot
+# ``dist_ahead``, and the globals depend on the player's position/lap.
+#
+# We DO NOT memoize the whole ``_track_block`` output (that depends on the player
+# position, so it would risk a stale obs). We precompute ONLY the track-invariant
+# corner table once per track object, keyed by ``id(track)`` (a track is a mutable
+# dataclass, so it is unhashable; the object identity is stable within a game --
+# the generator builds one track per game). The cached values are byte-identical
+# to what the un-cached path computes, so the assembled observation is unchanged
+# (pinned by ``tests/test_c7_throughput.py``). Bounded to the most-recent few
+# tracks so a long parallel run cannot leak memory.
+_TRACK_PRECOMPUTE_CACHE_CAP: int = 8
+#: id(track) -> (max_limit, max_clen, max_lanes, corner_table) where corner_table
+#: is a list of (start, norm_limit, norm_clen, norm_lanes) per corner in the
+#: track's native corner order. ``norm_*`` are the already-divided [0,1] values.
+_track_precompute: "dict[int, tuple]" = {}
+
+
+def _track_precompute_for(track) -> tuple:
+    """Return (and cache) the state-invariant corner table for ``track``.
+
+    Pure function of the TRACK: the normalization maxes and each corner's
+    normalized intrinsic features (speed-limit, length, entry lanes). Keyed by
+    ``id(track)`` (the object is stable within a game; a track is unhashable).
+    The returned tuple is consumed by :func:`_track_block`, which still computes
+    the player-dependent ordering / distances / globals per call -- so the
+    assembled observation stays bit-identical to the un-cached path.
+    """
+    key = id(track)
+    cached = _track_precompute.get(key)
+    if cached is not None:
+        return cached
+
+    corners = list(track.corners)
+    spaces_list = track.spaces
+    n_spaces = len(spaces_list)
+    max_limit = max((c.speed_limit for c in corners), default=1) or 1
+    max_clen = max(((c.end - c.start + 1) for c in corners), default=1) or 1
+    max_lanes = max((s.lanes for s in spaces_list), default=1) or 1
+
+    corner_table = []
+    for c in corners:
+        if 0 <= c.start < n_spaces:
+            entry_lanes = spaces_list[c.start].lanes
+        else:
+            entry_lanes = 1
+        corner_table.append((
+            c.start,
+            _clip01(c.speed_limit / max_limit),
+            _clip01((c.end - c.start + 1) / max_clen),
+            _clip01(entry_lanes / max_lanes),
+        ))
+
+    result = (max_limit, max_clen, max_lanes, corner_table)
+    if len(_track_precompute) >= _TRACK_PRECOMPUTE_CACHE_CAP:
+        # Bounded: drop the oldest entry (insertion-ordered dict) so a long
+        # multi-track run does not accumulate stale per-track tables.
+        _track_precompute.pop(next(iter(_track_precompute)))
+    _track_precompute[key] = result
+    return result
+
+
 def _track_block(player: PlayerState, track) -> list[float]:
     """BLOCK_TRACK floats: MAX_CORNERS ego-centric corner slots + a globals
     sub-block (Sprint B Option A whole-track obs; replaces the old 4-dim
@@ -133,33 +204,36 @@ def _track_block(player: PlayerState, track) -> list[float]:
     """
     length = track.length or 1
     pos = player.position
-    corners = list(track.corners)
-    max_limit = max((c.speed_limit for c in corners), default=1) or 1
-    max_clen = max(((c.end - c.start + 1) for c in corners), default=1) or 1
-    max_lanes = max((s.lanes for s in track.spaces), default=1) or 1
 
-    # Forward distance to each corner start (wrap-aware), matching
+    # Sprint C7: the per-corner normalization maxes and intrinsic normalized
+    # features are a pure function of the TRACK (constant within a game), so they
+    # are precomputed once and reused. Only the player-dependent forward-distance
+    # ordering / dist_ahead and the globals are recomputed here, so the assembled
+    # block is byte-identical to the un-cached path (the corner_table is in native
+    # corner order, and the stable sort by fwd_dist reproduces the original
+    # ``sorted(corners, key=fwd_dist)`` ordering exactly).
+    _max_limit, _max_clen, _max_lanes, corner_table = _track_precompute_for(track)
+
+    # Forward distance to a corner start (wrap-aware), matching
     # rules.distance_to_next_corner's convention (a corner at pos == one lap).
-    def fwd_dist(c) -> int:
-        d = (c.start - pos) % length
+    def fwd_dist(start: int) -> int:
+        d = (start - pos) % length
         return length if d == 0 else d
 
-    ordered = sorted(corners, key=fwd_dist)
+    # Stable sort by forward distance -- identical to the original
+    # ``sorted(corners, key=fwd_dist)`` because corner_table is in native order.
+    ordered = sorted(corner_table, key=lambda entry: fwd_dist(entry[0]))
 
     slots: list[float] = []
     for i in range(spaces.MAX_CORNERS):
         if i < len(ordered):
-            c = ordered[i]
-            d = fwd_dist(c)
-            if 0 <= c.start < len(track.spaces):
-                entry_lanes = track.spaces[c.start].lanes
-            else:
-                entry_lanes = 1
+            start, norm_limit, norm_clen, norm_lanes = ordered[i]
+            d = fwd_dist(start)
             slots += [
                 _clip01(d / length),
-                _clip01(c.speed_limit / max_limit),
-                _clip01((c.end - c.start + 1) / max_clen),
-                _clip01(entry_lanes / max_lanes),
+                norm_limit,
+                norm_clen,
+                norm_lanes,
             ]
         else:
             slots += [0.0, 0.0, 0.0, 0.0]  # padding (dist_ahead == 0 marker)
