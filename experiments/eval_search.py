@@ -363,24 +363,29 @@ def _seat_neutral_win_counts(
     *,
     track_seeds: list[int],
     game_seed_base: int,
+    num_seats: int = 4,
 ) -> tuple[int, int]:
-    """``(wins, games)`` of ``make_focal`` vs three ``make_opponent``, seat-neutral.
+    """``(wins, games)`` of ``make_focal`` vs ``make_opponent``, seat-neutral.
 
     Per the seat-bias finding (front turn-order seats win more, all else equal),
     a single fixed-seat measurement is contaminated. We therefore rotate the
-    focal agent through ALL FOUR seats (different seeds per rotation) and pool the
-    win indicator, so the positional advantage cancels. Returns the raw pooled
-    ``(wins, games)`` over the ``4 x len(track_seeds)`` games -- the counts a
-    Wilson lower bound (the S4 league gate) needs; :func:`_seat_neutral_winrate`
-    divides them for the bare fraction.
+    focal agent through ALL ``num_seats`` seats (different seeds per rotation) and
+    pool the win indicator, so the positional advantage cancels. Returns the raw
+    pooled ``(wins, games)`` over the ``num_seats x len(track_seeds)`` games -- the
+    counts a Wilson lower bound (the S4 / C6 league gate) needs;
+    :func:`_seat_neutral_winrate` divides them for the bare fraction.
+
+    ``num_seats`` defaults to ``4`` (the S1/S2/S4 4p field, unchanged); Sprint C6
+    passes ``num_seats=2`` for the perfect-info 1v1 win-rate gate (rotate the focal
+    through BOTH seats, parity = 50%).
     """
     wins = 0
     games = 0
     for gi, tseed in enumerate(track_seeds):
         track = generate_track(tseed, _TIGHT_PARAMS)
-        for focal_seat in range(4):
+        for focal_seat in range(num_seats):
             agents: list[BaseAgent] = []
-            for seat in range(4):
+            for seat in range(num_seats):
                 agents.append(
                     make_focal() if seat == focal_seat else make_opponent()
                 )
@@ -388,7 +393,7 @@ def _seat_neutral_win_counts(
                 track,
                 agents,
                 logging_enabled=False,
-                seed=game_seed_base + gi * 4 + focal_seat,
+                seed=game_seed_base + gi * num_seats + focal_seat,
             )
             result = game.run()
             if _winner(result) == focal_seat:
@@ -403,15 +408,17 @@ def _seat_neutral_winrate(
     *,
     track_seeds: list[int],
     game_seed_base: int,
+    num_seats: int = 4,
 ) -> float:
-    """Seat-neutral win fraction of ``make_focal`` vs three ``make_opponent`` (4p).
+    """Seat-neutral win fraction of ``make_focal`` vs ``make_opponent``.
 
     Thin wrapper over :func:`_seat_neutral_win_counts` (the single source of truth
-    for the seat-rotation logic) returning the bare fraction the S2 gate prints.
+    for the seat-rotation logic) returning the bare fraction the S2/C6 gate prints.
     """
     wins, games = _seat_neutral_win_counts(
         make_focal, make_opponent,
         track_seeds=track_seeds, game_seed_base=game_seed_base,
+        num_seats=num_seats,
     )
     return wins / games if games else 0.0
 

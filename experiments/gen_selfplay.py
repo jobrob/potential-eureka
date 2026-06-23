@@ -589,6 +589,179 @@ def _generate_one_track(
     return finished, n_unencodable
 
 
+# ---------------------------------------------------------------------------
+# Sprint C6: the perfect-info 1v1 win/loss generator
+# ---------------------------------------------------------------------------
+
+
+def _winloss_z(state: GameState, learner_id: int, opponent_id: int) -> float:
+    """The learner's realized 1v1 outcome (``+1`` / ``−1`` / ``0``) at game end.
+
+    Delegates to ``mcts_agent._winloss_result`` so the backfilled training target
+    and the search leaf compute the IDENTICAL binary outcome (finish-order when a
+    seat crossed, else race-progress on the MAX_ROUNDS tie -- resolved-sub-decision
+    3, draw only on an exact progress tie).
+    """
+    from heat.agents.mcts_agent import _winloss_result
+
+    return _winloss_result(state, learner_id, opponent_id)
+
+
+def _make_opponent(opponent_snapshot: str | None):
+    """Build the opponent seat agent for net-vs-frozen 1v1 self-play, or ``None``.
+
+    ``None`` (net-vs-net) means BOTH seats are the current net (the search itself),
+    so no separate opponent agent is needed -- both seats are driven by the
+    learner's two-player search and both log. A non-None ``opponent_snapshot`` is a
+    fixed adversary: a ``FrozenSnapshotAgent`` path (a past best-of-gen checkpoint)
+    or one of the heuristic anchor sentinels ``"strong"`` / ``"weak"``.
+    """
+    if opponent_snapshot is None:
+        return None
+    if opponent_snapshot == "strong":
+        from heat.agents.strong_heuristic import StrongHeuristicAgent
+
+        return StrongHeuristicAgent(strength=2)
+    if opponent_snapshot == "weak":
+        from heat.agents.heuristic_agent import HeuristicAgent
+
+        return HeuristicAgent()
+    from heat.ml.training import FrozenSnapshotAgent
+
+    return FrozenSnapshotAgent(opponent_snapshot)
+
+
+def _generate_one_1v1(
+    track_seed: int,
+    split: str,
+    *,
+    game_seed: int,
+    agent: MCTSAgent,
+    opponent,
+    buf: _SelfPlayBuffer,
+    log_seats: tuple[int, ...],
+    traj_greedy: bool = False,
+) -> tuple[bool, int]:
+    """Drive one perfect-info 1v1 self-play game, logging a target per learner move.
+
+    The two-seat analogue of :func:`_generate_one_track` (Sprint C6): a 2-player
+    game is driven turn-by-turn; at every searched decision owned by a seat in
+    ``log_seats`` (with ``> 1`` legal action) a **two-player minimax** MCTS is
+    rooted at that decision (``MCTSConfig.two_player`` on, ``opponent_id`` set to
+    the other seat), the ``(obs, π, mask)`` target is logged, and the searched/
+    sampled action is played. Decisions owned by a non-logged seat (a frozen
+    snapshot / heuristic anchor when self-play is net-vs-frozen) are resolved by
+    ``opponent``; degenerate decisions (``mask.sum() <= 1``) are auto-resolved and
+    not logged.
+
+    ``log_seats`` is ``(0, 1)`` for net-vs-net (BOTH seats are the current net, so
+    both log -- each from its own mover's perspective) or ``(0,)`` for
+    net-vs-frozen (only the current-net seat's rows are training targets; the
+    snapshot is a fixed adversary, not a learner).
+
+    On completion every row's ``z`` is backfilled to the realized 1v1 outcome
+    (``+1`` / ``−1`` / ``0``) FROM THAT ROW'S MOVER's perspective -- always defined
+    (the game always finishes, or MAX_ROUNDS decides on progress), so no episode
+    or row is dropped. Returns ``(finished, n_unencodable)``; ``finished`` is True
+    for every 1v1 game (the value target is always defined -- the structural win).
+    """
+    track = generate_track(track_seed, _TIGHT_PARAMS)
+    state = GameState.create(track, 2, logging_enabled=True, seed=game_seed)
+    for player in state.players:
+        player.lap = 1  # mirror Game.__init__ / HeatEnv.reset
+
+    # Per-row mover seat, so z is backfilled from the right perspective.
+    row_ids: list[int] = []
+    row_movers: list[int] = []
+    n_unencodable = 0
+    agent._ply = 0
+
+    gen = run_round_driver(state)
+    send_value: object = None
+
+    while True:
+        if state.is_game_over or state.round_num > MAX_ROUNDS:
+            break
+        try:
+            decision = gen.send(send_value)
+        except StopIteration:
+            if state.is_game_over or state.round_num > MAX_ROUNDS:
+                break
+            gen = run_round_driver(state)
+            send_value = None
+            continue
+
+        seat = decision.player_id
+        if seat not in log_seats:
+            # A non-logged seat (frozen snapshot / anchor): resolve via opponent.
+            from heat.ml.opponents import opponent_action
+
+            send_value = opponent_action(opponent, decision, state)
+            continue
+
+        mask = legal_action_mask(decision, state)
+        n_legal = int(mask.sum())
+        if n_legal <= 1:
+            send_value = _lone_legal_action(decision, state, mask)
+            continue
+
+        opp_id = 1 - seat  # the other seat in the 1v1
+        obs = encode_observation(state, seat, decision)
+        # Point the two-player search at THIS mover (the opponent is the other
+        # seat); the search reads the same net's prior from each seat's obs.
+        agent.config.two_player = True
+        agent.config.opponent_id = opp_id
+        pi, acted_action = _search_visit_distribution(
+            agent, state, decision, traj_greedy=traj_greedy
+        )
+        agent._ply += 1
+
+        try:
+            acted_flat = encode_action_index(decision, acted_action)
+            encodable = 0 <= acted_flat < ACTION_DIM and bool(mask[acted_flat])
+        except (ValueError, IndexError):
+            encodable = False
+        if not encodable:
+            n_unencodable += 1
+            send_value = acted_action
+            continue
+
+        support = pi > 0.0
+        if support.any():
+            if not bool(mask[support].all()):
+                raise AssertionError(
+                    f"pi support escapes the mask for {decision.kind} "
+                    "(codec drift / candidate-mask mismatch)"
+                )
+            s = float(pi.sum())
+            if not (abs(s - 1.0) < 1e-6):
+                raise AssertionError(f"pi does not sum to 1 ({s}) for {decision.kind}")
+        else:
+            send_value = acted_action
+            continue
+
+        row_id = buf.add(
+            obs=obs,
+            pi=pi.astype(np.float32),
+            mask=mask,
+            kind=_KIND_TO_INT[decision.kind],
+            round_num=state.round_num,
+            track_seed=track_seed,
+            split=split,
+        )
+        row_ids.append(row_id)
+        row_movers.append(seat)
+        send_value = acted_action
+
+    # Backfill the win/loss z from each row's own mover's perspective. The 1v1
+    # game is ALWAYS decided (finish order, or MAX_ROUNDS progress), so every row
+    # gets a defined ±1/0 target -- no episode/row drop (the structural win).
+    opp_of = {0: 1, 1: 0}
+    for row_id, mover in zip(row_ids, row_movers):
+        buf.z[row_id] = float(_winloss_z(state, mover, opp_of[mover]))
+    return True, n_unencodable
+
+
 def _lone_legal_action(decision: Decision, state: GameState, mask: np.ndarray) -> object:
     """The single legal action for a degenerate decision (mask.sum() <= 1).
 
@@ -610,12 +783,18 @@ def generate_dataset(args: argparse.Namespace) -> dict:
     _assert_seed_bands_disjoint(args.tracks + args.val_tracks)
 
     buf = _SelfPlayBuffer()
+    # Sprint C6: the perfect-info 1v1 win/loss mode (default OFF == the C2-C5 solo
+    # generator, byte-for-byte). When on, the generator drives 2-seat games with
+    # the two-player minimax search and backfills z = the realized ±1/0 outcome.
+    two_player = bool(getattr(args, "two_player", False))
+    opponent_snapshot = getattr(args, "opponent_snapshot", None)
     cfg = MCTSConfig(
         n_simulations=args.sims,
         dirichlet_eps=args.dirichlet_eps,
         dirichlet_alpha=args.dirichlet_alpha,
         temperature_moves=args.temperature_moves,
         root_selector=getattr(args, "root_selector", "puct"),
+        two_player=two_player,
     )
     # C5 trajectory-greediness knob (the data-starvation fix): drive the *acted*
     # trajectory greedily so fewer races spin to MAX_ROUNDS, while the logged pi
@@ -640,6 +819,10 @@ def generate_dataset(args: argparse.Namespace) -> dict:
     races_finished_by_split = {"train": 0, "val": 0}
     races_total_by_split = {"train": 0, "val": 0}
 
+    # Sprint C6: net-vs-net logs BOTH seats; net-vs-frozen-snapshot logs only the
+    # current-net seat (the snapshot is a fixed adversary, not a learner).
+    log_seats = (0,) if (two_player and opponent_snapshot) else (0, 1)
+
     for split, base, n_tracks in bands:
         for i in range(n_tracks):
             track_seed = base + i
@@ -648,14 +831,27 @@ def generate_dataset(args: argparse.Namespace) -> dict:
             agent = MCTSAgent(
                 model_path=args.model, config=cfg, seed=args.seed + i, name="MCTSGen"
             )
-            finished, n_unenc = _generate_one_track(
-                track_seed,
-                split,
-                game_seed=args.game_seed + i,
-                agent=agent,
-                buf=buf,
-                traj_greedy=traj_greedy,
-            )
+            if two_player:
+                opponent = _make_opponent(opponent_snapshot)
+                finished, n_unenc = _generate_one_1v1(
+                    track_seed,
+                    split,
+                    game_seed=args.game_seed + i,
+                    agent=agent,
+                    opponent=opponent,
+                    buf=buf,
+                    log_seats=log_seats,
+                    traj_greedy=traj_greedy,
+                )
+            else:
+                finished, n_unenc = _generate_one_track(
+                    track_seed,
+                    split,
+                    game_seed=args.game_seed + i,
+                    agent=agent,
+                    buf=buf,
+                    traj_greedy=traj_greedy,
+                )
             races_total += 1
             races_total_by_split[split] += 1
             total_unencodable += n_unenc
@@ -697,8 +893,16 @@ def generate_dataset(args: argparse.Namespace) -> dict:
             f"shape mismatch: obs {obs.shape} pi {pi.shape} mask {mask.shape} vs "
             f"contract OBS_DIM={OBS_DIM} ACTION_DIM={ACTION_DIM}"
         )
-    # z = −rounds_remaining is <= 0 by construction (rounds-remaining >= 0).
-    if z.max() > 1e-6:
+    # z-target sanity. Sprint C6: the win/loss z is bounded ``[−1, 1]`` (so the
+    # old positive-z-is-a-bug assertion is INVERTED to a bound check). The solo
+    # ``z = −rounds_remaining`` path keeps the ``z <= 0`` invariant unchanged.
+    if two_player:
+        if z.min() < -1.0 - 1e-6 or z.max() > 1.0 + 1e-6:
+            raise AssertionError(
+                f"win/loss z out of bounds (min={z.min()}, max={z.max()}): "
+                "z must be the ±1/0 1v1 outcome in [−1, 1]"
+            )
+    elif z.max() > 1e-6:
         raise AssertionError(
             f"positive z target ({z.max()}): a value-target labeling bug "
             "(z must be −rounds_remaining <= 0)"
@@ -721,8 +925,13 @@ def generate_dataset(args: argparse.Namespace) -> dict:
         "codec_version": CODEC_VERSION,
         "obs_dim": OBS_DIM,
         "action_dim": ACTION_DIM,
-        "num_players": 1,
-        "generator": "MCTSAgent (C1) with self-play exploration ON",
+        "num_players": 2 if two_player else 1,
+        "generator": (
+            "MCTSAgent (C6) perfect-info 1v1 win/loss self-play"
+            if two_player
+            else "MCTSAgent (C1) with self-play exploration ON"
+        ),
+        "value_target": "winloss" if two_player else "rounds",
         "prior_model": args.model,
         "search_config": {
             "n_simulations": cfg.n_simulations,
@@ -740,6 +949,8 @@ def generate_dataset(args: argparse.Namespace) -> dict:
             "gumbel_c_visit": cfg.gumbel_c_visit,
             "gumbel_c_scale": cfg.gumbel_c_scale,
             "traj_greedy": traj_greedy,
+            "two_player": two_player,
+            "opponent_snapshot": opponent_snapshot,
         },
         "selfplay_seed_base": _SELFPLAY_SEED_BASE,
         "train_tracks": args.tracks,
@@ -860,6 +1071,16 @@ def main() -> None:
                              "greedily (most-visited searched edge) so fewer races "
                              "spin out; the logged pi target is unchanged (default "
                              "OFF = the C4 exploratory trajectory)")
+    parser.add_argument("--two-player", action="store_true",
+                        help="C6: perfect-info 1v1 win/loss self-play. Drives 2-seat "
+                             "games with the two-player minimax search and backfills "
+                             "z = the realized ±1/0 outcome (always defined). Default "
+                             "OFF = the C2-C5 solo generator")
+    parser.add_argument("--opponent-snapshot", type=str, default=None,
+                        help="C6: opponent seat for net-vs-frozen 1v1 (a "
+                             "FrozenSnapshotAgent checkpoint path, or 'strong'/'weak' "
+                             "for the heuristic anchors). Omit for net-vs-net (both "
+                             "seats are the current net and both log)")
     parser.add_argument("--seed", type=int, default=0,
                         help="base agent search seed (mixed per track)")
     parser.add_argument("--game-seed", type=int, default=8000,

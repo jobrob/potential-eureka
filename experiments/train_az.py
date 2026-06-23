@@ -72,6 +72,22 @@ from heat.ml.training import save_checkpoint
 _KIND_NAMES = {0: "GEAR", 1: "CARDS", 2: "REACT", 3: "SLIPSTREAM", 4: "DISCARD"}
 _CARDS_KIND = 1
 
+
+def _value_pred(policy, obs: "torch.Tensor", value_mode: str) -> "torch.Tensor":
+    """The value-head prediction the loss is computed against (shape ``(B,)``).
+
+    Sprint C6: ``value_mode="rounds"`` (default) returns the RAW critic scalar --
+    the C2-C5 ``−rounds_remaining`` regression, byte-for-byte. ``value_mode=
+    "winloss"`` squashes it through ``tanh`` so the head predicts an expected
+    outcome in ``[−1, 1]`` (AlphaZero's own ``v ∈ [−1, 1]`` value), matched against
+    the ±1 ``z`` by MSE. The NetAdapter applies the SAME ``tanh`` at inference for a
+    winloss checkpoint, so the search consumes a bounded P(win)-like quantity.
+    """
+    v = policy.predict_values(obs).reshape(-1)
+    if value_mode == "winloss":
+        return torch.tanh(v)
+    return v
+
 #: The critic-side module prefixes (share_features_extractor=False makes these
 #: byte-disjoint from the actor's). Identical to mint_warm_prior._CRITIC_PREFIXES
 #: and train_value._critic_parameters -- the one warm-start machinery C5 lifts and
@@ -188,12 +204,16 @@ def _anchor_loss(policy, warm_critic_sd: dict, device: str) -> torch.Tensor:
     return torch.stack(terms).sum()
 
 
-def _load_dataset(path: str) -> dict:
+def _load_dataset(path: str, value_mode: str = "rounds") -> dict:
     """Load the self-play ``.npz`` and validate it against the live codec.
 
     Fails fast (like ``train_bc`` / ``train_value`` / ``MLAgent._validate_meta``)
     if the dataset was generated against a different OBS_DIM / ACTION_DIM /
     codec_version, so a stale dataset cannot silently train a garbage net.
+
+    ``value_mode`` selects the ``z`` invariant: ``"rounds"`` (default) requires
+    ``z <= 0`` (``−rounds_remaining``); ``"winloss"`` (Sprint C6) requires the
+    bounded ``z ∈ [−1, 1]`` (the ±1/0 1v1 outcome).
     """
     data = np.load(path)
     obs = data["obs"].astype(np.float32)
@@ -228,7 +248,13 @@ def _load_dataset(path: str) -> dict:
     support_in_mask = ((pi > 0) & ~mask).sum()
     if support_in_mask:
         raise ValueError(f"{int(support_in_mask)} pi entries lie outside the mask")
-    if z.max() > 1e-6:
+    if value_mode == "winloss":
+        if z.min() < -1.0 - 1e-6 or z.max() > 1.0 + 1e-6:
+            raise ValueError(
+                f"win/loss z out of [-1, 1] (min={z.min()}, max={z.max()}); "
+                "the dataset must carry the ±1/0 1v1 outcome"
+            )
+    elif z.max() > 1e-6:
         raise ValueError(
             f"{int((z > 1e-6).sum())} rows have positive z (z must be "
             "-rounds_remaining <= 0)"
@@ -273,6 +299,36 @@ def _policy_ce(log_probs: torch.Tensor, pi: torch.Tensor) -> torch.Tensor:
     return -term.sum(dim=1)
 
 
+def _value_calibration(pred_win: np.ndarray, won: np.ndarray, n_buckets: int = 10) -> dict:
+    """Reliability read for the win/loss value head (Sprint C6's "number to watch").
+
+    Buckets the predicted P(win) ``(tanh(v)+1)/2 ∈ [0,1]`` into ``n_buckets`` equal
+    bins and compares each bin's mean prediction to the realized win frequency
+    (``won ∈ {0,1}``, the row's mover winning its 1v1). The scalar ``ece`` is the
+    sample-weighted mean ``|mean_pred − win_freq|`` over non-empty bins (Expected
+    Calibration Error) -- lower is better-calibrated, and a value head that
+    calibrates and TIGHTENS over generations is read (c) of the moving-loop prize.
+    The per-bin table is returned for the reliability curve.
+    """
+    pred_win = np.clip(pred_win, 0.0, 1.0)
+    edges = np.linspace(0.0, 1.0, n_buckets + 1)
+    bins = np.clip(np.digitize(pred_win, edges[1:-1]), 0, n_buckets - 1)
+    table = []
+    ece = 0.0
+    n = len(pred_win)
+    for b in range(n_buckets):
+        sel = bins == b
+        cnt = int(sel.sum())
+        if cnt == 0:
+            continue
+        mean_pred = float(pred_win[sel].mean())
+        win_freq = float(won[sel].mean())
+        ece += cnt / n * abs(mean_pred - win_freq)
+        table.append({"bin": b, "n": cnt, "mean_pred": mean_pred,
+                      "win_freq": win_freq})
+    return {"ece": ece, "table": table}
+
+
 def _evaluate(
     policy,
     obs: torch.Tensor,
@@ -282,12 +338,17 @@ def _evaluate(
     kind: np.ndarray,
     device: str,
     batch: int = 4096,
+    value_mode: str = "rounds",
 ) -> dict:
-    """Policy CE + top-1 agreement (overall & CARDS) + value MSE/MAE, no grad.
+    """Policy CE + top-1 agreement (overall & CARDS) + value MSE + the value read.
 
     Top-1 agreement compares the policy argmax (the action ``MLAgent`` would emit)
     against ``argmax π`` (the search's most-visited / acted target) -- the analog
     of BC accuracy, but against the visit target rather than a hard label.
+
+    The value read is mode-specific: ``"rounds"`` reports ``v_mae_rounds`` (C5's
+    first-class number); ``"winloss"`` reports the value-head **calibration** (ECE,
+    Sprint C6's analogue) on the bounded ``tanh`` head.
     """
     policy.set_training_mode(False)
     n = obs.shape[0]
@@ -296,7 +357,7 @@ def _evaluate(
     cards_correct = 0
     cards_total = 0
     total_v_se = 0.0
-    pred_rounds = np.empty(n, dtype=np.float64)
+    pred_v = np.empty(n, dtype=np.float64)
     with torch.no_grad():
         for start in range(0, n, batch):
             sl = slice(start, start + batch)
@@ -315,25 +376,40 @@ def _evaluate(
             is_cards = torch.as_tensor(kslice == _CARDS_KIND, device=device)
             cards_correct += int((correct & is_cards).sum())
             cards_total += int(is_cards.sum())
-            v = policy.predict_values(ob).reshape(-1)
+            v = _value_pred(policy, ob, value_mode)
             total_v_se += float(((v - zt) ** 2).sum())
-            pred_rounds[sl] = (-v).cpu().numpy().astype(np.float64)
+            pred_v[sl] = v.cpu().numpy().astype(np.float64)
 
-    rounds_remaining = (-z.cpu().numpy()).astype(np.float64)
-    v_mae_rounds = float(np.abs(pred_rounds - rounds_remaining).mean())
-    return {
+    zc = z.cpu().numpy().astype(np.float64)
+    out = {
         "ce": total_ce / n,
         "acc": total_correct / n,
         "cards_acc": (cards_correct / cards_total) if cards_total else float("nan"),
         "cards_n": cards_total,
         "v_mse": total_v_se / n,
-        "v_mae_rounds": v_mae_rounds,
     }
+    if value_mode == "winloss":
+        # tanh head -> predicted P(win) = (v+1)/2; realized win = (z>0). Rows with
+        # z==0 (the rare exact tie) are dropped from the calibration count.
+        nonzero = zc != 0.0
+        cal = _value_calibration((pred_v[nonzero] + 1.0) / 2.0,
+                                 (zc[nonzero] > 0).astype(np.float64))
+        out["v_calibration_ece"] = cal["ece"]
+        out["v_calibration_table"] = cal["table"]
+        out["v_mae_rounds"] = float("nan")  # not meaningful in the win/loss frame
+    else:
+        pred_rounds = -pred_v
+        rounds_remaining = -zc
+        out["v_mae_rounds"] = float(np.abs(pred_rounds - rounds_remaining).mean())
+    return out
 
 
 def train_az(args: argparse.Namespace) -> dict:
     """Train the AZ policy+value net and save it as a MaskablePPO checkpoint."""
-    ds = _load_dataset(args.data)
+    value_mode = getattr(args, "value_mode", "rounds")
+    if value_mode not in ("rounds", "winloss"):
+        raise ValueError(f"value_mode must be 'rounds' or 'winloss', got {value_mode!r}")
+    ds = _load_dataset(args.data, value_mode=value_mode)
     train_idx, val_idx = _split_indices(ds["split"])
     if len(train_idx) == 0:
         raise RuntimeError("no training rows in dataset")
@@ -463,7 +539,7 @@ def train_az(args: argparse.Namespace) -> dict:
 
             log_probs = _masked_log_probs(policy, ob, mk)
             ce = _policy_ce(log_probs, pt).mean()
-            v = policy.predict_values(ob).reshape(-1)
+            v = _value_pred(policy, ob, value_mode)
             mse = ((v - zt) ** 2).mean()
             loss = ce + args.c_v * mse
             if use_l2_anchor:
@@ -480,7 +556,8 @@ def train_az(args: argparse.Namespace) -> dict:
         va_metrics = None
         if have_val:
             va_metrics = _evaluate(
-                policy, va_obs, va_pi, va_mask, va_z, va_kind, device
+                policy, va_obs, va_pi, va_mask, va_z, va_kind, device,
+                value_mode=value_mode,
             )
             candidate = va_metrics["ce"] + args.c_v * va_metrics["v_mse"]
             if candidate < best_metric:
@@ -496,19 +573,24 @@ def train_az(args: argparse.Namespace) -> dict:
 
         is_print_epoch = (epoch + 1) % args.eval_every == 0 or epoch == args.epochs - 1
         if is_print_epoch:
-            tr_m = _evaluate(policy, tr_obs, tr_pi, tr_mask, tr_z, tr_kind, device)
+            tr_m = _evaluate(policy, tr_obs, tr_pi, tr_mask, tr_z, tr_kind, device,
+                             value_mode=value_mode)
             vp = va_metrics if va_metrics is not None else {
                 "ce": float("nan"), "acc": float("nan"), "cards_acc": float("nan"),
                 "cards_n": 0, "v_mse": float("nan"), "v_mae_rounds": float("nan"),
             }
             history.append({"epoch": epoch + 1, "train": tr_m, "val": vp})
+            if value_mode == "winloss":
+                val_read = (f"ece={vp.get('v_calibration_ece', float('nan')):.3f}")
+            else:
+                val_read = f"vmae_rounds={vp['v_mae_rounds']:.2f}"
             print(
                 f"epoch {epoch + 1:3d}  "
                 f"train ce={tr_m['ce']:.4f} acc={tr_m['acc']:.3f} "
                 f"vmse={tr_m['v_mse']:.3f}  |  "
                 f"val ce={vp['ce']:.4f} acc={vp['acc']:.3f} "
                 f"cards_acc={vp['cards_acc']:.3f} vmse={vp['v_mse']:.3f} "
-                f"vmae_rounds={vp['v_mae_rounds']:.2f}"
+                f"{val_read}"
             )
 
         if early_stop_enabled and epochs_since_improve >= args.patience:
@@ -532,10 +614,21 @@ def train_az(args: argparse.Namespace) -> dict:
         model,
         args.out,
         track_name="generated-az",
-        num_players=1,
+        num_players=2 if value_mode == "winloss" else 1,
         seed=args.seed,
         ppo_config=cfg,
     )
+    # Sprint C6: record value_mode in the sidecar so the NetAdapter applies the
+    # matching value transform at inference (``tanh`` for a winloss checkpoint, so
+    # the search consumes a bounded [-1,1] P(win)). Additive -- the contract
+    # tripwire ignores it, so a "rounds" checkpoint that omits the field still
+    # loads as the C2-C5 raw-critic path.
+    if value_mode != "rounds":
+        with open(sidecar, "r", encoding="utf-8") as fh:
+            _meta = json.load(fh)
+        _meta["value_mode"] = value_mode
+        with open(sidecar, "w", encoding="utf-8") as fh:
+            json.dump(_meta, fh, indent=2, sort_keys=True)
 
     final = history[-1] if history else {}
     summary = {
@@ -559,8 +652,13 @@ def train_az(args: argparse.Namespace) -> dict:
         "warm_value": warm_value,
         "critic_anchor": critic_anchor,
         "c_anchor": c_anchor,
+        "value_mode": value_mode,
         "v_mae_rounds": (best_val.get("v_mae_rounds", float("nan"))
                          if best_val else float("nan")),
+        # C6: the win/loss value-head calibration (the "number to watch" in the
+        # win/loss frame); NaN in the rounds frame.
+        "v_calibration_ece": (best_val.get("v_calibration_ece", float("nan"))
+                              if best_val else float("nan")),
     }
     return summary
 
@@ -582,6 +680,12 @@ def main() -> None:
     parser.add_argument("--patience", type=int, default=8,
                         help="early-stop if val loss has not improved for N epochs; "
                              "0 or >= epochs disables (still restores best-val)")
+    parser.add_argument("--value-mode", type=str, default="rounds",
+                        choices=["rounds", "winloss"],
+                        help="C6: 'rounds' (default) regresses the raw critic to "
+                             "z=−rounds_remaining (the C2-C5 path, byte-for-byte); "
+                             "'winloss' squashes the head through tanh and fits the "
+                             "±1 1v1 outcome by MSE, reporting value-head calibration")
     parser.add_argument("--net", type=str, default="default",
                         choices=["default", "small", "large"])
     parser.add_argument("--device", type=str, default="auto",

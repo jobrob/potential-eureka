@@ -97,6 +97,47 @@ from heat.agents.search_agent import SearchProfile
 
 
 # ---------------------------------------------------------------------------
+# Sprint C6: the zero-sum 1v1 win/loss outcome (shared by the search leaf and the
+# gen_selfplay z backfill so the two agree on the same binary result)
+# ---------------------------------------------------------------------------
+
+
+def _winloss_result(state: GameState, learner_id: int, opponent_id: int) -> float:
+    """The learner's zero-sum 1v1 outcome at ``state``: ``+1`` / ``−1`` / ``0``.
+
+    Decided by **finish order** when at least one seat has finished (the seat with
+    the smaller ``finish_order`` crossed first and wins; a finished seat beats an
+    unfinished one). When NEITHER has finished -- the ``MAX_ROUNDS`` tie case --
+    the further-along seat wins by **race progress** (lap-aware spaces travelled,
+    resolved-sub-decision-3), with ``0`` only on an exact progress tie. Pure
+    function of ``(state, learner_id, opponent_id)`` so the search leaf and the
+    training target backfill compute the identical outcome.
+    """
+    learner = state.get_player(learner_id)
+    opp = state.get_player(opponent_id)
+
+    if learner.finished or opp.finished:
+        if learner.finished and opp.finished:
+            # Both crossed: the smaller finish_order finished first (wins).
+            if learner.finish_order < opp.finish_order:
+                return 1.0
+            if learner.finish_order > opp.finish_order:
+                return -1.0
+            return 0.0
+        # Exactly one finished -- it wins (a finished seat beats an unfinished one).
+        return 1.0 if learner.finished else -1.0
+
+    # Neither finished (MAX_ROUNDS tie): decide by race progress, draw on a tie.
+    lp = learner.lap * state.track.length + learner.position
+    op = opp.lap * state.track.length + opp.position
+    if lp > op:
+        return 1.0
+    if lp < op:
+        return -1.0
+    return 0.0
+
+
+# ---------------------------------------------------------------------------
 # C0 chosen constants (docs/.../C0-findings.md "The chosen constant set")
 # ---------------------------------------------------------------------------
 
@@ -200,6 +241,22 @@ class MCTSConfig:
     #: default acting rule is most-visited (``act_on_q=False``); ``argmax Q̂`` is
     #: a deterministic-eval option. Both are deterministic with noise off.
     act_on_q: bool = False
+
+    # --- two-player perfect-info minimax seam (Sprint C6) ---
+    #: ``False`` (default) keeps the C0-C5 solo search byte-for-byte: every
+    #: yielded :class:`Decision` is the learner's (any non-learner decision in the
+    #: replay is auto-resolved with a legal default). ``True`` activates the
+    #: perfect-information two-player minimax: the opponent's decisions are NOT
+    #: auto-resolved -- they become DECISION nodes with ``to_move = opponent_id``,
+    #: branched on the opponent's own candidate set with the SAME net's prior read
+    #: from the opponent's observation, and the backup negates the increment at
+    #: opponent-owned edges (zero-sum negamax stored in the learner's frame). The
+    #: chance nodes, interior PUCT, Q-norm, and Gumbel root selector are unchanged.
+    two_player: bool = False
+    #: The opponent seat id for the two-player minimax (only consulted when
+    #: ``two_player`` is on). Defaults to ``1`` (the other seat in a 1v1 game);
+    #: the learner seat is the ``player_id`` the search is rooted at.
+    opponent_id: int = 1
 
     # --- root action selector seam (README §3 RootActionSelector; Sprint C4) ---
     #: ``"puct"`` (default) is the byte-for-byte-unchanged C1/C2/C3 path: log-PUCT
@@ -313,8 +370,29 @@ class EngineTransitionModel:
     (deferred ``Node`` impl) reintroduces that path behind the seam.
     """
 
-    def __init__(self, player_id: int) -> None:
+    def __init__(
+        self,
+        player_id: int,
+        *,
+        two_player: bool = False,
+        opponent_id: int = 1,
+    ) -> None:
         self.player_id = player_id
+        #: Sprint C6: in two-player perfect-info mode the opponent's decisions are
+        #: ALSO searched (not auto-resolved), so the replay stops at -- and the
+        #: ``action_path`` records -- decisions for either searched seat. With
+        #: ``two_player=False`` (solo) only ``player_id`` is searched (the C0-C5
+        #: path, byte-for-byte).
+        self.two_player = two_player
+        self.opponent_id = opponent_id
+        if two_player:
+            self._searched: tuple[int, ...] = (player_id, opponent_id)
+        else:
+            self._searched = (player_id,)
+
+    def _is_searched(self, decision: Decision) -> bool:
+        """True iff ``decision``'s owner is a seat the tree branches on."""
+        return decision.player_id in self._searched
 
     # -- helpers --------------------------------------------------------
 
@@ -389,15 +467,18 @@ class EngineTransitionModel:
         try:
             decision = next(gen)
             while True:
-                if decision.player_id == self.player_id and path_i < len(path):
-                    # Force the next recorded learner action (re-validated; a
-                    # stale forced action falls through to a legal default).
+                if self._is_searched(decision) and path_i < len(path):
+                    # Force the next recorded searched action (re-validated; a
+                    # stale forced action falls through to a legal default). In
+                    # two-player mode the path interleaves BOTH searched seats'
+                    # actions in driver order, so the index advances on every
+                    # searched decision regardless of which seat it belongs to.
                     action = self._coerce_action(decision, path[path_i])
                     path_i += 1
                     decision = gen.send(action)
                     continue
-                if path_i >= len(path):
-                    # Path exhausted: this is the next decision to branch on.
+                if path_i >= len(path) and self._is_searched(decision):
+                    # Path exhausted at a searched decision: branch here.
                     is_chance = clone.round_num > start_round
                     return StepResult(
                         state=clone,
@@ -405,14 +486,15 @@ class EngineTransitionModel:
                         is_chance=is_chance,
                         terminal=False,
                     )
-                # A decision for a non-learner before the path is exhausted: in
-                # solo this never happens (no opponents). Defensive: auto-resolve
-                # with a legal default so the replay still advances.
+                # A decision for a NON-searched seat (an unsearched opponent in
+                # solo / 4p backdrop): auto-resolve with a legal default so the
+                # replay advances. The two searched seats in C6 are never reached
+                # here (they are searched), so this is the solo path unchanged.
                 decision = gen.send(self._legal_default(decision))
         except StopIteration:
-            # Round ended before another learner decision (or the game finished).
+            # Round ended before another searched decision (or the game finished).
             # Continue into the next round(s) until we either reach the next
-            # learner decision (path already exhausted => branch there) or the
+            # searched decision (path already exhausted => branch there) or the
             # game is over. The round-boundary crossing is the chance edge.
             return self._continue_after_round(clone, start_round)
 
@@ -430,9 +512,9 @@ class EngineTransitionModel:
             gen = run_round_driver(clone)
             try:
                 decision = next(gen)
-                while decision.player_id != self.player_id:
+                while not self._is_searched(decision):
                     decision = gen.send(self._legal_default(decision))
-                # First learner decision of the new round -> chance edge.
+                # First searched decision of the new round -> chance edge.
                 return StepResult(
                     state=clone,
                     decision=decision,
@@ -518,6 +600,12 @@ class NetAdapter:
     def __init__(self, model_path: str) -> None:
         self.model_path = model_path
         self._model = None
+        #: Sprint C6: the value transform read from the checkpoint sidecar's
+        #: ``value_mode``. ``"rounds"`` (default / absent) returns the raw critic
+        #: scalar (the C2-C5 −rounds_remaining quantity, byte-for-byte); ``"winloss"``
+        #: squashes it through ``tanh`` so the leaf value is the bounded [-1,1]
+        #: expected outcome the trainer fit -- resolved lazily on first model load.
+        self._value_mode: str | None = None
 
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
@@ -553,6 +641,9 @@ class NetAdapter:
                 f"Checkpoint {self.model_path!r} is incompatible with the current "
                 "ML contract (stale model vs drifted codec): " + "; ".join(mismatches)
             )
+        # Sprint C6: read the (additive) value_mode so leaf_value applies the
+        # matching transform. Absent -> "rounds" (the C2-C5 raw-critic path).
+        self._value_mode = str(meta.get("value_mode", "rounds"))
 
     def _get_model(self):
         if self._model is None:
@@ -584,12 +675,18 @@ class NetAdapter:
         return np.asarray(probs.detach()).reshape(-1)
 
     def leaf_value(self, obs: np.ndarray) -> float:
-        """Net value head on a leaf state (``−rounds_remaining``, higher-better).
+        """Net value head on a leaf state (higher-is-better).
 
-        Returns the critic scalar AS-IS (the A1/A2 sign convention is
-        artifact-authoritative: the net regresses ``−rounds_remaining`` so
-        ``predict_values`` already emits the higher-is-better quantity; a second
-        negation would flip it). Identical to ``LookaheadAgent._value_leaf``.
+        ``value_mode="rounds"`` (default) returns the critic scalar AS-IS (the
+        A1/A2 sign convention is artifact-authoritative: the net regresses
+        ``−rounds_remaining`` so ``predict_values`` already emits the
+        higher-is-better quantity; a second negation would flip it). Identical to
+        ``LookaheadAgent._value_leaf``.
+
+        ``value_mode="winloss"`` (Sprint C6) squashes the raw critic through
+        ``tanh`` -- the SAME transform ``train_az`` fit the ±1 outcome under -- so
+        the leaf is a bounded ``[−1, 1]`` learner-frame expected outcome the
+        two-player minimax consumes directly.
         """
         import torch
 
@@ -597,6 +694,8 @@ class NetAdapter:
         ob = torch.as_tensor(np.asarray(obs, dtype=np.float32)).reshape(1, -1)
         with torch.no_grad():
             v = model.policy.predict_values(ob)
+            if self._value_mode == "winloss":
+                v = torch.tanh(v)
         return float(np.asarray(v.detach()).reshape(-1)[0])
 
 
@@ -925,7 +1024,13 @@ class MCTSAgent(BaseAgent):
         assert decision is not None
         actions = self._candidate_actions(decision, node.state)
 
-        obs = encode_observation(node.state, self.to_move_pid, decision)
+        # Sprint C6: the prior + obs are read from the SEAT THAT MOVES at this node
+        # (``node.to_move``), not always the learner. In solo this is always the
+        # learner (``to_move_pid``); in the two-player minimax an opponent decision
+        # node reads the SAME net's prior from the opponent's own observation
+        # (perfect information -- the opponent's hand is visible).
+        mover = node.to_move
+        obs = encode_observation(node.state, mover, decision)
         mask = legal_action_mask(decision, node.state)
         probs = self._get_net().policy_prior(obs, mask)  # type: ignore[attr-defined]
 
@@ -1282,8 +1387,15 @@ class MCTSAgent(BaseAgent):
         c = self._c_puct(node.n)
         sqrt_total = math.sqrt(node.n)
 
-        # FPU baseline: the parent's own normalized value.
-        parent_q_norm = self._normalize_q(node.value if node.n == 0 else node.value)
+        # FPU baseline: the parent's own normalized value, taken in the MOVER's
+        # frame so it is on the same scale as the (already-mover-frame) edge Qs.
+        # Sprint C6: ``node.value`` is stored in the learner's frame, so at an
+        # opponent node the mover-frame baseline is its negation (negamax). Solo
+        # has no opponent node, so this is ``node.value`` byte-for-byte.
+        node_value = node.value
+        if cfg.two_player and node.to_move == cfg.opponent_id:
+            node_value = -node_value
+        parent_q_norm = self._normalize_q(node_value)
 
         best_edge = node.edges[0]
         best_score = -math.inf
@@ -1402,12 +1514,16 @@ class MCTSAgent(BaseAgent):
         # Deterministic intra-round edge -> next DECISION node, SAME round: the
         # advanced ``state`` is used for obs/prior/leaf, but the replay anchor stays
         # the shared round-start clone so model.step replays from a clean start.
+        # Sprint C6: the child's ``to_move`` is the SEAT THAT OWNS the next decision
+        # (the learner in solo; either seat in the two-player minimax) -- this is
+        # what makes ``_backup`` negate at opponent plies and ``_edges_for`` read
+        # the opponent's prior.
         return Node(
             kind=NodeKind.DECISION,
             state=res.state,
             round_start=node.round_start,
             action_path=node.action_path + (edge.action,),
-            to_move=self.to_move_pid,
+            to_move=res.decision.player_id if res.decision is not None else self.to_move_pid,
             decision=res.decision,
             own_spun=node.own_spun or own_spun,
         )
@@ -1450,7 +1566,7 @@ class MCTSAgent(BaseAgent):
             kind=NodeKind.DECISION,
             state=res.state,
             action_path=(),
-            to_move=self.to_move_pid,
+            to_move=res.decision.player_id if res.decision is not None else self.to_move_pid,
             decision=res.decision,
             own_spun=node.own_spun,
         )
@@ -1518,7 +1634,9 @@ class MCTSAgent(BaseAgent):
         return value
 
     def _evaluate_leaf(self, node: Node) -> float:
-        """Leaf value with the S1 corner discipline (§4.4).
+        """Leaf value, ALWAYS in the LEARNER's frame (``to_move_pid``).
+
+        Solo (``two_player=False``, the C0-C5 frame) -- the §4.4 S1 discipline:
 
         * Spun forced move (``own_spun``): floored at ``_pre_spin_progress`` and
           the net value is NOT consulted -- depth-invariant, so a reckless line is
@@ -1526,10 +1644,21 @@ class MCTSAgent(BaseAgent):
         * Terminal: the terminal value (``−rounds_remaining`` is 0 at the finish).
         * Clean: the net value head on ``encode_observation(state, pid,
           decision=None)`` (returned as-is; the A1/A2 sign).
+
+        Two-player win/loss (``two_player=True``, Sprint C6):
+
+        * The own-spin floor is DROPPED -- a spin's cost is now expressed entirely
+          through whether it loses the race (the rounds-frame floor was a
+          ``−rounds_remaining``-scale device with no win/loss image).
+        * Terminal: ``+1`` if the LEARNER won the 1v1, ``−1`` if it lost, ``0`` on
+          an exact tie (:meth:`_terminal_value`).
+        * Clean: the net value head -- a learner-frame expected outcome in
+          ``[−1, 1]`` (a P(win) the search consumes). Read from the LEARNER's obs
+          so every leaf is on the one zero-sum scale ``_backup`` negates per ply.
         """
         if node.terminal:
             return self._terminal_value(node.state)
-        if node.own_spun:
+        if not self.config.two_player and node.own_spun:
             return self._pre_spin_progress(node.state)
         from heat.ml.features import encode_observation
 
@@ -1537,14 +1666,31 @@ class MCTSAgent(BaseAgent):
         return self._get_net().leaf_value(obs)  # type: ignore[attr-defined]
 
     def _terminal_value(self, state: GameState) -> float:
-        """Value of a finished state: ``−rounds_remaining`` is 0 at the finish.
+        """Value of a finished state, in the LEARNER's frame.
 
-        The race is over, so rounds-remaining is 0 -> value 0.0, the maximum (best)
-        on the higher-is-better ``−rounds_remaining`` scale. This keeps the
-        terminal value on the same scale as the net value head, so backups mix
-        cleanly.
+        Solo (``two_player=False``): ``−rounds_remaining`` is 0 at the finish, so
+        the value is ``0.0`` -- the maximum (best) on the higher-is-better
+        ``−rounds_remaining`` scale, on the same scale as the net value head so
+        backups mix cleanly (the C0-C5 frame, byte-for-byte).
+
+        Two-player win/loss (Sprint C6): ``+1`` if the learner finished ahead of
+        the opponent, ``−1`` if behind, ``0`` on an exact tie -- the cleanest
+        possible value signal, exact at the leaves the search can reach.
         """
-        return 0.0
+        if not self.config.two_player:
+            return 0.0
+        return self._winloss_outcome(state)
+
+    def _winloss_outcome(self, state: GameState) -> float:
+        """The learner's zero-sum 1v1 outcome at ``state`` (``+1`` / ``−1`` / ``0``).
+
+        Decided by finish order when available (the seat that crossed first wins),
+        else by race progress (further-along wins -- the resolved-sub-decision-3
+        MAX_ROUNDS tie rule), with ``0`` only on an exact progress tie. Mirrors the
+        ``gen_selfplay`` ``z`` backfill so the search leaf and the training target
+        agree on the same binary outcome.
+        """
+        return _winloss_result(state, self.to_move_pid, self.config.opponent_id)
 
     def _pre_spin_progress(self, state: GameState) -> float:
         """Depth-invariant progress floor for a line whose forced move spun.
@@ -1599,7 +1745,17 @@ class MCTSAgent(BaseAgent):
             parent.n += 1 if parent is not root else 0
             if isinstance(link, Edge):
                 link.n += 1
-                link.w += value
+                # Sprint C6 zero-sum negamax: ``value`` is stored in the LEARNER's
+                # frame. At an OPPONENT decision node the edge accumulates the
+                # NEGATED value, so ``edge.q()`` is the opponent's own (maximizing)
+                # frame -- which is exactly what makes the unchanged argmax-(Q̂+U)
+                # ``_select_edge`` minimax correctly without a separate min branch.
+                # Solo (``two_player=False``) never has an opponent node, so this
+                # is the C0-C5 backup byte-for-byte.
+                inc = value
+                if self.config.two_player and parent.to_move == self.config.opponent_id:
+                    inc = -value
+                link.w += inc
                 self._observe_q(link.q())
             else:  # ChanceOutcome
                 link.n += 1
