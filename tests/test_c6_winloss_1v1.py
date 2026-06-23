@@ -37,6 +37,11 @@ import pytest
 
 warnings.filterwarnings("ignore")
 
+# experiments/ is not a package; add it so the C6 loop deliverable imports by name.
+_EXP_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "experiments")
+if _EXP_DIR not in sys.path:
+    sys.path.insert(0, _EXP_DIR)
+
 from heat.engine import rules
 from heat.engine.driver import Decision, DecisionKind
 from heat.models.game_state import GameState
@@ -429,3 +434,45 @@ class TestValueMode:
         won = np.array([0.0, 1.0, 0.0, 1.0])
         cal = T._value_calibration(pred, won, n_buckets=10)
         assert cal["ece"] == pytest.approx(0.0)
+
+
+class TestLoopDecoupling:
+    """The C6-Tier-0 fix: the ship-gate (read a) and the stop signal (read b) are
+    decoupled, so the learner can advance even before any net beats the strong
+    heuristic, and the loop only stops on a genuine self-improvement plateau."""
+
+    @staticmethod
+    def _gate(*, strong_lb: float, prev_wr: float | None) -> dict:
+        g = {"vs_strong": {"win_rate": strong_lb, "wilson_lb": strong_lb}}
+        if prev_wr is not None:
+            g["vs_prev"] = {"win_rate": prev_wr, "wilson_lb": prev_wr - 0.1}
+        return g
+
+    def test_ship_gate_requires_beating_strong_at_parity(self) -> None:
+        import az_loop_1v1 as L
+
+        # A net that beats its predecessor but loses to the strong heuristic
+        # (LB 0.30 < parity) must NOT ship -- the ship-gate is the final bar.
+        assert L._ship_promote(cand_lb=0.30, best_lb=0.07) is False
+        # Clears parity AND beats incumbent -> ships.
+        assert L._ship_promote(cand_lb=0.55, best_lb=0.07) is True
+        # Clears parity but does not beat a stronger incumbent -> does not ship.
+        assert L._ship_promote(cand_lb=0.52, best_lb=0.60) is False
+
+    def test_stop_signal_is_read_b_not_vs_strong(self) -> None:
+        import az_loop_1v1 as L
+
+        # Beating its own predecessor (vs_prev > 50%) is "improving" even while it
+        # loses badly to the strong heuristic -- the pre-fix bug stopped here.
+        improving = self._gate(strong_lb=0.06, prev_wr=0.62)
+        assert L._is_improving(improving) is True
+        # Failing to beat its predecessor is the genuine plateau (the stop signal).
+        flat = self._gate(strong_lb=0.40, prev_wr=0.48)
+        assert L._is_improving(flat) is False
+
+    def test_missing_vs_prev_is_non_improving(self) -> None:
+        import az_loop_1v1 as L
+
+        # Read (b) absent (should not happen post-fix) -> treated as non-improving,
+        # never as a silent pass.
+        assert L._is_improving(self._gate(strong_lb=0.5, prev_wr=None)) is False

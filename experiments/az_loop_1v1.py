@@ -116,8 +116,38 @@ class GenRecord1v1:
     model_path: str
     train_summary: dict
     gate: dict
-    promoted: bool
+    promoted: bool          # ship-promoted (cleared the vs-strong parity ship-gate)
+    improving: bool         # read (b): beat its own predecessor (the stop signal)
     reason: str
+
+
+_PARITY = 0.5
+
+
+def _ship_promote(cand_lb: float, best_lb: float, parity: float = _PARITY) -> bool:
+    """Ship-gate (best-checkpoint preservation): which net is copied to ``--out``.
+
+    A candidate is ship-worthy only if its seat-neutral vs-STRONG Wilson-LB clears
+    parity (beats the strong heuristic outright) AND exceeds the incumbent's. This
+    is the FINAL bar, NOT a per-generation keep-going signal -- decoupling the two
+    is the C6-Tier-0 fix: the learner advances every generation regardless, so the
+    curriculum can escalate even before any net is good enough to ship.
+    """
+    return cand_lb > parity + 1e-9 and cand_lb > best_lb + 1e-9
+
+
+def _is_improving(gate: dict, parity: float = _PARITY) -> bool:
+    """Read (b), the curriculum-escalator stop signal: did gen k beat gen k-1?
+
+    Uses the vs-prev (self-play) win-rate POINT estimate > parity, not the
+    Wilson-LB and not the vs-strong gate. The point estimate (rather than the LB)
+    avoids false-stopping on the wide intervals of a 48-game Tier-0 gate, while
+    still catching a genuine plateau/collapse (the learner failing to beat its own
+    predecessor). Absent a vs-prev read (should not happen post-fix), treat as
+    non-improving.
+    """
+    prev = gate.get("vs_prev")
+    return bool(prev) and prev["win_rate"] > parity + 1e-9
 
 
 def _league_opponents(
@@ -148,8 +178,15 @@ def run_loop(args: argparse.Namespace) -> dict:
     """
     os.makedirs(args.workdir, exist_ok=True)
 
+    # Three SEPARATE roles (the C6-Tier-0 decoupling fix):
+    #  * current_model -- the learner; advances EVERY generation (gen k self-plays
+    #    and trains from gen k-1). This is what drives the curriculum escalator.
+    #  * best_model    -- best-checkpoint-for-shipping; only advances when a net
+    #    clears the vs-strong parity ship-gate. Copied to --out at the end.
+    #  * snapshots     -- frozen past nets for the anti-cycle league pool.
+    current_model = args.warm
     best_model = args.warm
-    snapshots: list[str] = []  # frozen best-of-generation checkpoint paths
+    snapshots: list[str] = []  # frozen per-generation checkpoint paths (league pool)
 
     # Gate the warm prior so generation 1 has a real reference.
     print("\n--- gating warm gen-0 prior (the 1v1 reference to beat) ---")
@@ -174,7 +211,7 @@ def run_loop(args: argparse.Namespace) -> dict:
         # (1) 1v1 self-play vs each league member (round-robin), pooled into one
         #     per-generation dataset (the frozen snapshots break the cycle).
         pool = _league_opponents(snapshots=snapshots, n_snapshots=args.league_snapshots)
-        print(f"  [1/3] 1v1 self-play with best net ({best_model}) vs league "
+        print(f"  [1/3] 1v1 self-play with current net ({current_model}) vs league "
               f"pool of {len(pool)} members")
         per_member_paths: list[str] = []
         per_member = max(1, args.tracks // len(pool))
@@ -183,7 +220,7 @@ def run_loop(args: argparse.Namespace) -> dict:
             member_out = os.path.join(args.workdir, f"gen{gen}_m{mi}.npz")
             _generate_1v1(
                 generation=gen * 100 + mi,  # disjoint per-member band slice
-                model_path=best_model, opponent_snapshot=opp, out=member_out,
+                model_path=current_model, opponent_snapshot=opp, out=member_out,
                 tracks=per_member, val_tracks=per_member_val, sims=args.sims,
                 seed=args.seed, game_seed=args.game_seed,
                 traj_greedy=args.traj_greedy,
@@ -207,46 +244,60 @@ def run_loop(args: argparse.Namespace) -> dict:
         ece = train_summary.get("v_calibration_ece", float("nan"))
         print(f"        value-head calibration ECE (the C6 number to watch): {ece:.3f}")
 
-        # (3) gate on the seat-neutral 1v1 win-rate (Wilson-LB > 50% promotes).
+        # (3) gate: vs-strong (the ship-gate, read a) AND vs the PREVIOUS
+        #     generation's net (read b, the curriculum escalator). Read (b) is
+        #     computed EVERY generation -- against gen k-1 (the warm net for gen 1),
+        #     regardless of whether anything has shipped yet. This is the single
+        #     most important read and was silently skipped pre-fix.
         print("  [3/3] gating new net (seat-neutral 1v1 win-rate, Wilson-LB)")
         cand_focal = make_mcts_focal(model_path, sims=args.sims, seed=args.seed)
-        make_prev = (make_mcts_focal(best_model, sims=args.sims, seed=args.seed + 1)
-                     if best_model != args.warm else None)
+        prev_focal = make_mcts_focal(current_model, sims=args.sims, seed=args.seed + 1)
         gate = league_gate_1v1(
             cand_focal, track_seeds=track_seeds, seed_base=args.seed + 9000,
-            make_prev=make_prev,
+            make_prev=prev_focal,
         )
         s = gate["vs_strong"]
+        pv = gate.get("vs_prev") or {}
         print(f"        vs strong: {s['win_rate'] * 100:.1f}% "
               f"(LB {s['wilson_lb'] * 100:.1f}%, {s['wins']}/{s['games']})")
+        if pv:
+            print(f"        vs gen-{gen - 1} (read b): {pv['win_rate'] * 100:.1f}% "
+                  f"(LB {pv['wilson_lb'] * 100:.1f}%)")
 
-        # Promotion: the candidate's strong-heuristic Wilson-LB clears parity AND
-        # exceeds the incumbent's strong Wilson-LB (best-checkpoint preservation).
+        # Ship-gate (read a): does this net beat the STRONG heuristic outright? This
+        # only decides which checkpoint to copy to --out; it does NOT gate the loop.
         cand_lb = gate["vs_strong"]["wilson_lb"]
         best_lb = best_gate["vs_strong"]["wilson_lb"]
-        promoted = cand_lb > _PARITY + 1e-9 and cand_lb > best_lb + 1e-9
+        promoted = _ship_promote(cand_lb, best_lb)
         if promoted:
-            reason = (f"1v1 Wilson-LB {cand_lb * 100:.1f}% > parity and > incumbent "
-                      f"{best_lb * 100:.1f}% -> promoted")
             best_model = model_path
             best_gate = gate
-            snapshots.append(model_path)  # joins the frozen-snapshot pool
-            non_improving = 0
-            print(f"        -> {reason}")
-        else:
-            non_improving += 1
-            reason = (f"1v1 Wilson-LB {cand_lb * 100:.1f}% did not clear parity & "
-                      f"incumbent {best_lb * 100:.1f}% "
-                      f"({non_improving}/{args.stop_patience} non-improving)")
-            print(f"        -> {reason}")
+
+        # Stop signal (read b): the learner ALWAYS advances and its checkpoint ALWAYS
+        # joins the league; we only STOP when it stops beating its own predecessor
+        # (a genuine plateau/collapse), not when it fails to out-race the heuristic.
+        improving = _is_improving(gate)
+        current_model = model_path
+        snapshots.append(model_path)
+        non_improving = 0 if improving else non_improving + 1
+
+        reason = (
+            f"ship={'YES' if promoted else 'no'} "
+            f"(vs-strong LB {cand_lb * 100:.1f}% / parity 50%); "
+            f"improving={'YES' if improving else 'no'} "
+            f"(vs gen-{gen - 1} {pv.get('win_rate', float('nan')) * 100:.1f}%); "
+            f"{non_improving}/{args.stop_patience} non-improving"
+        )
+        print(f"        -> {reason}")
 
         records.append(GenRecord1v1(
             generation=gen, model_path=model_path, train_summary=train_summary,
-            gate=gate, promoted=promoted, reason=reason,
+            gate=gate, promoted=promoted, improving=improving, reason=reason,
         ))
 
         if non_improving >= args.stop_patience:
-            print(f"\n  STOP: {non_improving} consecutive non-improving generations.")
+            print(f"\n  STOP: {non_improving} consecutive non-improving generations "
+                  f"(learner no longer beating its own predecessor).")
             break
 
     elapsed = time.perf_counter() - t0
@@ -269,6 +320,7 @@ def run_loop(args: argparse.Namespace) -> dict:
             {
                 "generation": r.generation,
                 "promoted": r.promoted,
+                "improving": r.improving,
                 "reason": r.reason,
                 "gate": r.gate,
                 "value_calibration_ece": r.train_summary.get("v_calibration_ece"),
@@ -284,26 +336,29 @@ def run_loop(args: argparse.Namespace) -> dict:
     return report
 
 
-_PARITY = 0.5
-
-
 def _print_report(report: dict) -> None:
     print("\n=== az_loop_1v1 summary (the C6 moving-loop reads) ===")
     print(f"  generations run: {report['generations_run']} "
           f"(requested {report['generations_requested']})")
     for g in report["generations"]:
-        tag = "PROMOTED" if g["promoted"] else "kept incumbent"
+        tag = "SHIP" if g["promoted"] else ("improving" if g.get("improving") else "flat")
         s = g["gate"]["vs_strong"]
         ece = g.get("value_calibration_ece", float("nan"))
         prev = g["gate"].get("vs_prev")
-        prev_s = (f" vs_self={prev['win_rate'] * 100:.0f}%" if prev else "")
+        prev_s = (f" vs_self={prev['win_rate'] * 100:.0f}% (LB {prev['wilson_lb'] * 100:.0f}%)"
+                  if prev else "")
         print(f"    gen {g['generation']}: vs_strong={s['win_rate'] * 100:.0f}% "
               f"(LB {s['wilson_lb'] * 100:.0f}%){prev_s}  ECE={ece:.3f}  [{tag}]")
-    # The moving-loop reads: (a) does the strong-heuristic win-rate / Wilson-LB
-    # climb over generations? (b) does it beat earlier selves? (c) does ECE tighten?
+    # The moving-loop reads: (b) does it beat earlier selves (the curriculum
+    # escalator -- THE most important read)? (a) does the strong-heuristic win-rate
+    # climb? (c) does ECE tighten?
+    prev_curve = [(g["gate"].get("vs_prev") or {}).get("win_rate")
+                  for g in report["generations"]]
     strong_curve = [g["gate"]["vs_strong"]["win_rate"] for g in report["generations"]]
     ece_curve = [g.get("value_calibration_ece", float("nan"))
                  for g in report["generations"]]
+    print(f"  (b) vs-prev (self) win-rate curve: "
+          f"{[round(x, 2) if x is not None else None for x in prev_curve]}")
     print(f"  (a) vs-strong win-rate curve: {[round(x, 2) for x in strong_curve]}")
     print(f"  (c) value calibration ECE curve: {[round(x, 3) for x in ece_curve]}")
     src = "WARM gen-0 (no generation improved)" if report["best_is_warm"] \
