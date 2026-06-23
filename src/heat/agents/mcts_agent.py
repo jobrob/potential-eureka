@@ -455,10 +455,12 @@ class EngineTransitionModel:
         peek that consumes no chance edge.
         """
         clone = round_start.clone(reseed=reseed)
-        # Throwaway clone: turn logging on so the leaf's spin accounting can read
-        # the spin_out events regardless of the live game's logging setting (the
-        # S1 _count_spins / _pre_spin_progress contract). Never touches the real log.
-        clone.logging_enabled = True
+        # Sprint C9 (the folded-in free win): the leaf's spin accounting reads the
+        # per-player ``spin_log`` (populated unconditionally in phases.py), NOT the
+        # event log, so we no longer force ``logging_enabled = True`` on every
+        # throwaway replay clone -- that built ~400k discarded event logs during a
+        # single Tier-0 benchmark. The clone inherits the live game's logging
+        # setting (off during search); spin detection is byte-identical.
 
         start_round = clone.round_num
         path = list(action_path)
@@ -662,10 +664,28 @@ class NetAdapter:
         #: squashes it through ``tanh`` so the leaf value is the bounded [-1,1]
         #: expected outcome the trainer fit -- resolved lazily on first model load.
         self._value_mode: str | None = None
+        #: Sprint C8: a single reused ``(1, OBS_DIM)`` float32 input buffer so the
+        #: per-leaf forward does not allocate a fresh obs tensor every call (the
+        #: ``other`` per-call ``as_tensor``/``reshape`` churn the C7 profile flagged).
+        #: Built lazily on first ``evaluate`` (so a pickled adapter stays light).
+        self._obs_buf = None
+        #: Sprint C11: the weight/bias tensors extracted ONCE from the loaded
+        #: policy (the 3-linear pi/vf extractors, the two 2-linear MLPs, the two
+        #: heads) so the per-leaf forward runs as a plain ``F.linear`` pipeline
+        #: with NO ``nn.Module`` dispatch tax (the ~4.2s ``_call_impl`` /
+        #: ``_get_tracing_state`` rows the C9 profile flagged). ``None`` until the
+        #: first forward builds it from ``_get_model()``; nulled in ``__getstate__``
+        #: (process-local scratch derived from the pickle-by-path model).
+        self._fwd = None
 
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
         state["_model"] = None
+        # The reused torch input buffer is process-local scratch -- never pickle it.
+        state["_obs_buf"] = None
+        # The extracted weight tensors are derived from the (nulled) model and
+        # are process-local scratch too -- rebuilt lazily on first forward.
+        state["_fwd"] = None
         return state
 
     def _validate_meta(self) -> None:
@@ -710,26 +730,207 @@ class NetAdapter:
             self._model = _load_cached_model(self.model_path)
         return self._model
 
-    # -- the two seam methods -------------------------------------------
+    # -- the lean combined forward (Sprint C8, single source of truth) ----
+
+    def _obs_tensor(self, obs: np.ndarray):
+        """Marshal ``obs`` into the reused ``(1, OBS_DIM)`` float32 input buffer.
+
+        Sprint C8: one allocation per process (lazily, on the first leaf) instead
+        of a fresh ``as_tensor(...).reshape(1, -1)`` per call -- the per-call tensor
+        churn the C7 profile charged to ``other``. The values are copied in place
+        with ``copy_`` so the buffer is overwritten (never aliased to the caller's
+        array). When the obs width does not match the buffer (e.g. a test feeding a
+        different OBS_DIM) we fall back to a fresh tensor of the right shape.
+        """
+        import torch
+
+        arr = np.ascontiguousarray(obs, dtype=np.float32).reshape(-1)
+        buf = self._obs_buf
+        if buf is None or buf.shape[1] != arr.shape[0]:
+            buf = torch.empty((1, arr.shape[0]), dtype=torch.float32)
+            self._obs_buf = buf
+        buf.copy_(torch.from_numpy(arr))
+        return buf
+
+    # -- the functional forward (Sprint C11, kill the nn.Module dispatch tax) --
+
+    def _get_fwd(self) -> dict:
+        """Extract the policy's ``(weight, bias)`` tensors ONCE for a dispatch-free
+        forward (Sprint C11, Win 2).
+
+        The C8 path called ~a dozen small ``nn.Module``s per leaf -- each
+        ``Linear`` and each activation through ``_call_impl`` /
+        ``_wrapped_call_impl`` / ``_get_tracing_state``. With ~100k forwards that
+        Python dispatch is ~4.2s of pure overhead (the C9 profile). Here we pull
+        the raw parameter tensors out of the loaded module ONCE and run the actor
+        and critic pipelines as plain :func:`torch.nn.functional.linear` calls.
+        ``F.linear`` is *exactly* what ``nn.Linear.forward`` invokes, applied in
+        the SAME order the modules are wired (mirrored against
+        ``HeatMLPExtractor.forward`` / ``MlpExtractor``), so the math is
+        bit-equivalent -- only the dispatch is gone.
+
+        Cached on the adapter and rebuilt whenever the underlying model changes
+        (keyed by ``id(model)``; the C7 process cache hands back the same object
+        per ``(path, mtime)``, and a test that swaps ``_model`` re-extracts).
+        """
+        import torch.nn as nn
+
+        model = self._get_model()
+        fwd = self._fwd
+        if fwd is not None and fwd.get("_model_id") == id(model):
+            return fwd
+
+        policy = model.policy
+
+        def _linears(seq) -> list:
+            """The ``Linear`` modules of a ``Sequential``, in wiring order, as
+            ``(weight, bias)`` pairs (activations are positional -- ReLU/Tanh)."""
+            return [(m.weight, m.bias) for m in seq if isinstance(m, nn.Linear)]
+
+        # Non-shared extractor: separate pi/vf trunks (3 linears each, ReLU after
+        # every linear). Shared -> the same module backs both (a tuple-less
+        # extract_features); we still split logically so both pipelines work.
+        pi_ex = _linears(policy.pi_features_extractor.mlp)
+        vf_ex = _linears(policy.vf_features_extractor.mlp)
+        # The two head MLPs (2 linears each, Tanh after each).
+        pi_mlp = _linears(policy.mlp_extractor.policy_net)
+        vf_mlp = _linears(policy.mlp_extractor.value_net)
+
+        fwd = {
+            "_model_id": id(model),
+            "pi_ex": pi_ex,
+            "vf_ex": vf_ex,
+            "pi_mlp": pi_mlp,
+            "vf_mlp": vf_mlp,
+            "action_w": policy.action_net.weight,
+            "action_b": policy.action_net.bias,
+            "value_w": policy.value_net.weight,
+            "value_b": policy.value_net.bias,
+        }
+        self._fwd = fwd
+        return fwd
+
+    def _actor_logits(self, ob, fwd: dict):
+        """The raw policy logits for input ``ob`` via the functional actor pipeline.
+
+        Mirrors the SB3 wiring exactly: ``pi`` extractor (Linear->ReLU x3) ->
+        policy MLP (Linear->Tanh x2) -> ``action_net`` (Linear, no activation).
+        Must run inside an ``inference_mode`` context supplied by the caller.
+        """
+        import torch
+        import torch.nn.functional as F
+
+        x = ob
+        for w, b in fwd["pi_ex"]:
+            x = torch.relu(F.linear(x, w, b))
+        for w, b in fwd["pi_mlp"]:
+            x = torch.tanh(F.linear(x, w, b))
+        return F.linear(x, fwd["action_w"], fwd["action_b"])
+
+    def _critic_value(self, ob, fwd: dict):
+        """The critic scalar tensor for input ``ob`` via the functional critic
+        pipeline (``vf`` extractor Linear->ReLU x3 -> value MLP Linear->Tanh x2 ->
+        ``value_net`` Linear). The ``value_mode`` tanh is applied by the caller.
+        Must run inside an ``inference_mode`` context supplied by the caller.
+        """
+        import torch
+        import torch.nn.functional as F
+
+        x = ob
+        for w, b in fwd["vf_ex"]:
+            x = torch.relu(F.linear(x, w, b))
+        for w, b in fwd["vf_mlp"]:
+            x = torch.tanh(F.linear(x, w, b))
+        return F.linear(x, fwd["value_w"], fwd["value_b"])
+
+    @staticmethod
+    def _masked_softmax(logits, mask):
+        """SB3-equivalent masked softmax: substitute ``-1e8`` for masked-out
+        logits (NOT ``-inf``, matching ``MaskableCategorical``) then softmax."""
+        import torch
+
+        mask_t = torch.as_tensor(
+            np.asarray(mask, dtype=bool), dtype=torch.bool
+        ).reshape(logits.shape)
+        huge_neg = torch.tensor(-1e8, dtype=logits.dtype)
+        masked_logits = torch.where(mask_t, logits, huge_neg)
+        return torch.softmax(masked_logits, dim=-1)
+
+    # -- the lean combined forward (Sprint C8, single source of truth) ----
+
+    def evaluate(
+        self, obs: np.ndarray, mask: np.ndarray
+    ) -> tuple[np.ndarray, float]:
+        """ONE combined forward per leaf -> ``(masked_probs, value)`` (Sprint C8).
+
+        The C8 lean inference path. The checkpoint uses
+        ``share_features_extractor=false``, so the C1-C7 path -- a separate
+        ``get_distribution`` for the prior AND ``predict_values`` for the value --
+        ran the network *twice* per leaf (each builds its own feature extractor).
+        This method runs the actor and critic from a SINGLE ``extract_features``
+        call (the non-shared extractor returns ``(pi_features, vf_features)`` in one
+        pass) and computes:
+
+          * ``probs`` -- the masked policy probabilities over the full
+            ``ACTION_DIM`` flat space (illegal actions at 0), with raw torch ops
+            (``where(mask, logits, -1e8)`` -> ``softmax``) instead of building an
+            SB3 ``MaskableCategorical`` / ``Distribution``. This reproduces SB3's
+            masked categorical to ULP tolerance (the masking + softmax are the
+            identical operation; SB3's pre-normalization of the logits is a softmax
+            no-op, and it likewise substitutes ``-1e8`` for masked-out logits).
+          * ``value`` -- the critic scalar, with the ``value_mode`` ``tanh`` applied
+            in the same call (``"winloss"``; ``"rounds"`` returns it as-is).
+
+        ``torch.inference_mode()`` (stronger than ``no_grad``) + the reused input
+        buffer + a single obs marshal kill the per-call tensor churn. The result is
+        **behaviour-equivalent** to the SB3 path within a tight tolerance (pinned by
+        ``test_c8_lean_inference``), so the search stays the same deterministic
+        function of ``(state, seed)``.
+        """
+        import torch
+
+        fwd = self._get_fwd()
+        ob = self._obs_tensor(obs)
+        with torch.inference_mode():
+            # Sprint C11: ONE obs marshal feeds BOTH functional pipelines. The
+            # non-shared extractor means pi/vf trunks are distinct weights, so
+            # there is no shared feature to reuse -- each head runs its own
+            # extractor, exactly as the C8 Module path did, now dispatch-free.
+            logits = self._actor_logits(ob, fwd)
+            probs = self._masked_softmax(logits, mask)
+
+            # Value head: critic scalar, value_mode tanh in the same call.
+            v = self._critic_value(ob, fwd)
+            if self._value_mode == "winloss":
+                v = torch.tanh(v)
+
+            probs_np = probs.reshape(-1).cpu().numpy().copy()
+            value = float(v.reshape(-1)[0])
+        return probs_np, value
+
+    # -- the two seam methods ----------------
 
     def policy_prior(self, obs: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """Masked policy probabilities over the full ``ACTION_DIM`` flat space.
 
-        Reads the actor head's masked categorical (``get_distribution(...,
-        action_masks=mask)``) -- the same path :mod:`heat.ml.kl_regularizer` uses
-        -- and returns a probability vector (illegal actions at 0). The search
-        reads only the kept-candidate entries and renormalizes over them.
+        Sprint C11 (Win 1): the ACTOR-ONLY prior path. The C8 shim ran the
+        combined :meth:`evaluate` and discarded the value, but the checkpoint uses
+        ``share_features_extractor=False``, so that wasted the ENTIRE separate
+        ``vf`` extractor (3 linears) + value MLP (2) + value head (1) -- 6 linears
+        per leaf expansion, ~27% of all linears, on a number nothing reads. This
+        method runs ONLY the actor pipeline (``pi`` extractor -> policy MLP ->
+        ``action_net`` -> masked softmax) -- the IDENTICAL actor ops :meth:`evaluate`
+        runs for the policy side, so the probs are byte-identical, just without the
+        discarded critic. ``_edges_for`` (the only hot caller) reads through here.
         """
         import torch
 
-        model = self._get_model()
-        ob = torch.as_tensor(np.asarray(obs, dtype=np.float32)).reshape(1, -1)
-        with torch.no_grad():
-            dist = model.policy.get_distribution(
-                ob, action_masks=np.asarray(mask, dtype=bool).reshape(1, -1)
-            )
-            probs = dist.distribution.probs
-        return np.asarray(probs.detach()).reshape(-1)
+        fwd = self._get_fwd()
+        ob = self._obs_tensor(obs)
+        with torch.inference_mode():
+            logits = self._actor_logits(ob, fwd)
+            probs = self._masked_softmax(logits, mask)
+            return probs.reshape(-1).cpu().numpy().copy()
 
     def leaf_value(self, obs: np.ndarray) -> float:
         """Net value head on a leaf state (higher-is-better).
@@ -744,16 +945,22 @@ class NetAdapter:
         ``tanh`` -- the SAME transform ``train_az`` fit the ±1 outcome under -- so
         the leaf is a bounded ``[−1, 1]`` learner-frame expected outcome the
         two-player minimax consumes directly.
+
+        Sprint C8/C11: runs ONLY the critic pipeline (the value head never needs a
+        mask or the policy side). C11 makes it the dispatch-free functional
+        ``vf`` extractor -> value MLP -> ``value_net`` path -- the same lean
+        primitives ``evaluate`` uses for the value, without the policy head.
         """
         import torch
 
-        model = self._get_model()
-        ob = torch.as_tensor(np.asarray(obs, dtype=np.float32)).reshape(1, -1)
-        with torch.no_grad():
-            v = model.policy.predict_values(ob)
+        fwd = self._get_fwd()
+        ob = self._obs_tensor(obs)
+        with torch.inference_mode():
+            v = self._critic_value(ob, fwd)
             if self._value_mode == "winloss":
                 v = torch.tanh(v)
-        return float(np.asarray(v.detach()).reshape(-1)[0])
+            value = float(v.reshape(-1)[0])
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -1065,7 +1272,7 @@ class MCTSAgent(BaseAgent):
 
     # -- prior over the kept candidate set -------------------------------
 
-    def _edges_for(self, node: Node) -> list[Edge]:
+    def _edges_for(self, node: Node, obs: "np.ndarray | None" = None) -> list[Edge]:
         """Build the PUCT edges for a freshly-expanded decision node.
 
         Reads the net's masked policy once, maps each kept candidate action to its
@@ -1073,6 +1280,14 @@ class MCTSAgent(BaseAgent):
         prior is *read*, the candidate set is *fixed* -- the S1 lossless prune).
         Falls back to a uniform prior if the kept mass is degenerate (all-zero),
         which is what an untrained / pathological net can produce.
+
+        Sprint C9 Tier-2: ``obs`` may be a precomputed PRIOR observation supplied
+        by the caller (``_expand_and_evaluate``) when the seat-state prefix is
+        shared with the value encode. It MUST equal
+        ``encode_observation(node.state, node.to_move, decision)`` -- the caller
+        only passes it when ``node.to_move == to_move_pid`` and builds it via
+        ``encode_observation_pair``, so it is byte-identical to the un-shared
+        encode below.
         """
         from heat.ml.action_codec import encode_action_index, legal_action_mask
         from heat.ml.features import encode_observation
@@ -1087,7 +1302,8 @@ class MCTSAgent(BaseAgent):
         # node reads the SAME net's prior from the opponent's own observation
         # (perfect information -- the opponent's hand is visible).
         mover = node.to_move
-        obs = encode_observation(node.state, mover, decision)
+        if obs is None:
+            obs = encode_observation(node.state, mover, decision)
         mask = legal_action_mask(decision, node.state)
         probs = self._get_net().policy_prior(obs, mask)  # type: ignore[attr-defined]
 
@@ -1159,6 +1375,15 @@ class MCTSAgent(BaseAgent):
 
         self._root_node = root
         self._search_rng = _random.Random(turn_seed)
+        # Sprint C9: the per-leaf spin floor reads the persistent per-player
+        # ``spin_log`` (which carries spins from BEFORE this search, copied through
+        # clones). The old event-log reader saw only spins from the in-search
+        # replay (each replay clone started with an EMPTY event log). To stay
+        # byte-identical, ``_pre_spin_progress`` ignores any spin from a round
+        # before the search root -- every in-search replay starts at a round-start
+        # state at or after this round, and all pre-search (live-game) spins are
+        # strictly earlier, so this boundary cleanly separates them.
+        self._search_root_round = state.round_num
 
         model = EngineTransitionModel(player_id)
 
@@ -1661,6 +1886,21 @@ class MCTSAgent(BaseAgent):
         visits. ``node.value`` is the running visit-weighted average over its
         outcomes (here, the single first outcome), which the backup then keeps
         consistent.
+
+        Sprint C8 (the lean inference path): the net work below is routed through
+        ``NetAdapter``'s lean primitives. ``_edges_for`` reads the prior via
+        ``policy_prior`` (a thin shim over the combined ``evaluate`` -- one
+        feature extraction, raw masked softmax, ``inference_mode``, reused input
+        buffer; NO SB3 ``Distribution`` object) and ``_evaluate_leaf`` reads the
+        value via the lean ``leaf_value``. NOTE: a decision leaf's prior and value
+        read DIFFERENT observations -- the prior obs carries the pending
+        ``decision``'s context bits 0..8, the value obs is the ``decision=None``
+        encoding the critic was trained on -- so they are two genuinely-different
+        forwards and CANNOT be collapsed into a single ``evaluate`` call without
+        feeding the critic off-distribution decision bits (a behaviour change the
+        equivalence contract forbids). Each is individually lean; the combined
+        ``evaluate`` returns both heads from one obs for callers (and the
+        ``test_c8`` equivalence battery) where one observation feeds both.
         """
         if node.terminal:
             node.expanded = True
@@ -1684,13 +1924,44 @@ class MCTSAgent(BaseAgent):
             return value
 
         # Decision node: build edges from the net prior, value the node itself.
-        node.edges = self._edges_for(node)
-        node.expanded = True
-        value = self._evaluate_leaf(node)
+        #
+        # Sprint C9 Tier-2 (shared state-prefix): the prior obs
+        # ``encode_observation(state, node.to_move, decision)`` and the value obs
+        # ``encode_observation(state, to_move_pid, None)`` are byte-identical on
+        # every block EXCEPT the phase tail WHEN the moving seat is the evaluated
+        # seat (``node.to_move == to_move_pid`` -- all solo leaves and the
+        # learner's-own-seat leaves in two-player). In that case we encode the
+        # shared seat-state prefix ONCE (``encode_observation_pair``) and feed both
+        # the prior and value through it, recomputing only the small phase block.
+        #
+        # GATE: at an OPPONENT decision node in two-player ``node.to_move !=
+        # to_move_pid`` -- the prior is the opponent's own observation while the
+        # value is the LEARNER's, two genuinely different seats -- so we keep the
+        # two independent full encodes (``obs=None`` on both calls), untouched.
+        # The own-spin floor (solo) never consults the value net, so we do not
+        # bother sharing on that path (the value encode would be discarded).
+        share = (node.to_move == self.to_move_pid) and not (
+            not self.config.two_player and node.own_spun
+        )
+        if share:
+            from heat.ml.features import encode_observation_pair
+
+            decision = node.decision
+            assert decision is not None
+            prior_obs, value_obs = encode_observation_pair(
+                node.state, self.to_move_pid, decision
+            )
+            node.edges = self._edges_for(node, obs=prior_obs)
+            node.expanded = True
+            value = self._evaluate_leaf(node, obs=value_obs)
+        else:
+            node.edges = self._edges_for(node)
+            node.expanded = True
+            value = self._evaluate_leaf(node)
         node.value = value
         return value
 
-    def _evaluate_leaf(self, node: Node) -> float:
+    def _evaluate_leaf(self, node: Node, obs: "np.ndarray | None" = None) -> float:
         """Leaf value, ALWAYS in the LEARNER's frame (``to_move_pid``).
 
         Solo (``two_player=False``, the C0-C5 frame) -- the §4.4 S1 discipline:
@@ -1719,7 +1990,14 @@ class MCTSAgent(BaseAgent):
             return self._pre_spin_progress(node.state)
         from heat.ml.features import encode_observation
 
-        obs = encode_observation(node.state, self.to_move_pid, decision=None)
+        # Sprint C9 Tier-2: ``obs`` may be a precomputed VALUE observation
+        # (``decision=None``) supplied by ``_expand_and_evaluate`` when the
+        # seat-state prefix was shared with the prior encode. It MUST equal
+        # ``encode_observation(node.state, to_move_pid, None)`` -- the caller only
+        # passes it when ``node.to_move == to_move_pid``, so it is byte-identical
+        # to the un-shared encode below.
+        if obs is None:
+            obs = encode_observation(node.state, self.to_move_pid, decision=None)
         return self._get_net().leaf_value(obs)  # type: ignore[attr-defined]
 
     def _terminal_value(self, state: GameState) -> float:
@@ -1754,32 +2032,41 @@ class MCTSAgent(BaseAgent):
 
         Identical to ``LookaheadAgent._pre_spin_progress``: credit progress only
         up to the corner the car failed to clear (``corner_start - 1``, lap 0), so
-        a reckless recovery can never inflate the score. Read from the first
-        ``spin_out`` event for our seat on the (logging-enabled) clone.
+        a reckless recovery can never inflate the score.
+
+        Sprint C9: read from the seat's ``spin_log`` (the first spin record from
+        THIS search's replay, in chronological append order) instead of scanning
+        the ``spin_out`` event log -- byte-identical to the old reader, but it no
+        longer requires the replay clone to build a full event log (the
+        forced-logging free win). Spins from rounds before the search root (live
+        game history carried through the clone) are skipped: the old per-replay
+        event log only ever saw in-search spins, so the first in-search spin is
+        the one the old reader returned.
         """
-        for e in state.event_log:
-            if e.event_type == "spin_out" and e.player_id == self.to_move_pid:
-                corner_start = int(e.data.get("corner_start", 0))
+        root_round = getattr(self, "_search_root_round", 0)
+        spin_log = state.get_player(self.to_move_pid).spin_log
+        for spin_round, corner_start in spin_log:
+            if spin_round >= root_round:
                 return float(max(0, corner_start - 1))
-        # No spin event found: fall back to lap-aware race progress (shouldn't
+        # No spin record found: fall back to lap-aware race progress (shouldn't
         # happen when own_spun is set, but never crash the leaf).
         return float(ME.race_progress(state.get_player(self.to_move_pid), state.track))
 
     def _forced_move_spun(self, child_state: GameState, node: Node, edge: Edge) -> bool:
         """True iff forcing ``edge.action`` spun the learner out THIS round.
 
-        Reads the spin_out event log on the advanced clone for our seat in the
+        Checks the seat's ``spin_log`` on the advanced clone for a spin in the
         round the forced action was played (``node.state.round_num``). This is the
         own-spin signal the §4.4 leaf floor keys on; it is depth-invariant because
         once set on a node it propagates to descendants (``node.own_spun or ...``).
+
+        Sprint C9: reads ``spin_log`` instead of scanning the ``spin_out`` event
+        log -- byte-identical, but no forced event log on the replay clone.
         """
         target_round = node.state.round_num
-        for e in child_state.event_log:
-            if (
-                e.event_type == "spin_out"
-                and e.player_id == self.to_move_pid
-                and e.round_num == target_round
-            ):
+        spin_log = child_state.get_player(self.to_move_pid).spin_log
+        for spin_round, _corner_start in spin_log:
+            if spin_round == target_round:
                 return True
         return False
 

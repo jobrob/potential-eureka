@@ -544,11 +544,11 @@ class TestLeafDiscipline:
         assert net.leaf_calls == before + 1
         assert clean_value == pytest.approx(1e9)
 
-        # A spun node: build a state with a recorded spin_out event for our seat.
+        # A spun node: build a state with a recorded spin for our seat. Sprint C9:
+        # the floor reads the per-player ``spin_log`` (populated unconditionally by
+        # the engine), not the event log, so seed that record directly.
         spun_state = GameState.create(track, 1, logging_enabled=True, seed=1)
-        spun_state.log_event(
-            "spin_out", player_id=0, data={"corner_start": 10}
-        )
+        spun_state.get_player(0).spin_log.append((spun_state.round_num, 10))
         spun_node = Node(
             kind=NodeKind.DECISION, state=spun_state, action_path=(), to_move=0,
             decision=None, own_spun=True,
@@ -576,7 +576,8 @@ class TestLeafDiscipline:
         track = _limit1_loop()
 
         spun_state = GameState.create(track, 1, logging_enabled=True, seed=1)
-        spun_state.log_event("spin_out", player_id=0, data={"corner_start": 10})
+        # Sprint C9: seed the per-player spin_log the floor now reads.
+        spun_state.get_player(0).spin_log.append((spun_state.round_num, 10))
 
         for depth in range(1, 6):
             node = Node(

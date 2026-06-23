@@ -630,6 +630,10 @@ def step_check_corner(
         # Set gear to 1
         player.gear = 1
         player.spun_out = True
+        # Sprint C9: record the spin unconditionally (independent of the event
+        # log's logging_enabled gate) so MCTS search clones can read spin
+        # accounting without forcing the full event log on every replay clone.
+        player.spin_log.append((state.round_num, spin_corner.start))
 
         state.log_event(
             "spin_out",

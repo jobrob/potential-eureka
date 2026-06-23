@@ -51,6 +51,15 @@ class PlayerState:
     spun_out: bool = False
     finished: bool = False
     finish_order: int = 0
+    # Sprint C9: append-only spin record ``(round_num, corner_start)`` per spin,
+    # populated UNCONDITIONALLY in ``phases.py`` (independent of
+    # ``GameState.logging_enabled``). It lets MCTS search clones read the spin
+    # accounting (``_pre_spin_progress`` / ``_forced_move_spun``) WITHOUT forcing
+    # the full event log on every throwaway replay clone -- the prior approach
+    # built ~400k discarded event logs during a single Tier-0 benchmark. The
+    # engine never reads this field; spins are rare so the append cost is
+    # negligible. Persists across rounds (unlike the per-round ``spun_out`` flag).
+    spin_log: list[tuple[int, int]] = field(default_factory=list)
     # Per-turn transient fields (cleared each round)
     cards_played: list[Card] = field(default_factory=list)
     boost_used_this_turn: bool = False
@@ -129,6 +138,7 @@ class PlayerState:
             spun_out=self.spun_out,
             finished=self.finished,
             finish_order=self.finish_order,
+            spin_log=list(self.spin_log),
             cards_played=list(self.cards_played),
             boost_used_this_turn=self.boost_used_this_turn,
             speed_from_cards=self.speed_from_cards,

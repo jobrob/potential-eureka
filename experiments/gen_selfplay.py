@@ -858,6 +858,29 @@ class _GameResult:
     seconds: float
 
 
+def _pool_worker_init() -> None:
+    """Per-worker pool initializer (Sprint C8): pin torch to a single thread.
+
+    Self-play inference is batch-1 CPU forwards run across ``--workers`` processes.
+    Torch's intra-op thread pool would otherwise let each worker spin up as many
+    compute threads as there are cores, so N workers x M threads heavily
+    oversubscribe the 8 physical cores -- the contention C7 already observed past 8
+    workers. One thread per worker keeps each forward lean and lets the process
+    pool (not torch) own the parallelism. This is a pure performance nudge: it does
+    not touch any RNG or weight, so the per-game search stays the byte-identical
+    function of ``(state, seed)``.
+    """
+    try:
+        import torch
+
+        torch.set_num_threads(1)
+    except Exception:
+        # torch must be importable for the search to run, but never let a thread
+        # -pin failure abort a worker -- it would only cost throughput, not change
+        # any result.
+        pass
+
+
 def _run_one_game(spec: _GameSpec) -> _GameResult:
     """Run one self-play game and return its rows + profile (Sprint C7 work unit).
 
@@ -1015,7 +1038,10 @@ def generate_dataset(args: argparse.Namespace) -> dict:
         import multiprocessing as mp
 
         ctx = mp.get_context("spawn")
-        with ctx.Pool(processes=min(workers, len(specs)) or 1) as pool:
+        with ctx.Pool(
+            processes=min(workers, len(specs)) or 1,
+            initializer=_pool_worker_init,
+        ) as pool:
             results = list(pool.imap_unordered(_run_one_game, specs))
 
     _merge_into(buf, results)
