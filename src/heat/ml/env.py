@@ -43,21 +43,21 @@ import numpy as np
 
 from heat.agents.base import BaseAgent
 from heat.agents.heuristic_agent import HeuristicAgent
-from heat.agents.random_agent import RandomAgent
-from heat.engine.driver import Decision, DecisionKind, run_round_driver
+from heat.engine.driver import Decision, run_round_driver
 from heat.engine.game import MAX_ROUNDS
 from heat.models.game_state import GameState
 from heat.models.track import Track
 from heat.tracks.loader import load_track_by_name
 from heat.ml import spaces
 from heat.ml.action_codec import (
-    _play_to_multiset,
-    decode_action,
+    NO_FORCED,
+    decode_legal_action,
+    forced_action,
     legal_action_mask,
 )
 from heat.ml.features import encode_observation
 from heat.ml.opponents import opponent_action
-from heat.ml.spaces import ACTION_DIM, OBS_DIM, step_reward
+from heat.ml.spaces import ACTION_DIM, step_reward
 
 #: Opponents may be supplied as ready BaseAgent instances or as zero-arg
 #: factories that build one (factories let env copies hold independent RNG
@@ -72,10 +72,12 @@ OpponentSpec = BaseAgent | Callable[[], BaseAgent]
 #: deterministic function of the episode seed.
 TrackSource = Track | Callable[[int | None], Track]
 
-#: Sentinel distinguishing "no forced action" from a legitimate forced action
-#: whose value is falsy (e.g. SLIPSTREAM ``False`` or the empty CARDS play
-#: ``()``), so ``_forced_action`` can return those without ambiguity.
-_NO_FORCED = object()
+#: Backwards-compatible alias: the "no forced action" sentinel now lives in
+#: :mod:`heat.ml.action_codec` (Sprint A2 lifted the plumbing there so the env
+#: and the self-play collector share one implementation). Re-exported here so
+#: existing importers of ``heat.ml.env._NO_FORCED`` keep working, and so the
+#: object identity ``forced_action(...) is _NO_FORCED`` still holds.
+_NO_FORCED = NO_FORCED
 
 
 def _default_track() -> Track:
@@ -344,61 +346,25 @@ class HeatEnv(gym.Env):
             return decision
 
     def _decode_legal(self, decision: Decision, flat_index: int) -> object:
-        """Decode a flat action to the concrete object the driver expects,
-        guaranteeing it is one the driver will accept as legal.
+        """Thin delegation to :func:`heat.ml.action_codec.decode_legal_action`.
 
-        For CARDS the driver checks ``chosen not in legal_plays`` with *order-
-        and identity-sensitive* tuple equality (``rules.legal_card_plays``
-        enumerates ``itertools.combinations`` of the actual hand cards in hand
-        order). ``decode_action`` realizes a value-multiset to lowest-id
-        representatives in token-sorted order, which need not match a legal
-        tuple's element ordering or representative choice. We therefore snap the
-        decoded play to the legal tuple with the same value-multiset.
-
-        All other kinds round-trip cleanly: GEAR returns the actual
-        ``(new_gear, heat_cost)`` tuple from ``decision.legal``; REACT /
-        SLIPSTREAM / DISCARD are not subject to a tuple-equality legality guard.
+        The decode + CARDS snap-to-legal-tuple logic was lifted to
+        ``action_codec`` in Sprint A2 so this env path and the self-play
+        collector share ONE implementation; this method only binds ``self.state``.
         """
-        decoded = decode_action(decision, flat_index, self.state)
-
-        if decision.kind == DecisionKind.CARDS:
-            target = _play_to_multiset(decoded)
-            for legal_play in decision.legal:
-                if _play_to_multiset(legal_play) == target:
-                    return legal_play
-            # Should be unreachable: the mask only exposes realizable multisets.
-            raise ValueError(  # pragma: no cover - defensive
-                f"decoded card play {decoded} has no matching legal tuple"
-            )
-
-        return decoded
+        assert self.state is not None
+        return decode_legal_action(decision, self.state, flat_index)
 
     def _forced_action(self, decision: Decision) -> object:
-        """Return the single forced engine action for a degenerate learner
-        ``decision``, or :data:`_NO_FORCED` if the decision is a real choice.
+        """Thin delegation to :func:`heat.ml.action_codec.forced_action`.
 
-        A decision is degenerate when its mask has <= 1 legal action. This
-        subsumes the all-False case (empty-hand CARDS, ``legal == [()]``):
-        the engine still expects a single forced action, which we send directly
-        rather than handing an unusable / one-hot mask to the policy.
-
-        For an all-False mask (a true forced play with no codec index, e.g. the
-        empty-hand ``()`` play), send the engine's single legal option directly
-        (``decision.legal[0]``). For a one-hot mask, decode the single legal
-        flat index so the action is built through the same codec path a real
-        step would use.
+        Returns the module-level ``NO_FORCED`` sentinel (aliased here as
+        ``_NO_FORCED``) for a real choice, so ``forced is _NO_FORCED`` still holds
+        for existing callers. The degenerate-decision auto-resolve logic now lives
+        in ``action_codec`` (Sprint A2); this method only binds ``self.state``.
         """
-        mask = legal_action_mask(decision, self.state)
-        legal_idx = np.flatnonzero(mask)
-        if len(legal_idx) > 1:
-            return _NO_FORCED
-        if len(legal_idx) == 0:
-            # All-False mask: the engine still has exactly one legal option.
-            # This only arises for kinds whose ``legal`` is an indexable
-            # sequence (CARDS ``[()]`` / GEAR / DISCARD); REACT always has the
-            # "do nothing" slot legal, so it never reaches here.
-            return decision.legal[0]
-        return self._decode_legal(decision, int(legal_idx[0]))
+        assert self.state is not None
+        return forced_action(decision, self.state)
 
     def _episode_over(self) -> bool:
         """Whether the episode should stop advancing (game over or truncation)."""

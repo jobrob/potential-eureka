@@ -336,3 +336,81 @@ def decode_action(
         return ordered[:k]
 
     raise ValueError(f"Unknown decision kind {kind!r}")
+
+
+# ---------------------------------------------------------------------------
+# Legality plumbing shared by the env and the self-play collector (Sprint A2)
+# ---------------------------------------------------------------------------
+#
+# These two helpers were originally private methods on :class:`heat.ml.env.HeatEnv`
+# (``_decode_legal`` / ``_forced_action``). A2 lifts their bodies here, verbatim,
+# so the single-seat env path (:class:`HeatEnv`) and the N-seat self-play path
+# (:mod:`heat.ml.selfplay.multiseat`) can share ONE implementation and never
+# drift apart. ``HeatEnv`` now delegates to them; behavior is byte-identical (the
+# existing env test-suite is the guard).
+
+#: Sentinel distinguishing "no forced action" from a legitimate forced action
+#: whose value is falsy (e.g. SLIPSTREAM ``False`` or the empty CARDS play
+#: ``()``), so :func:`forced_action` can return those without ambiguity.
+NO_FORCED: object = object()
+
+
+def decode_legal_action(
+    decision: Decision, state: GameState, flat_index: int
+) -> object:
+    """Decode a flat action to the concrete object the driver expects,
+    guaranteeing it is one the driver will accept as legal.
+
+    For CARDS the driver checks ``chosen not in legal_plays`` with *order-
+    and identity-sensitive* tuple equality (``rules.legal_card_plays``
+    enumerates ``itertools.combinations`` of the actual hand cards in hand
+    order). :func:`decode_action` realizes a value-multiset to lowest-id
+    representatives in token-sorted order, which need not match a legal
+    tuple's element ordering or representative choice. We therefore snap the
+    decoded play to the legal tuple with the same value-multiset.
+
+    All other kinds round-trip cleanly: GEAR returns the actual
+    ``(new_gear, heat_cost)`` tuple from ``decision.legal``; REACT /
+    SLIPSTREAM / DISCARD are not subject to a tuple-equality legality guard.
+    """
+    decoded = decode_action(decision, flat_index, state)
+
+    if decision.kind == DecisionKind.CARDS:
+        target = _play_to_multiset(decoded)  # type: ignore[arg-type]
+        for legal_play in decision.legal:  # type: ignore[attr-defined]
+            if _play_to_multiset(legal_play) == target:
+                return legal_play
+        # Should be unreachable: the mask only exposes realizable multisets.
+        raise ValueError(  # pragma: no cover - defensive
+            f"decoded card play {decoded} has no matching legal tuple"
+        )
+
+    return decoded
+
+
+def forced_action(decision: Decision, state: GameState) -> object:
+    """Return the single forced engine action for a degenerate learner
+    ``decision``, or :data:`NO_FORCED` if the decision is a real choice.
+
+    A decision is degenerate when its mask has <= 1 legal action. This
+    subsumes the all-False case (empty-hand CARDS, ``legal == [()]``):
+    the engine still expects a single forced action, which we send directly
+    rather than handing an unusable / one-hot mask to the policy.
+
+    For an all-False mask (a true forced play with no codec index, e.g. the
+    empty-hand ``()`` play), send the engine's single legal option directly
+    (``decision.legal[0]``). For a one-hot mask, decode the single legal
+    flat index so the action is built through the same codec path a real
+    step would use.
+    """
+    mask = legal_action_mask(decision, state)
+    legal_idx = np.flatnonzero(mask)
+    if len(legal_idx) > 1:
+        return NO_FORCED
+    if len(legal_idx) == 0:
+        # All-False mask: the engine still has exactly one legal option.
+        # This only arises for kinds whose ``legal`` is an indexable
+        # sequence (CARDS ``[()]`` / GEAR / DISCARD); REACT always has the
+        # "do nothing" slot legal, so it never reaches here.
+        return decision.legal[0]  # type: ignore[index]
+    return decode_legal_action(decision, state, int(legal_idx[0]))
