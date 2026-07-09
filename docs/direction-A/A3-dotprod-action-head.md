@@ -174,3 +174,52 @@ reading the table.
   (`Implement Sprint A3: ...`), only after the full suite is green and the gate
   script has run. End both commit messages with the trailer:
   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+
+## 8. Gate results
+
+Ran `scripts/compare_heads_a3.py` (Tiny-Heat, 2 players, weak `HeuristicAgent`
+opponent, 60k steps, CPU, shared `256×256` trunk, `n_steps=2048`) for both heads
+across seeds {0, 1, 2}. Metric = mean episode return over the final 10 iterations.
+
+### Per-run (mean episode return over final 10 iters)
+
+| head | seed | final-window mean return | wall (s) |
+|---|---|---|---|
+| masked | 0 | +0.8612 | 63.6 |
+| masked | 1 | +0.8723 | 65.3 |
+| masked | 2 | +0.8510 | 46.8 |
+| dotprod | 0 | +0.5884 | 51.0 |
+| dotprod | 1 | +0.6387 | 50.7 |
+| dotprod | 2 | +0.6547 | 51.2 |
+
+### Per-head summary
+
+| head | mean ± std | wall total (s) |
+|---|---|---|
+| masked | +0.8615 ± 0.0087 | 175.7 |
+| dotprod | +0.6273 ± 0.0282 | 153.0 |
+
+### G3 verdict — **FAIL**
+
+The dot-product head **consistently underperforms** the masked head. All three
+dotprod seeds (+0.588, +0.639, +0.655) land well below all three masked seeds
+(+0.851, +0.861, +0.872); the per-head ±1 std bands do **not** overlap
+(masked ≥ 0.8528 vs dotprod ≤ 0.6555). This is a clear shortfall, not noise.
+
+Per §5/§7, we **stop and report honestly rather than tune around it**. The other
+gates pass: G1 (interface + zero illegal mass + act/evaluate logp consistency),
+G2 (feature-table spot checks), and G4 (full suite green, `ruff`/`mypy --strict`
+clean, both heads run through `train`/`train_multiseat`) all hold. But G3 is the
+*point* of A3, so A3 does **not** graduate: the default head stays `"masked"`
+everywhere, and `"dotprod"` remains an opt-in behind `--head dotprod` / a config
+field for future investigation.
+
+Interpretation (non-authoritative, for the next sprint): on this small probe the
+free per-index head can memorize the tiny reachable action set outright, so the
+feature-sharing that should *help* in the full game instead only adds a
+bottleneck (25-dim features → 64-dim embedding) with no payoff yet. The generic
+static features may also be too coarse to separate high-value plays. Likely
+follow-ups before re-testing: richer/learned action features, a larger
+`embed_dim`, or (per §3 scope) waiting for the A4 structured encoder — and
+re-running this gate on a harder bed where the wide head's generalization tax
+actually bites.

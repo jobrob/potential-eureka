@@ -49,6 +49,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Base seed for reproducibility (default: 0).")
     parser.add_argument("--hidden", type=int, nargs="+", default=[256, 256],
                         help="Policy/value MLP trunk widths (default: 256 256).")
+    parser.add_argument("--head", choices=["masked", "dotprod"], default="masked",
+                        help="Action head: masked free Linear (default) or the A3 "
+                             "feature-derived dot-product head.")
     return parser.parse_args(argv)
 
 
@@ -69,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         num_players=args.players,
         device=args.device,
         seed=args.seed,
+        head=args.head,
     )
 
     # A factory so each opponent seat gets an independent agent (with its own
@@ -94,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 60)
     print(
         f"timesteps={args.timesteps} n_steps={args.n_steps} "
-        f"players={args.players} opponent={args.opponent} "
+        f"players={args.players} opponent={args.opponent} head={args.head} "
         f"device={args.device} seed={args.seed}"
     )
 

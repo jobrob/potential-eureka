@@ -27,14 +27,16 @@ from __future__ import annotations
 
 from heat.ml.selfplay.buffer import RolloutBuffer
 from heat.ml.selfplay.multiseat import MultiSeatCollector, train_multiseat
-from heat.ml.selfplay.policy import HeatPolicy
+from heat.ml.selfplay.policy import DotProductPolicy, HeatPolicy, build_policy
 from heat.ml.selfplay.ppo import A0Config, train
 
 __all__ = [
     "A0Config",
+    "DotProductPolicy",
     "HeatPolicy",
     "MultiSeatCollector",
     "RolloutBuffer",
+    "build_policy",
     "train",
     "train_multiseat",
 ]

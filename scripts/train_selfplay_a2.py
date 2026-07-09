@@ -54,6 +54,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Base seed for reproducibility (default: 0).")
     parser.add_argument("--hidden", type=int, nargs="+", default=[256, 256],
                         help="Policy/value MLP trunk widths (default: 256 256).")
+    parser.add_argument("--head", choices=["masked", "dotprod"], default="masked",
+                        help="Action head: masked free Linear (default) or the A3 "
+                             "feature-derived dot-product head.")
     return parser.parse_args(argv)
 
 
@@ -91,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         num_players=args.players,
         device=args.device,
         seed=args.seed,
+        head=args.head,
     )
 
     # Fill the LAST N seats with scripted HeuristicAgents (pure self-play if 0).
@@ -122,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"timesteps={args.timesteps} n_steps={args.n_steps} "
         f"players={args.players} (policy={n_policy_seats}, "
-        f"scripted={args.scripted_opponents}) track={args.track} "
+        f"scripted={args.scripted_opponents}) track={args.track} head={args.head} "
         f"device={args.device} seed={args.seed}"
     )
 

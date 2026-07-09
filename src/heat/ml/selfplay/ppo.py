@@ -31,7 +31,7 @@ from heat.agents.heuristic_agent import HeuristicAgent
 from heat.ml.env import HeatEnv, OpponentSpec, TrackSource
 from heat.ml.model import resolve_device
 from heat.ml.selfplay.buffer import RolloutBuffer
-from heat.ml.selfplay.policy import HeatPolicy
+from heat.ml.selfplay.policy import PPOPolicy, build_policy
 from heat.ml.spaces import ACTION_DIM, OBS_DIM
 
 
@@ -67,6 +67,10 @@ class A0Config:
     # --- network ---
     #: Policy/value MLP trunk widths.
     hidden_sizes: tuple[int, ...] = (256, 256)
+    #: Action head: ``"masked"`` (A0 free ``Linear`` head, default) or
+    #: ``"dotprod"`` (A3 feature-derived dot-product head). Selected via
+    #: :func:`heat.ml.selfplay.policy.build_policy`.
+    head: str = "masked"
 
     # --- env ---
     #: Total seats (learner + scripted opponents).
@@ -87,7 +91,7 @@ def _default_opponents() -> HeuristicAgent:
 
 def collect_rollout(
     env: HeatEnv,
-    policy: HeatPolicy,
+    policy: PPOPolicy,
     buffer: RolloutBuffer,
     device: torch.device,
     *,
@@ -169,7 +173,7 @@ def collect_rollout(
 
 
 def _bootstrap_value(
-    policy: HeatPolicy,
+    policy: PPOPolicy,
     obs: NDArray[np.float32],
     mask: NDArray[np.bool_],
     device: torch.device,
@@ -186,7 +190,7 @@ def _bootstrap_value(
 
 
 def ppo_update(
-    policy: HeatPolicy,
+    policy: PPOPolicy,
     optimizer: torch.optim.Optimizer,
     batch: dict[str, torch.Tensor],
     config: A0Config,
@@ -278,7 +282,7 @@ def train(
     opponents: OpponentSpec | None = None,
     track: TrackSource | None = None,
     on_iteration: object = None,
-) -> HeatPolicy:
+) -> PPOPolicy:
     """Run the A0 custom PPO loop and return the trained policy.
 
     Collects rollouts of ``n_steps`` by driving a single-seat :class:`HeatEnv`
@@ -315,9 +319,7 @@ def train(
             randomize_seat=config.randomize_seat,
         )
 
-    policy = HeatPolicy(
-        obs_dim=OBS_DIM, action_dim=ACTION_DIM, hidden_sizes=config.hidden_sizes
-    ).to(device)
+    policy = build_policy(config).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=config.learning_rate)
 
     # Seed torch + numpy for reproducibility; the env reset seeds come from rng.

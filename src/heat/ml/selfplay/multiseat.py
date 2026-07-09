@@ -59,7 +59,7 @@ from heat.ml.features import encode_observation
 from heat.ml.model import resolve_device
 from heat.ml.opponents import opponent_action
 from heat.ml.selfplay.buffer import RolloutBuffer
-from heat.ml.selfplay.policy import HeatPolicy
+from heat.ml.selfplay.policy import PPOPolicy, build_policy
 from heat.ml.selfplay.ppo import A0Config, ppo_update
 from heat.ml.spaces import ACTION_DIM, OBS_DIM, step_reward
 
@@ -193,7 +193,7 @@ class MultiSeatCollector:
 
     @staticmethod
     def _seat_value(
-        policy: HeatPolicy,
+        policy: PPOPolicy,
         obs: NDArray[np.float32],
         device: torch.device,
     ) -> float:
@@ -213,7 +213,7 @@ class MultiSeatCollector:
 
     def collect(
         self,
-        policy: HeatPolicy,
+        policy: PPOPolicy,
         n_steps: int,
         device: torch.device,
         rng: np.random.Generator,
@@ -265,7 +265,7 @@ class MultiSeatCollector:
 
     def _play_one_game(
         self,
-        policy: HeatPolicy,
+        policy: PPOPolicy,
         buffers: list[RolloutBuffer],
         device: torch.device,
         rng: np.random.Generator,
@@ -403,7 +403,7 @@ def train_multiseat(
     track: Track | TrackSource | None = None,
     scripted_seats: dict[int, BaseAgent] | None = None,
     on_iteration: object = None,
-) -> HeatPolicy:
+) -> PPOPolicy:
     """Run the A2 shared-policy self-play PPO loop and return the trained policy.
 
     Mirrors :func:`heat.ml.selfplay.ppo.train` (same device/seed handling, same
@@ -444,9 +444,7 @@ def train_multiseat(
         track, config.num_players, scripted_seats=scripted_seats
     )
 
-    policy = HeatPolicy(
-        obs_dim=OBS_DIM, action_dim=ACTION_DIM, hidden_sizes=config.hidden_sizes
-    ).to(device)
+    policy = build_policy(config).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=config.learning_rate)
 
     if config.seed is not None:
