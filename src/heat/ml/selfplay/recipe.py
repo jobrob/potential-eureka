@@ -72,6 +72,13 @@ class A5Config(A0Config):
     #: Eval games per checkpoint (~half per seat order).
     eval_games: int = 40
 
+    # --- dense terminal-margin target (Sprint A6) ---
+    #: Coefficient on :func:`heat.ml.spaces.terminal_margin`, added to each policy
+    #: seat's game-end reward during *training* collection (never during eval).
+    #: ``0.0`` == off (pre-A6 behavior); the A6 gate decides whether this default
+    #: flips to 0.5.
+    margin_coef: float = 0.0
+
     # --- Stage-1 validation ---
     #: Iteration of the Stage-1 check (~30k steps at n_steps=2048).
     stage1_iter: int = 15
@@ -266,8 +273,14 @@ def train_selfplay_a5(
         if len(pool) > 0 and rng.random() < config.pool_prob:
             seat = int(rng.integers(config.num_players))
             scripted_seats = {seat: pool.sample(rng)}
+        # A6: the dense terminal-margin term is applied only to TRAINING
+        # collection. Eval (`_evaluate_vs` -> `_EvalCollector`) never passes
+        # `margin_coef`, and scores off the terminal state via `_placement_reward`
+        # directly -- so the vs-weak / vs-oldest yardstick is identical across
+        # arms regardless of `margin_coef`.
         collector = MultiSeatCollector(
-            track, config.num_players, scripted_seats=scripted_seats
+            track, config.num_players, scripted_seats=scripted_seats,
+            margin_coef=config.margin_coef,
         )
 
         # --- collect one rollout, build the concatenated PPO batch ---

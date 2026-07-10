@@ -146,3 +146,81 @@ invocation supported (`--arms baseline margin --seeds ...`), rows print immediat
   (`Implement Sprint A6: ...` with the verdict in the subject), only after full
   suite green + gate run. `git add` specific paths; do not push. End both messages
   with: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+
+## 8. Gate results (2026-07-10) — verdict: G2 FAIL, default stays 0.0
+
+Setup: `scripts/a6_gate.py` defaults — Tiny-Heat, 2 players, masked head, pool
+recipe (`pool_prob=0.5`), 150k steps (~73 iterations), seeds {0,1,2}. Baseline =
+`margin_coef=0.0` (a re-run of the A5 pool arm; consistent with §8 there); margin =
+`margin_coef=0.5`. Checkpoint columns read the vs-weak winrate off the eval record
+nearest 20k / 40k / 80k steps; `steps->=70%` is the first eval whose vs-weak winrate
+reaches 0.70.
+
+| arm | seed | wr@20k | wr@40k | wr@80k | final | steps->=70% | min entropy | stage1 | wall(s) |
+|---|---|---|---|---|---|---|---|---|---|
+| baseline | 0 | 0.750 | 0.775 | 0.825 | 0.750 | 20588 | 0.567 | pass | 145 |
+| baseline | 1 | 0.675 | 0.825 | 0.875 | 0.950 | 41209 | 0.576 | pass | 131 |
+| baseline | 2 | 0.700 | 0.850 | 0.750 | 0.775 | 20615 | 0.537 | pass | 171 |
+| margin | 0 | 0.675 | 0.850 | 0.850 | 0.875 | 41140 | 0.445 | pass | 138 |
+| margin | 1 | 0.625 | 0.850 | 0.850 | 0.900 | 41152 | 0.467 | pass | 135 |
+| margin | 2 | 0.725 | 0.750 | 0.850 | 0.875 | 20567 | 0.495 | pass | 160 |
+
+| arm | wr@20k | wr@40k | wr@80k | final | mean steps->=70% |
+|---|---|---|---|---|---|
+| baseline | 0.708 ± 0.031 | 0.817 ± 0.031 | 0.817 ± 0.051 | 0.825 ± 0.089 | 27471 ± 9714 |
+| margin | 0.675 ± 0.041 | 0.817 ± 0.047 | 0.850 ± 0.000 | 0.883 ± 0.012 | 34286 ± 9701 |
+
+### The decisive finding: the margin term is identically zero on this bed
+
+The margin is **provably 0 for every transition on the 1-lap Tiny-Heat bed**, so the
+two arms train on byte-identical rewards and the dense target contributes *nothing*.
+Faithfully mirroring `features._track_block` (design §4.1), each player's remaining
+distance is `remaining = max(0, laps*length - (lap*length + position))`. Tiny-Heat
+has `laps=1` and the engine races at `lap=1`, so for every unfinished player
+`lap*length (14) >= laps*length (14)` and `remaining` clips to 0; finished players
+are 0 by definition. Hence `terminal_margin ≡ 0` (verified empirically: 86/86 calls
+during a smoke run return 0.0; 20/20 games at a forced truncation return 0.0). This
+is the same degeneracy that makes `_track_block.dist_to_finish` always 0 on a 1-lap
+track — a property of the frozen feature convention, not of this implementation.
+
+`terminal_margin` is pure (no RNG/state side effects, checked), so `reward += 0.5*0`
+is an exact no-op: a single collect with `margin_coef=0.5` produces byte-identical
+reward streams to `0.0` (0.0 max-diff). The table's apparent between-arm differences
+are therefore **not attributable to the margin**. They are run-to-run nondeterminism
+of the A5 self-play loop: two identical `margin_coef=0.0` runs at the same seed
+diverge by ~0.27 in max parameter and ~0.12 in mean entropy. That nondeterminism is
+pre-existing A5 behavior (the `coef=0.0` path is byte-identical to pre-A6), not
+introduced by A6, and it dominates any per-seat comparison at this budget.
+
+### Verdicts (per §5)
+
+- **G1 — margin function correct: PASS.** `tests/test_a6_margin.py` (6 tests) —
+  antisymmetry, ±1 clipping, both-finished, finished-vs-not, solo, and the collector
+  plumbing (margin only at game end, only when `coef != 0`, on truncation too) —
+  all green. The unit tests exercise a *live* margin by driving a multi-lap track;
+  the arithmetic is correct where the bed is non-degenerate.
+- **G2 — sample efficiency: FAIL.** By the letter of §5: mean wr@40k is **0.817 for
+  both arms** (not baseline+3), and `steps->=70%` is **not strictly lower on every
+  seed** (margin is worse on seed 0: 41140 vs 20588). The "no final regression"
+  clause is met (margin final 0.883 ≥ baseline 0.825), but the primary criterion is
+  not. More fundamentally, the margin is identically 0 on this bed, so **no gain is
+  even possible** — this is not a ceiling effect but an *inert-signal* effect. FAIL,
+  reported as measured, no coefficient tuning.
+- **G3 — default-off safety: PASS.** With `margin_coef=0.0` the branch is never
+  entered (0 calls) and the stored reward stream is byte-identical to the pre-A6
+  default-constructor collector (`test_margin_coef_zero_byte_identity`). Full suite:
+  **1050 passed / 1 skipped**. `ruff check` clean; `mypy --strict` clean on the
+  changed `src` files.
+- **G4 — decision: default stays 0.0.** Gate did not PASS, so `A5Config.margin_coef`
+  remains `0.0` (opt-in, off). The mechanism is committed and correct, ready to be
+  re-gated on a bed where it can carry signal.
+
+### Follow-up (not part of A6; out of scope here)
+
+The result is a **bed/target mismatch**, not a broken mechanism. To actually test the
+dense target, a future sprint should either (a) run the gate on a **multi-lap** bed
+where `remaining` is non-degenerate, and/or (b) make the terminal reward
+**finish-order-aware** so a dominant win is graded above a squeaker even at full
+termination (where all `remaining` are 0). A prerequisite for any real A/B on this
+loop is to **make A5 training reproducible** (same seed → same weights); the current
+run-to-run nondeterminism is large enough to swamp a small dense-reward effect.

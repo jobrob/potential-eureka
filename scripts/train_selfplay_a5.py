@@ -55,6 +55,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Controller engages below this entropy (default: 0.40).")
     parser.add_argument("--pool-prob", type=float, default=0.5,
                         help="Per-iteration pool-opponent probability (default: 0.5).")
+    parser.add_argument("--margin-coef", type=float, default=0.0,
+                        help="A6 dense terminal-margin coefficient added to the "
+                             "training reward (default: 0.0 == off).")
     parser.add_argument("--pool-capacity", type=int, default=5,
                         help="Recent snapshots retained (default: 5).")
     parser.add_argument("--snapshot-every", type=int, default=10,
@@ -93,6 +96,7 @@ def build_config(args: argparse.Namespace) -> A5Config:
         head=args.head,
         entropy_floor=args.entropy_floor,
         pool_prob=0.0 if args.arm == "pure" else args.pool_prob,
+        margin_coef=args.margin_coef,
         pool_capacity=args.pool_capacity,
         snapshot_every=args.snapshot_every,
         eval_every=args.eval_every,

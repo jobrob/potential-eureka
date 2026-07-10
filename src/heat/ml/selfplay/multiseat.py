@@ -61,7 +61,7 @@ from heat.ml.opponents import opponent_action
 from heat.ml.selfplay.buffer import RolloutBuffer
 from heat.ml.selfplay.policy import PPOPolicy, build_policy
 from heat.ml.selfplay.ppo import A0Config, ppo_update
-from heat.ml.spaces import ACTION_DIM, OBS_DIM, step_reward
+from heat.ml.spaces import ACTION_DIM, OBS_DIM, step_reward, terminal_margin
 
 #: A single game yields at most 5 recordable decisions per active seat per round
 #: (GEAR, CARDS, REACT, SLIPSTREAM, DISCARD), bounded by ``MAX_ROUNDS`` rounds.
@@ -106,6 +106,11 @@ class MultiSeatCollector:
         num_players: total seats (policy + scripted). Must be ``>= 2``.
         scripted_seats: optional ``{seat_id: BaseAgent}`` for seats driven by a
             scripted agent instead of the policy; default none (pure self-play).
+        margin_coef: Sprint A6 dense terminal-margin coefficient. When non-zero,
+            each policy seat's game-end reward gains
+            ``margin_coef * terminal_margin(state, seat)`` -- a graded progress
+            lead over the field, paid on BOTH terminated and truncated ends.
+            Default ``0.0`` keeps stored rewards byte-identical to pre-A6.
     """
 
     def __init__(
@@ -114,11 +119,13 @@ class MultiSeatCollector:
         num_players: int,
         *,
         scripted_seats: dict[int, BaseAgent] | None = None,
+        margin_coef: float = 0.0,
     ) -> None:
         if num_players < 2:
             raise ValueError(f"num_players must be >= 2, got {num_players}")
         self._track_source = track
         self.num_players = num_players
+        self.margin_coef = margin_coef
         self.scripted_seats: dict[int, BaseAgent] = dict(scripted_seats or {})
         for seat in self.scripted_seats:
             if not (0 <= seat < num_players):
@@ -362,6 +369,14 @@ class MultiSeatCollector:
             reward = step_reward(
                 prev.prev_state, state, seat, done=True, terminated=terminated
             )
+            # A6 dense terminal-margin target (design §4.2): add the graded
+            # progress lead over the field at game end, on BOTH terminated and
+            # truncated ends -- a progress differential is meaningful even at a
+            # time-limit cutoff, where the sparse placement target is silent.
+            # Added BEFORE the §4.6 truncation fold; default coef 0.0 => the
+            # stored reward stream is byte-identical to pre-A6.
+            if self.margin_coef != 0.0:
+                reward += self.margin_coef * terminal_margin(state, seat)
             # truncation != termination (A2 design §4.6): a time-limit cutoff must
             # not zero the value bootstrap the way done=True does in GAE. Fold
             # gamma * V(s_next) into the final reward (s_next = the post-game obs

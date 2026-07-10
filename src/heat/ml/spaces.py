@@ -25,6 +25,7 @@ import numpy as np
 import gymnasium as gym
 
 from heat.models.game_state import GameState
+from heat.models.player_state import PlayerState
 
 # ---------------------------------------------------------------------------
 # Contract version
@@ -208,6 +209,57 @@ def _placement_reward(state: GameState, learner_id: int) -> float:
         return 0.0
     rank = player.finish_order  # 1-based
     return 1.0 - 2.0 * (rank - 1) / (n - 1)
+
+
+def terminal_margin(state: GameState, player_id: int) -> float:
+    """Normalized progress lead over the best opponent at game end (Sprint A6).
+
+    A *dense* terminal target: how far ahead of the whole field the learner is,
+    as a fraction of one full lap. Positive == leading; a one-full-lap lead
+    saturates at ``+1`` (and a one-lap deficit at ``-1``). Unlike the sparse
+    :func:`_placement_reward` (which says only *whether* you won), this grades a
+    dominant position apart from a lucky squeaker, so GAE returns -- and therefore
+    the PPO value loss AND advantages -- carry graded information.
+
+    Using the same absolute-progress arithmetic as
+    :func:`heat.ml.features._track_block`
+    (``abs_pos = player.lap * length + player.position``), each player's
+    *remaining* distance to the finish is::
+
+        remaining(p) = 0.0                                  if p.finished
+                     = max(0, laps*length - abs_pos(p))     otherwise
+
+    A finished player has zero remaining, so it counts as strictly ahead of any
+    opponent still on track. The margin is the gap between the best (smallest)
+    opponent remaining and the learner's own, normalized by ``track.length`` and
+    clipped to ``[-1, +1]``::
+
+        margin = clip((min_opp remaining(opp) - remaining(me)) / length, -1, +1)
+
+    In an unclipped 2-seat game ``margin(s, 0) == -margin(s, 1)`` (antisymmetric).
+    Returns ``0.0`` for a solo field (``n <= 1``), which has no opponent to lead.
+    """
+    n = state.starting_player_count or state.num_players
+    if n <= 1:
+        return 0.0
+    length = state.track.length or 1
+    laps = state.track.laps or 1
+    total_len = laps * length
+
+    def _remaining(p: PlayerState) -> float:
+        if p.finished:
+            return 0.0
+        abs_pos = p.lap * length + p.position
+        return max(0.0, float(total_len - abs_pos))
+
+    my_remaining = _remaining(state.get_player(player_id))
+    opp_remaining = [
+        _remaining(p) for p in state.players if p.player_id != player_id
+    ]
+    if not opp_remaining:  # pragma: no cover - guarded by n <= 1 above
+        return 0.0
+    margin = (min(opp_remaining) - my_remaining) / length
+    return float(np.clip(margin, -1.0, 1.0))
 
 
 def _spinout_penalty(
