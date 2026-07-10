@@ -29,14 +29,27 @@ from heat.ml.selfplay.buffer import RolloutBuffer
 from heat.ml.selfplay.multiseat import MultiSeatCollector, train_multiseat
 from heat.ml.selfplay.policy import DotProductPolicy, HeatPolicy, build_policy
 from heat.ml.selfplay.ppo import A0Config, train
+from heat.ml.selfplay.recipe import (
+    A5Config,
+    EntropyController,
+    Stage1ValidationError,
+    train_selfplay_a5,
+)
+from heat.ml.selfplay.snapshots import SnapshotAgent, SnapshotPool
 
 __all__ = [
     "A0Config",
+    "A5Config",
     "DotProductPolicy",
+    "EntropyController",
     "HeatPolicy",
     "MultiSeatCollector",
     "RolloutBuffer",
+    "SnapshotAgent",
+    "SnapshotPool",
+    "Stage1ValidationError",
     "build_policy",
     "train",
     "train_multiseat",
+    "train_selfplay_a5",
 ]

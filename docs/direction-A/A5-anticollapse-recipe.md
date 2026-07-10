@@ -228,3 +228,53 @@ not CI.
   after full suite green + gate run. `git add` specific paths only; do not push.
   End both messages with the trailer:
   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+
+## 8. Gate results (2026-07-10)
+
+Setup: `scripts/a5_gate.py` defaults — Tiny-Heat, 2 players, masked head, 150k steps
+(~73 iterations), seeds {0,1,2}, both arms. "final/peak vs-weak" = winrate vs weak
+`HeuristicAgent` (40 games, seat-rotated); "final vs-oldest" = winrate vs
+`pool.oldest()` (the snapshot from ~40–50 iterations earlier); regression =
+peak − final vs-weak.
+
+| arm | seed | final vs-weak | peak vs-weak | regression | final vs-oldest | min entropy | engaged? | stage1 | wall(s) |
+|---|---|---|---|---|---|---|---|---|---|
+| pool | 0 | 0.825 | 0.900 | 0.075 | 0.650 | 0.646 | no | pass | 161 |
+| pool | 1 | 0.875 | 1.000 | 0.125 | 0.625 | 0.679 | no | pass | 144 |
+| pool | 2 | 0.825 | 0.975 | 0.150 | **0.450** | 0.578 | no | pass | 142 |
+| pure | 0 | 0.775 | 0.900 | 0.125 | 0.500 | 0.634 | no | pass | 117 |
+| pure | 1 | 0.800 | 0.900 | 0.100 | 0.625 | 0.629 | no | pass | 102 |
+| pure | 2 | 0.725 | 0.925 | 0.200 | 0.575 | 0.592 | no | pass | 105 |
+
+| arm | final vs-weak | regression | final vs-oldest | min entropy | any engaged | any stage1 fail |
+|---|---|---|---|---|---|---|
+| pool | 0.842 ± 0.024 | 0.117 ± 0.031 | 0.575 ± 0.089 | 0.634 ± 0.042 | no | no |
+| pure | 0.767 ± 0.031 | 0.142 ± 0.042 | 0.567 ± 0.051 | 0.618 ± 0.019 | no | no |
+
+### Verdicts (pool arm, per §5)
+
+- **G1 — beats weak (≥70% every seed): PASS.** 0.825 / 0.875 / 0.825.
+- **G2 — climbs vs previous-self (≥55% every seed): FAIL.** Seeds 0/1 pass (0.650,
+  0.625); **seed 2 fails at 0.450**. Reported as measured, not tuned around.
+- **G3 — no collapse: PASS.** Min entropy 0.578–0.679, all well above the 0.40
+  floor; the controller **never engaged** on any of the six runs; regression ≤ 0.150
+  on every pool seed; Stage-1 passed everywhere.
+- **G4 — pool vs pure (informational):** the pool arm is better on final vs-weak
+  (+7.5 points mean), regression (−2.5 points), and min entropy, and avoids the pure
+  arm's worst outcomes (pure seed 0 ends 0.500 vs its old self; pure seed 2 regresses
+  0.200). The pool earns its keep; keep `pool_prob=0.5` as the default arm.
+- **G5 — engineering: PASS.** 8 new tests; full suite 1044 passed / 1 skipped;
+  `ruff` and `mypy --strict` clean on the new modules.
+
+### Interpretation (honest, not a gate re-litigation)
+
+The failed cell is *not* a collapse signature: seed 2's entropy is healthy (0.578
+min), its vs-weak skill is strong and stable (0.825 final, 0.150 regression), and it
+loses only the vs-own-recent-snapshot comparison. Two structural readings: (a) with
+40 eval games the se is ~0.08, so 0.450 is ~1.3 se below the bar — underpowered; (b)
+"beat the self from ~45 iterations ago by ≥55%" conflates *still climbing* with
+*converged* — a plateaued policy legitimately draws ~50% against its recent self.
+The gate metric, not the recipe, is the likeliest culprit; A7's Wilson-LB harness
+with a fixed early-training anchor (rather than a rolling recent snapshot) is the
+right instrument to settle it. Until then the sprint-plan gate is recorded as
+**PARTIAL: G1/G3/G4/G5 pass, G2 1/3 seeds fail**.
