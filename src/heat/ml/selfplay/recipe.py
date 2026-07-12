@@ -33,6 +33,7 @@ from heat.agents.heuristic_agent import HeuristicAgent
 from heat.models.track import Track
 from heat.ml.env import TrackSource
 from heat.ml.model import resolve_device
+from heat.ml.selfplay.eval_harness import _EvalCollector
 from heat.ml.selfplay.multiseat import MultiSeatCollector
 from heat.ml.selfplay.policy import PPOPolicy, build_policy
 from heat.ml.selfplay.ppo import A0Config, ppo_update
@@ -148,19 +149,6 @@ class EntropyController:
 # ---------------------------------------------------------------------------
 # Eval (probe-style vs-opponent winrate, both seat orders)
 # ---------------------------------------------------------------------------
-
-
-class _EvalCollector(MultiSeatCollector):
-    """Collector that captures each game's terminal state (for eval scoring)."""
-
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
-        self.last_state: object = None
-
-    def _on_game_end(
-        self, state: object, terminated: bool, truncated: bool
-    ) -> None:
-        self.last_state = state
 
 
 def _evaluate_vs(

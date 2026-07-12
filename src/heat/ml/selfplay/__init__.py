@@ -26,6 +26,18 @@ Modules
 from __future__ import annotations
 
 from heat.ml.selfplay.buffer import RolloutBuffer
+from heat.ml.selfplay.checkpoint import (
+    CheckpointMismatchError,
+    load_policy,
+    save_policy,
+)
+from heat.ml.selfplay.eval_harness import (
+    EvalCell,
+    EvalReport,
+    evaluate_policy,
+    evaluate_vs_anchor,
+    held_out_tracks,
+)
 from heat.ml.selfplay.multiseat import MultiSeatCollector, train_multiseat
 from heat.ml.selfplay.policy import DotProductPolicy, HeatPolicy, build_policy
 from heat.ml.selfplay.ppo import A0Config, train
@@ -40,8 +52,11 @@ from heat.ml.selfplay.snapshots import SnapshotAgent, SnapshotPool
 __all__ = [
     "A0Config",
     "A5Config",
+    "CheckpointMismatchError",
     "DotProductPolicy",
     "EntropyController",
+    "EvalCell",
+    "EvalReport",
     "HeatPolicy",
     "MultiSeatCollector",
     "RolloutBuffer",
@@ -49,6 +64,11 @@ __all__ = [
     "SnapshotPool",
     "Stage1ValidationError",
     "build_policy",
+    "evaluate_policy",
+    "evaluate_vs_anchor",
+    "held_out_tracks",
+    "load_policy",
+    "save_policy",
     "train",
     "train_multiseat",
     "train_selfplay_a5",

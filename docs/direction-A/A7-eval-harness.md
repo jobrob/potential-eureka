@@ -168,3 +168,128 @@ Chunk invocations to stay inside command timeouts.
   only after full suite green + gate runs. `git add` specific paths; do not push.
   End both messages with:
   `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+
+## 8. Gate results (2026-07-10)
+
+Headline: **A7 built and green; the harness is validated correct against an
+independent baseline. The G3 anchor probe settles A5's disputed G2 — seed 2
+genuinely CLIMBS (final-vs-iter15 anchor 76.5%, Wilson-LB 0.702 > 0.5 over 200
+games), so A5 G2 closes as a yardstick artifact, not a recipe failure.**
+
+All runs on CPU. Policy grid via `scripts/a7_skillbar.py`; the two G3 training
+runs via `scripts/train_selfplay_a5.py --save`.
+
+### G1 — reproduces known baselines
+
+Heuristic-only grid, `StrongHeuristicAgent` in the policy seat vs a weak
+`HeuristicAgent` field, policy seat rotated game-to-game (seat-neutral):
+
+| split | seats | strong win% | Wilson-LB | chance | mean reward | LB>chance |
+|---|---|---|---|---|---|---|
+| tiny (200/cell) | 2 | 55.0% | 0.481 | 0.500 | +0.100 | no |
+| tiny | 3 | 54.0% | 0.471 | 0.333 | +0.370 | yes |
+| tiny | 4 | 48.5% | 0.417 | 0.250 | +0.323 | yes |
+| tiny | 6 | 16.5% | 0.120 | 0.167 | +0.154 | ~chance |
+| heldout (100/cell) | 2 | 37.0% | 0.282 | 0.500 | −0.260 | no |
+| heldout | 3 | 33.0% | 0.246 | 0.333 | −0.100 | no |
+| heldout | 4 | 32.0% | 0.237 | 0.250 | −0.013 | no |
+| heldout | 6 | 12.0% | 0.070 | 0.167 | −0.192 | no |
+
+Random-agent sanity (policy seat = `RandomAgent`, vs weak, 200 games): tiny 2p
+**38.0%** (mean −0.240), heldout 2p **0.0%** (mean −0.925) — random is well below
+the weak field everywhere (direction check PASS; ranking is random < weak).
+
+**The literal bar ("strong beats weak, Wilson-LB above chance at every seat on
+both splits") is NOT met.** Per the gate discipline this is investigated as
+harness-bug-vs-true-result, and it is a **true result**, cross-validated against
+the independent `run_batch` engine path (fresh per-game agent factories,
+seat-neutral by averaging both seat assignments):
+
+- `_play_scripted_game` vs the engine `Game` on identical (track, seed, agents):
+  **0 / 40 winner mismatches** — the harness game driver is faithful.
+- 2p seat-neutral strong-vs-weak, `run_batch`: **tiny 52.7%** (strong@seat0 24.0%
+  vs strong@seat1 **81.5%** — extreme short-track seat bias) vs the harness's
+  55.0%; **heldout (same 20 tracks) 40.7%** vs the harness's 37.0%. Both within
+  sampling noise.
+
+So `StrongHeuristicAgent` only *marginally* edges the weak heuristic at 2p
+first-place on tiny, and **actively loses on the generated-track distribution** —
+a real property (the strong agent appears tuned to the static tracks), not a
+harness defect. **Recorded 2p strong-vs-weak reference point: 55.0% (tiny) /
+37.0% (heldout), matching `run_batch` ground truth (52.7% / 40.7%).**
+**Verdict: instrument-reproduces-ground-truth PASS; the literal strong>weak-LB
+numeric bar FAILs by a true, cross-validated result — reported as measured, no
+game-count adjustment.**
+
+### G2 — held-out split verifiably disjoint
+
+`test_heldout_split_disjoint_from_training_namespaces`: 600 training-namespace
+tracks (`base_seed` ∈ {1, 12345}, 300 seeds each) and the 50-track held-out set
+(`base_seed=0`, seeds `900_000+`) share **zero** full-structural fingerprints
+(the fingerprint adapts `features._track_fingerprint`, adding per-space lanes +
+the start grid so only genuinely identical tracks collide). **PASS.**
+
+### G3 — the A5 G2 dispute, settled with power
+
+Trained one A5-recipe policy (pool arm, seed 2, 150k steps, 137.5s) and its
+iteration-15 anchor (a second `--save` run at `--timesteps 30720` = 15 iters,
+byte-identical to iteration 15 of the full run since the same seed makes the
+iteration prefix identical). `evaluate_vs_anchor`, 200 games, Tiny-Heat 2p:
+
+| probe | games | wins | win% | Wilson-LB | Wilson-UB | verdict |
+|---|---|---|---|---|---|---|
+| final(150k) vs iter-15 anchor | 200 | 153 | 76.5% | **0.702** | 0.818 | **CLIMBS (LB > 0.5)** |
+
+(For reference the same final policy beats the weak heuristic 92.5% at tiny 2p.)
+
+**A5-routing conclusion: A5's disputed G2 is CLOSED as a measurement artifact.**
+The A5 gate's "seed 2 fails at 0.450 vs oldest" used a *rolling recent snapshot*
+at only 40 games (se ≈ 0.08) — it conflated "still climbing" with a moving
+target and was underpowered. With a **fixed** early-training anchor and 200
+games, seed 2 climbs decisively (Wilson-LB 0.702 ≫ 0.5). This is exactly the
+"yardstick problem, not recipe problem" reading A5 §8 hypothesized. The A5 recipe
+is validated; **A5's sprint-plan gate can be recorded as G2-cleared** (a
+measurement artifact, not a recipe failure). Either outcome passes A7 — the
+instrument worked.
+
+### G4 — end-to-end policy report
+
+`a7_skillbar.py` on the seed-2 checkpoint produced the full grid (weak+strong ×
+{2,3,4,6} × {tiny,heldout}, 50 games/cell, 16 cells, 43.7s) without error; every
+cell is internally consistent (wins ≤ games, LB ≤ rate ≤ UB, chance = 1/seats).
+The trained tiny-2p policy dominates on its training bed (vs weak: 86% / 90% /
+72% at 2/3/4 seats, all Wilson-LB above chance; vs strong: 78% / 70% / 62%) and
+**collapses on held-out generated tracks** (≈0–10%, strongly negative mean
+reward) — the known tiny→generated generalization gap, which A7 now *measures*.
+**PASS.**
+
+### G5 — engineering
+
+New tests 6/6 green; full suite **1056 passed / 1 skipped** (~2m51s); `ruff`
+clean; `mypy --strict` clean on the new `checkpoint.py` / `eval_harness.py` (and
+the edited `recipe.py`). The only training-path change is the additive `--save`
+flag; `_EvalCollector` was promoted into `eval_harness.py` and imported back into
+`recipe.py` (one implementation, no behavior change). **PASS.**
+
+### Instrument caveats surfaced (for A6/A4/A8 consumers)
+
+1. **Seat bias is large and must be averaged out.** Tiny 2p strong@seat0 24% vs
+   strong@seat1 81.5% — the harness's game-to-game policy-seat rotation is
+   load-bearing; any fixed-seat read would be badly wrong.
+2. **First-place rate saturates toward chance at 6 seats** even when mean
+   placement reward stays positive (crowded short-track fields). At high seat
+   counts read the graded mean placement reward alongside first-place rate.
+3. **`StrongHeuristicAgent` does not dominate the generated-track distribution**
+   (loses to the weak heuristic at 2p first-place). A real finding, out of A7
+   scope — flagged for a follow-up.
+
+### Deviation from §3/§7
+
+No `--save-at-iter` flag: the anchor is produced by a **second `--save` run at
+reduced `--timesteps`** (the spec's explicitly-allowed "`--save`-produced early
+checkpoint" route). Because the same `--seed` makes iterations 1..k byte-
+identical regardless of the total, `--timesteps 30720 --seed 2` reproduces
+exactly the policy the full 150k seed-2 run holds at iteration 15. This is the
+smallest mechanism that works *and* keeps §7's "recipe.py: no behavior change
+beyond the `_EvalCollector` import" — an in-run policy-snapshot hook would have
+required a recipe training-path change. Documented in the `--save` help.

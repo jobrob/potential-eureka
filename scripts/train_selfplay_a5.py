@@ -68,6 +68,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Eval games per checkpoint (default: 40).")
     parser.add_argument("--no-stage1", action="store_true",
                         help="Disable the Stage-1 validation check.")
+    parser.add_argument("--save", type=str, default=None, metavar="PATH",
+                        help="Save the FINAL trained policy to PATH (Sprint A7 "
+                             "checkpoint: save_policy). Anchor tip: an early "
+                             "checkpoint is just a second run with the SAME "
+                             "--seed and a smaller --timesteps -- iterations "
+                             "1..k are byte-identical, so e.g. --timesteps 30720 "
+                             "(15 iters at n_steps=2048) --seed 2 --save "
+                             "anchor.pt reproduces exactly the policy the full "
+                             "150k --seed 2 run holds at iteration 15.")
     return parser.parse_args(argv)
 
 
@@ -137,13 +146,19 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.perf_counter()
     try:
-        _policy, records = train_selfplay_a5(config, track=track, on_iteration=_log)
+        policy, records = train_selfplay_a5(config, track=track, on_iteration=_log)
     except Stage1ValidationError as exc:
         print("=" * 72)
         print(f"STAGE-1 ABORT: {exc}")
         print(f"diagnostics: {exc.diagnostics}")
         return 2
     elapsed = time.perf_counter() - t0
+
+    if args.save is not None:
+        from heat.ml.selfplay.checkpoint import save_policy
+
+        save_policy(policy, config, args.save)
+        print(f"Saved final policy -> {args.save}")
 
     print("=" * 72)
     print("Eval records:")
