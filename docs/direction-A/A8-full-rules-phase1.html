@@ -11,15 +11,15 @@
 <header class="hybrid-hero">
   <div class="hybrid-shell hybrid-hero-grid">
     <div>
-      <span class="status">Phase 1 partial</span>
+      <span class="status">Phase 1 complete · final gate PASS</span>
       <h1>Sprint A8: full-rules Phase 1.</h1>
-      <p class="hero-copy">The scale hypothesis is confirmed, and five PPO epochs materially improve held-out skill. S2's fixed opponent anchor lifts selected skill again but makes checkpoint oscillation 28% worse, so the anchor is rejected and stabilization remains open.</p>
-      <p><strong>Direction A · full rules · domain randomization</strong><br><span class="muted">Implementation and evidence record · updated 14 July 2026</span></p>
+      <p class="hero-copy">G0002 learned broad full-rules play and passed a one-use untouched final test across four opponent styles and 2, 4, and 6 seats. Direction A Phase 1 is complete.</p>
+      <p><strong>Direction A · full rules · domain randomization</strong><br><span class="muted">Implementation and evidence record · completed 16 July 2026</span></p>
     </div>
     <aside class="status-board" aria-label="Current project status">
       <span class="board-label">Current conclusion</span>
-      <strong>Scale confirmed.<br>Completion partial.</strong>
-      <p>The original 50k pilot was underpowered. Keep five epochs without the S2 anchor; stability remains open.</p>
+      <strong>Generalization confirmed.<br>A8 complete.</strong>
+      <p>Keep G0002 as the adopted recipe. Its untouched final median aggregate reward was +0.1390 and all three runs were positive.</p>
       <div class="palette-dots" aria-label="Document colour palette"><i></i><i></i><i></i><i></i><i></i></div>
     </aside>
   </div>
@@ -37,7 +37,7 @@
       <a href="#s1-results">S1 result</a>
       <a href="#s2-results">S2 result</a>
       <a href="#interpretation">Interpretation</a>
-      <a href="#next-step">Next step</a>
+      <a href="#next-step">Completion protocol</a>
       <a href="#yardstick">Stronger yardstick</a>
       <a href="#throughput">CPU and GPU scale</a>
       <a href="#experiment-plan">Experiment plan</a>
@@ -46,14 +46,14 @@
     <article class="hybrid-content">
       <section id="summary">
         <span class="section-kicker">Executive summary</span>
-        <h2>Scaling changed the conclusion.</h2>
-        <p class="lede">The 50k pilot could not support a method-level conclusion. The scaled campaign shows that the existing sparse-reward PPO system can learn and transfer to held-out generated tracks, but performance still varies by seed, seat count, and checkpoint.</p>
-        <div class="decision-banner"><strong>Decision</strong>Use five PPO epochs without a fixed anchor for future A8 work. S2 raised median selected score from +0.2593 to +0.2987, but checkpoint variability rose from 0.1161 to 0.1491. This fails the experiment's primary stabilization gate, so anchoring remains optional and off by default.</div>
+        <h2>Scaling and an untouched final test close Phase 1.</h2>
+        <p class="lede">The 50k pilot was underpowered. Three 1M-transition G0002 runs learned useful full-rules play, transferred across generated tracks and seat counts, and passed the frozen multi-ruler gate on a one-use untouched track band.</p>
+        <div class="decision-banner"><strong>Decision</strong>Adopt G0002: five PPO epochs, no fixed anchor, scalar collector. G0004 late-checkpoint averaging improved validation skill but missed its primary stabilization threshold, so it remains research evidence rather than the default. Auxiliary heads are deferred because sparse reward already proved sufficient for the A8 learning and generalization claim.</div>
         <div class="hybrid-stats" aria-label="Headline A8 evidence">
           <div class="hybrid-stat"><span>Nominal transitions</span><strong>1M × 3</strong><small>three training seeds</small></div>
           <div class="hybrid-stat"><span>Completed games</span><strong>4,000+</strong><small>per scaled seed</small></div>
           <div class="hybrid-stat"><span>CPU training</span><strong>&lt;45 min</strong><small>all three seeds</small></div>
-          <div class="hybrid-stat"><span>Current verdict</span><strong>Partial</strong><small>learning is real; stability is open</small></div>
+          <div class="hybrid-stat"><span>Final verdict</span><strong>PASS</strong><small>untouched median +0.1390</small></div>
         </div>
       </section>
 
@@ -238,36 +238,36 @@
 
       <section id="interpretation">
         <span class="section-kicker">05 · Interpretation</span>
-        <h2>The remaining problem is stability, not proof of learning.</h2>
+        <h2>Stability remains imperfect, but it no longer blocks the Phase-1 claim.</h2>
         <p>The scale hypothesis is confirmed: 50k was much too early, and thousands rather than hundreds of games were needed before the current PPO system showed useful held-out play. This is still far below the millions of self-play games associated with AlphaZero-style systems; PPO is extracting a signal at this scale.</p>
-        <p>Learning is oscillatory. Individual 300k, 500k, 750k, and 1M checkpoints sometimes improve and then regress before recovering. The next issue is therefore training stability and checkpoint selection, not proof that the environment or reward is incapable of learning.</p>
-        <h3 class="table-title">Why A8 is not complete</h3>
+        <p>Learning is oscillatory. S3 therefore froze one checkpoint rule, compared one averaging treatment on consumed validation data, and committed the selection before opening a new final band. Averaging narrowly missed its stability gate, so the unchanged G0002 recipe went forward and passed.</p>
+        <h3 class="table-title">How the completion protocol closed the open risks</h3>
         <ul class="open-list">
-          <li><strong>Seed sensitivity.</strong><br>Two-player performance varies materially by seed.</li>
-          <li><strong>No dominant milestone.</strong><br>No single checkpoint wins at every seat count.</li>
-          <li><strong>Unreliable yardstick.</strong><br>The “strong” generated-track heuristic is poorly calibrated.</li>
-          <li><strong>Consumed holdout.</strong><br>The same held-out band was used to inspect milestones and must not become a repeatedly tuned final test set.</li>
+          <li><strong>Seed sensitivity bounded.</strong><br>All three G0002 final-test run aggregates were positive; the worst was +0.0890.</li>
+          <li><strong>Checkpoint rule frozen.</strong><br>Every G0002 seed used its registered 1M milestone; no per-seat or per-table cherry-picking.</li>
+          <li><strong>Several rulers.</strong><br>The adopted suite retained weak, repaired, search, and historical-policy results instead of asserting a false total ladder.</li>
+          <li><strong>Fresh final evidence.</strong><br>The <code>1314000..1314039</code> band was opened once after commit <code>c300b0c</code> froze G0002.</li>
         </ul>
       </section>
 
       <section id="next-step">
-        <span class="section-kicker">06 · Recommended next step</span>
-        <h2>Separate evaluation roles, then change one variable.</h2>
-        <p>Keep this scaled run as the baseline. Before selecting “best” checkpoints or tuning against them, split evaluation into a reusable validation band for development and a fresh untouched test band for final claims. The current <code>900000+</code> band has already been inspected and should become validation data, not the source of the final A8 claim.</p>
+        <span class="section-kicker">06 · Completion protocol</span>
+        <h2>Evaluation roles were separated and the final decision was frozen.</h2>
+        <p>The existing <code>900000+</code> and B2 <code>714000+</code> bands are development data. S3 used the B2 band for its matched stabilization comparison, committed G0002 as the winner, and then evaluated it once on <code>1314000..1314039</code>.</p>
         <ol class="step-line" aria-label="Recommended implementation sequence">
-          <li><strong>Split</strong><br>validation and final-test bands</li>
-          <li><strong>Freeze</strong><br>the checkpoint-selection rule</li>
-          <li><strong>Compare</strong><br>one stabilization change</li>
-          <li><strong>Evaluate</strong><br>once on the untouched test</li>
+          <li><strong>Split</strong><br>completed</li>
+          <li><strong>Freeze</strong><br>G0002 at <code>c300b0c</code></li>
+          <li><strong>Compare</strong><br>G0004 not adopted</li>
+          <li><strong>Evaluate</strong><br>final PASS</li>
         </ol>
         <h3 class="table-title">What “freeze the rule” means</h3>
         <p>Choose checkpoints using one declared aggregate over the validation grid, rather than selecting a different milestone for whichever table is being discussed. The recommended primary score is mean placement reward averaged equally across 2-, 4-, and 6-seat cells and across the frozen opponent ladder. Placement reward uses every finishing position and is therefore less volatile than first-place rate, especially with six players. Report win rate and Wilson intervals as supporting evidence, and use them as a tie-break only if two checkpoints have effectively equal placement scores.</p>
         <div class="config-panel" aria-label="Evaluation data roles">
           <div><span>Training</span><strong><code>80008</code> namespace<br>unrestricted sampling</strong></div>
-          <div><span>Validation</span><strong>Existing <code>900000+</code> tracks<br>repeatable development use</strong></div>
-          <div><span>Final test</span><strong>New disjoint frozen band<br>one use after decisions freeze</strong></div>
+          <div><span>Development</span><strong><code>900000+</code> and <code>714000+</code><br>consumed</strong></div>
+          <div><span>Final test</span><strong><code>1314000..1314039</code><br>one use · PASS</strong></div>
         </div>
-        <p>S1 established five epochs as the preferred recipe. S2 then tested fixed opponent anchoring as the only training change: selected skill rose, but checkpoint variability worsened by 28.4%, so the anchor is rejected for stabilization. Do not move directly to a staged curriculum, which adds more moving dynamics to the same unresolved failure. Keep frozen checkpoint selection and design the next experiment to act directly on policy-update or checkpoint stability—for example, a separately gated weight-averaging or update-regularization arm—before spending another three-seed budget.</p>
+        <p>S1 established five epochs as the preferred recipe. S2 rejected fixed anchoring as a stabilization fix. S3 then tested uniform late-checkpoint averaging: broad validation skill improved by +0.1083, but its 0.813 seed-variation ratio narrowly missed the 0.800 gate. The final selection therefore remained G0002. See <a href="A8-s3-stabilization-final-gate.html">the complete S3 and final-gate record</a>.</p>
         <h3 class="table-title">Why these alternatives are ordered this way</h3>
         <div class="data-panel table-wrap">
           <table>
@@ -336,8 +336,8 @@
 
       <section id="experiment-plan">
         <span class="section-kicker">09 · Scoped experiments</span>
-        <h2>Measure the bottleneck, stabilize learning, then scale.</h2>
-        <p>P0, S1, S2, H1, its selected repair, B1, and B2 are implemented and measured; the remaining rows are proposed experiments. Each is deliberately small enough to produce a decision and includes progress logging or a wall-time limit. Code-size estimates include focused tests and experiment support code, but exclude generated results and report prose. They are planning ranges, not commitments.</p>
+        <h2>The bounded A8 experiment ladder is complete.</h2>
+        <p>P0, S1, S2, H1, B1, B2, T1, T2, S3, and the untouched final test are implemented and measured. Every branch either earned adoption or stopped at its predeclared gate; no failed throughput or stabilization arm was expanded merely to rescue its hypothesis.</p>
         <div class="data-panel table-wrap">
           <table>
             <thead><tr><th>Experiment</th><th>Estimated code change</th><th>Hypothesis and confidence</th><th>Scope and time limit</th><th>Decision rule</th></tr></thead>
@@ -350,15 +350,17 @@
               <tr><td><strong>B2: multi-ruler benchmark</strong><br><span class="metric-good">Completed · suite adopted</span></td><td><strong>Small</strong><br>A resumable fixed-matrix harness, atomic per-cell persistence, progress logging, and focused contract tests. No production-agent behavior changed.</td><td>A several-ruler aggregate would identify broader improvement despite non-transitivity. <strong>Medium confidence (~70%).</strong> G0003 improved the aggregate median by +0.062 over G0002 and all four ruler medians agreed.</td><td>Six checkpoints × four rulers × three seat counts × 200 races: 14,400 races on 40 matched tracks. Runtime was 35.3 minutes, inside the 35–40 minute estimate and 60-minute cap.</td><td class="metric-good">Adopt the suite and preserve its per-style results. Prefer G0003 for selected-checkpoint skill, with a seed-sensitivity warning; do not reverse its rejection as a stabilization recipe. <a href="A8-b2-multi-ruler-benchmark.html">Full result.</a></td></tr>
               <tr><td><strong>T1: parallel campaign</strong><br><span class="metric-good">Completed · primary gate passed</span></td><td><strong>Medium</strong><br>Added a spawned campaign supervisor, canonical state hashing, opt-in parallel evaluation, bounded benchmark support, and focused process tests.</td><td>All step counts, game counts, policy hashes, evaluation reports, and parent RNG state matched exactly. Three training workers achieved <strong>2.703×</strong> fixed-work speed-up while retaining 94.8% per-worker throughput. The small evaluation grid achieved only 1.006×.</td><td>Three <code>dev-t1-*</code> 50k jobs at 1/2/3 workers completed in 139.210s, 93.392s, and 51.508s. The six-cell, 120-game evaluation took 8.136s sequentially and 8.089s with three workers.</td><td class="metric-good">Adopt three workers for independent seed campaigns and permit T2 review. Keep evaluation parallelism opt-in; its separate ≥1.5× gate failed. <a href="A8-t1-parallel-campaign-design.html#results">Full result.</a></td></tr>
               <tr><td><strong>T2: phase-first batching</strong><br><span class="metric-bad">Completed · default rejected</span></td><td><strong>Medium</strong><br>Added shared simultaneous-decision helpers, opt-in scalar/phase collection, exact inference and batch telemetry, bounded benchmark support, and focused trace tests. Scalar remains the reference and default.</td><td>Correctness passed, and T2a measured 50.10% simultaneous decisions with a 2.114 mean available batch. T2b improved rollout throughput by only <strong>1.066× median</strong> and reduced inference wall by <strong>13.55%</strong>, below the 1.25× and 25% targets.</td><td>One 100k scalar T2a screen took 80.55s. Three matched 100k CPU repeats per mode took 476.93s, inside the 30-minute cap; per-seed speed-ups were 1.066×, 1.080×, and 1.001×.</td><td class="metric-bad">Stop below the 1.15× continuation threshold. Retain opt-in phase mode, keep scalar defaults, and do not start adaptive lanes, CUDA, or learning-safety compute. <a href="A8-t2-batched-collector-design.html#results">Full result.</a></td></tr>
+              <tr><td><strong>S3: late-checkpoint average</strong><br><span class="metric-bad">Completed · not adopted</span></td><td><strong>Small</strong><br>Added compatible checkpoint averaging, registered G0004, generalized the multi-ruler harness, and froze deterministic summaries and gates.</td><td>G0004 raised validation median aggregate reward by +0.1083 and improved all four ruler medians, but reduced cross-seed SD by 18.7% rather than the required 20%.</td><td>G0002 and G0004: six policies × four rulers × three seat counts × 100 races = 7,200 races in 19.5 minutes.</td><td class="metric-bad">The 0.813 SD ratio missed the ≤0.800 primary gate. Keep G0002 for final; retain G0004 as a skill-positive research lead. <a href="A8-s3-stabilization-final-gate.html">Full result.</a></td></tr>
+              <tr><td><strong>F1: untouched final test</strong><br><span class="metric-good">Completed · PASS</span></td><td><strong>No code change</strong><br>Ran the frozen G0002 selection through the adopted multi-ruler harness on a new track band.</td><td>The Phase-1 method generalizes beyond all inspected development tracks. Median aggregate reward was +0.1390; every run was positive; weak-ruler medians were positive at 2/4/6 seats.</td><td>Three policies × four rulers × three seat counts × 200 races = 7,200 races in 19.0 minutes on <code>1314000..1314039</code>.</td><td class="metric-good">All four predeclared final gates pass. A8 and Direction A Phase 1 are complete.</td></tr>
             </tbody>
           </table>
         </div>
         <p>The stabilization experiment and throughput work answer different questions. S1 reused the existing campaign as its unchanged baseline because seeds and evaluation are deterministic; performance engineering must not change the learning recipe in the same comparison. If the collector changes rollout ordering, re-establish a small matched baseline before attributing any skill difference to PPO settings.</p>
 
         <h3 class="table-title">Artifacts</h3>
-        <p>The project-wide <a href="../policy-generation-registry.html">learned policy registry</a> assigns the ten-epoch baseline <code>G0001</code>, S1 five epochs <code>G0002</code>, and S2 fixed anchor <code>G0003</code>. Its manifests preserve selected paths and hashes while the historical generated filenames remain unchanged. Ten-epoch milestone checkpoints are under <code>runs/a8_scale_1m_seed{0,1,2}/</code>; final checkpoints are <code>runs/a8_1m_seed{0,1,2}.pt</code>. S1 five-epoch milestones are under <code>runs/a8_s1_5ep_seed{0,1,2}/</code>. S2 milestones and evaluation reports are under <code>runs/a8_s2_anchor_seed{0,1,2}/</code>, with logs at <code>runs/a8_s2_anchor_seed{0,1,2}.log</code> and final policies at <code>runs/a8_s2_anchor_seed{0,1,2}.pt</code>. B2 raw counts and timing are stored in <code>runs/a8_b2_multi_ruler.json</code>.</p>
+        <p>The project-wide <a href="../policy-generation-registry.html">learned policy registry</a> assigns the ten-epoch baseline <code>G0001</code>, adopted five-epoch recipe <code>G0002</code>, fixed-anchor recipe <code>G0003</code>, and derived checkpoint-average <code>G0004</code>. Its manifests preserve selected paths and hashes while generated artifacts remain under <code>runs/</code>. S3 validation counts are in <code>runs/a8_s3_validation.json</code>; the one-use final matrix is in <code>runs/a8_final_test.json</code>. Both have adjacent deterministic <code>.summary.json</code> files.</p>
 
-        <div class="verification-panel"><strong>Engineering verification</strong><br>The final heuristic-repair and S2 implementation passed <strong>42 focused strong-heuristic, H1, and A8 tests</strong>. B2 added two focused matrix-contract tests and completed all 72 planned cells. Ruff and strict mypy were clean. The S2 smoke policies were tensor-for-tensor reproducible; all three full seeds produced every planned milestone and evaluation report.</div>
+        <div class="verification-panel"><strong>Final engineering verification</strong><br>The complete repository suite passed <strong>1,102 tests</strong> in 187.21 seconds with one pytest deprecation warning. Strict mypy passed all 60 source files; scoped A8 Ruff and <code>git diff --check</code> were clean; registry validation re-hashed every selected checkpoint successfully. S3 completed all 72 validation cells and the untouched final test completed all 36 cells.</div>
       </section>
     </article>
   </div>

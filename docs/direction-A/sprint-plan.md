@@ -1,7 +1,7 @@
 # Direction A — sprint plan (PPO self-play workhorse, the Big 2 path)
 
-> **Status:** **active roadmap** (updated 2026-07-13). A0–A7 are implemented;
-> A8 Phase 1 is partial and remains the active work. Turns Direction A of
+> **Status:** **implemented** (completed 2026-07-16). A0–A8 are complete;
+> G0002 passed A8's frozen multi-ruler gate on an untouched generated-track band. Turns Direction A of
 > [`heat-rl-transition-plan.md`](../heat-rl-transition-plan.md) into an ordered set of
 > sprints with go/no-go gates. **High-level only** — each sprint gets a detailed design
 > when we reach it. Grounded in the current code (`src/heat/ml/{env,model,features,
@@ -105,8 +105,9 @@ go/no-go for Phase 0.
 ### A6 — First dense target (Direction C, shared)
 **Goal:** raise value SNR with **one** dense signal in Phase 0 — score/margin-based value
 (finishing position/margin or rounds-to-finish) replacing/augmenting the low-SNR ±1
-target. (Remaining Direction-C aux heads — finishing order, per-corner spin, opponent's
-next move — land in Phase 1, A8.)
+target. Remaining Direction-C auxiliary heads were originally assigned to A8, but the
+completion decision deferred them after sparse reward already demonstrated full-rules
+learning and untouched-track generalization.
 **Depends on:** A5 (a learning loop to improve).
 **Deliverable:** margin value target wired into the PPO value loss.
 **Gate:** measurable sample-efficiency gain vs. the ±1 target on Tiny-Heat. **End of
@@ -122,11 +123,13 @@ track split, with Wilson-LB).
 **Gate:** harness reproduces known baselines (strong beats weak by the expected margin);
 held-out track split is genuinely disjoint from any training track.
 
-### [A8 — Full-rules, small-scale, domain-randomized (Phase 1)](A8-full-rules-phase1.html)
+### [A8 — Full-rules, small-scale, domain-randomized (Phase 1) — complete](A8-full-rules-phase1.html)
 **Goal:** lift the proven method from Tiny-Heat to **full Heat rules, full generated-track
 distribution, 2–6 seats, imperfect info**, still modest net/games. Train with **domain
 randomization over tracks and seat counts from the start** (directly attacks the prior
-"USA-only, 0% on generated tracks" failure). Add the **remaining Direction-C aux heads**.
+"USA-only, 0% on generated tracks" failure). Auxiliary heads were explicitly deferred:
+they were not needed to establish the Phase-1 learning/generalization claim, and adding
+them during the final stabilization comparison would have confounded attribution.
 **Depends on:** A0–A7 (the whole method, validated tiny).
 **Deliverable:** a full-rules small-scale training run + an A7 skill-bar report.
 **Gate (Phase-1, the big one):** **generalizes across held-out tracks and seat counts at
@@ -134,6 +137,12 @@ small scale** — beats the weak heuristic comfortably and shows real, non-trivi
 strong. Also emit the **measured games/sec + sample-efficiency curve** that becomes the
 **Phase-2 trigger** (the input to deciding whether Direction D is needed for the 48 h
 run). **This is the completion of Direction A's mandate.**
+
+**Implemented result:** PASS. G0002's one-use final test covered 40 untouched generated
+tracks, four non-transitive rulers, and 2/4/6 seats. Its three aggregate placement rewards
+were +0.0890, +0.1805, and +0.1390; the median was +0.1390 and weak-ruler medians were
+positive at every seat count. S3 checkpoint averaging (G0004) improved validation skill
+but missed its predeclared stabilization gate, so G0002 remained the frozen selection.
 
 ---
 

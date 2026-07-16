@@ -11,15 +11,15 @@
 <header class="hybrid-hero">
   <div class="hybrid-shell hybrid-hero-grid">
     <div>
-      <span class="status">Validation complete · G0004 not adopted · final pending</span>
+      <span class="status">Implemented · final gate PASS · A8 complete</span>
       <h1>S3: make the final policy less dependent on one checkpoint.</h1>
       <p class="hero-copy">Average three late G0002 milestones with one rule for every seed, test the candidate on consumed validation data, then evaluate the frozen winner once on untouched tracks.</p>
       <p><strong>Direction A · A8 completion gate</strong><br><span class="muted">Designed 16 July 2026</span></p>
     </div>
     <aside class="status-board" aria-label="S3 decision rule">
-      <span class="board-label">Frozen final selection</span>
-      <strong>Keep G0002.<br>G0004 ratio 0.813.</strong>
-      <p>Averaging improved broad skill but narrowly missed the predeclared 0.800 seed-variation gate.</p>
+      <span class="board-label">Untouched final decision</span>
+      <strong>G0002 passes.<br>Median +0.1390.</strong>
+      <p>All three runs were positive and weak-ruler medians were positive at 2, 4, and 6 seats.</p>
     </aside>
   </div>
 </header>
@@ -125,7 +125,22 @@
           </table>
         </div>
         <div class="decision-banner"><strong>Frozen selection</strong>Do not adopt G0004 because the primary stabilization gate failed. Retain the averaged policies as a strong research lead, but send G0002-R00, G0002-R01, and G0002-R02 to the untouched final band. This decision was committed before final-test results were opened.</div>
-        <p>The untouched final test uses 40 generated tracks at seeds <code>1314000..1314039</code>, evaluation seed <code>3131</code>, the four frozen B2 rulers, 2/4/6 seats, and 200 races per cell. Results remain pending.</p>
+        <h3 class="table-title">Untouched final result</h3>
+        <p>The final matrix completed all 36 cells and 7,200 races in 1,138.9 seconds on the sealed <code>1314000..1314039</code> band. The frozen G0002 selection passed every predeclared gate without reopening model or checkpoint selection.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Final metric</th><th>Observed</th><th>Gate</th><th>Decision</th></tr></thead>
+            <tbody>
+              <tr><td>Run aggregate rewards</td><td>+0.0890 · +0.1805 · +0.1390</td><td>At least 2 / 3 positive</td><td class="metric-good">3 / 3 · pass</td></tr>
+              <tr><td>Recipe median aggregate</td><td>+0.1390</td><td>&gt; 0</td><td class="metric-good">Pass</td></tr>
+              <tr><td>Worst run aggregate</td><td>+0.0890</td><td>&gt; −0.050</td><td class="metric-good">Pass</td></tr>
+              <tr><td>Weak median reward at 2 / 4 / 6 seats</td><td>+0.255 · +0.292 · +0.120</td><td>All &gt; 0</td><td class="metric-good">Pass</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Recipe-median reward was also positive against repaired heuristic (+0.2309), StaticSearchV1 (+0.0332), and historical G0002 (+0.0514). The result is broad rather than dependent on a single scripted opponent.</p>
+        <div class="decision-banner"><strong>A8 completion verdict</strong>PASS. Full-rules sparse-reward PPO learned across generated tracks and 2–6 seats, the evaluation roles and policy identities are frozen, and the selected recipe generalized on a one-use untouched band. Direction A Phase 1 is complete. G0004 remains a documented skill-positive averaging lead, not the adopted stabilization recipe.</div>
+        <div class="verification-panel"><strong>Verification</strong><br>All 1,102 repository tests passed. Strict mypy passed 60 source files, scoped A8 Ruff was clean, every registered checkpoint hash verified, and both bounded experiment matrices completed every planned cell under their 40-minute caps.</div>
       </section>
     </article>
   </div>

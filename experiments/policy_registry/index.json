@@ -16,7 +16,7 @@
       "display_name": "A8 five-epoch recipe",
       "created_date": "2026-07-13",
       "parent_generation_id": "G0001",
-      "status": "adopted_default",
+      "status": "a8_final_selected",
       "manifest": "experiments/policy_registry/g0002.json"
     },
     {

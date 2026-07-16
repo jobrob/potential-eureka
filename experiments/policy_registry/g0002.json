@@ -5,8 +5,8 @@
   "created_date": "2026-07-13",
   "parent_generation_id": "G0001",
   "experiment_alias": "S1 gentler PPO",
-  "status": "adopted_default",
-  "decision": "Adopted as the A8 default because selected-checkpoint skill improved without a material seat-count regression.",
+  "status": "a8_final_selected",
+  "decision": "Selected before the untouched final test and retained after all final gates passed: median aggregate reward +0.1390, all three runs positive, and positive weak-ruler medians at 2, 4, and 6 seats.",
   "design_document": "docs/direction-A/A8-full-rules-phase1.html#s1-results",
   "recipe": {
     "trainer": "scripts/train_selfplay_a8.py",

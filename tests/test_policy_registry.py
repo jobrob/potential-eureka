@@ -12,8 +12,8 @@ from heat.ml.policy_registry import (
 )
 
 
-def test_retroactive_policy_registry_is_complete_and_hashed() -> None:
-    """The three A8 generations resolve to the exact selected checkpoints."""
+def test_policy_registry_is_complete_and_hashed() -> None:
+    """All four A8 generations resolve to exact selected checkpoints."""
     workspace = Path(__file__).resolve().parents[1]
     validate_registry(
         DEFAULT_REGISTRY_ROOT,
@@ -26,6 +26,9 @@ def test_retroactive_policy_registry_is_complete_and_hashed() -> None:
     assert find_registered_run("G0003-R02")["selected_checkpoint_id"] == (
         "G0003-R02@final"
     )
+    assert find_registered_run("G0004-R01")["sha256"] == (
+        "5c21cd37f04ecd8fd7384e780c3618455bcac05a9244dd30323b455dd912403a"
+    )
 
 
 def test_generation_changes_only_capture_recipe_changes() -> None:
@@ -33,6 +36,7 @@ def test_generation_changes_only_capture_recipe_changes() -> None:
     g1 = load_generation("G0001")
     g2 = load_generation("G0002")
     g3 = load_generation("G0003")
+    g4 = load_generation("G0004")
     assert [run["seed"] for run in g2["runs"]] == [0, 1, 2]
     assert g1["recipe"]["training_config"]["n_epochs"] == 10
     assert g2["recipe"]["training_config"]["n_epochs"] == 5
@@ -41,3 +45,7 @@ def test_generation_changes_only_capture_recipe_changes() -> None:
     assert g3["recipe"]["opponent_anchor"]["agent_checkpoint_id"] == (
         "G0002-R00@1000K"
     )
+    assert g2["status"] == "a8_final_selected"
+    assert g4["parent_generation_id"] == "G0002"
+    assert g4["recipe"]["source_checkpoint_steps"] == [500000, 750000, 1000000]
+    assert g4["status"] == "rejected_stabilization_skill_gain"
