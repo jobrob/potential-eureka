@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "generation_id": "G0004",
+  "display_name": "A8 late-checkpoint average",
+  "created_date": "2026-07-16",
+  "parent_generation_id": "G0002",
+  "experiment_alias": "S3 uniform late-checkpoint average",
+  "status": "planned",
+  "decision": "Pending the predeclared S3 validation comparison against G0002.",
+  "design_document": "docs/direction-A/A8-s3-stabilization-final-gate.html",
+  "recipe": {
+    "derivation_script": "experiments/stabilize_a8_checkpoints.py",
+    "method": "uniform_parameter_mean",
+    "accumulation_dtype": "float64_or_complex128",
+    "source_generation_id": "G0002",
+    "source_checkpoint_steps": [500000, 750000, 1000000],
+    "per_run_rule": "Average the same seed's 500k, 750k, and 1M checkpoints with equal weight.",
+    "policy_contract": {"codec_version": 3, "obs_dim": 104, "action_dim": 516},
+    "recipe_sha256": "bafa9cd72a025640532ef8dde3ae1ac5dabd2f069438fc38d0b9ad57973d396d"
+  },
+  "source_provenance": {
+    "quality": "captured_clean",
+    "git_commit": "012f929a93e4a89687a468946b9c37aef90da621",
+    "dirty_patch_sha256": null,
+    "evidence": [
+      "docs/direction-A/A8-s3-stabilization-final-gate.html",
+      "src/heat/ml/selfplay/checkpoint.py",
+      "experiments/stabilize_a8_checkpoints.py"
+    ]
+  },
+  "selection_rule": "Use the uniform 500k/750k/1M average for every seed; adopt the generation only if all predeclared S3 validation gates pass.",
+  "runs": [
+    {
+      "agent_id": "G0004-R00",
+      "seed": 0,
+      "selected_checkpoint_id": "G0004-R00@final",
+      "selected_checkpoint": "runs/a8_s3_average/g0004_r00.pt",
+      "source_checkpoint_ids": ["G0002-R00@500K", "G0002-R00@750K", "G0002-R00@1000K"],
+      "bytes": 0,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "agent_id": "G0004-R01",
+      "seed": 1,
+      "selected_checkpoint_id": "G0004-R01@final",
+      "selected_checkpoint": "runs/a8_s3_average/g0004_r01.pt",
+      "source_checkpoint_ids": ["G0002-R01@500K", "G0002-R01@750K", "G0002-R01@1000K"],
+      "bytes": 0,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "agent_id": "G0004-R02",
+      "seed": 2,
+      "selected_checkpoint_id": "G0004-R02@final",
+      "selected_checkpoint": "runs/a8_s3_average/g0004_r02.pt",
+      "source_checkpoint_ids": ["G0002-R02@500K", "G0002-R02@750K", "G0002-R02@1000K"],
+      "bytes": 0,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}

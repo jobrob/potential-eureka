@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_generation_number": 4,
+  "next_generation_number": 5,
   "convention_document": "docs/policy-generation-registry.html",
   "generations": [
     {
@@ -26,6 +26,14 @@
       "parent_generation_id": "G0002",
       "status": "preferred_for_selected_skill_only",
       "manifest": "experiments/policy_registry/g0003.json"
+    },
+    {
+      "generation_id": "G0004",
+      "display_name": "A8 late-checkpoint average",
+      "created_date": "2026-07-16",
+      "parent_generation_id": "G0002",
+      "status": "planned",
+      "manifest": "experiments/policy_registry/g0004.json"
     }
   ]
 }
