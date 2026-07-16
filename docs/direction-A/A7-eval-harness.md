@@ -1,13 +1,8 @@
 # Sprint A7 — Multi-seat / held-out evaluation harness
 
-> **Status:** design (2026-07-10). Detailed design for Sprint A7 of the
-> [Direction A sprint plan](sprint-plan.md). Implementable spec; read this plus
-> `src/heat/ml/selfplay/{recipe,snapshots,multiseat}.py` (the `_EvalCollector`
-> pattern and `SnapshotAgent`), `src/heat/tracks/generator.py`
-> (`track_sampler` and its **seed-namespace** mechanism), `src/heat/simulation/stats.py`
-> (`wilson_interval`), `src/heat/agents/strong_heuristic.py`, and the
-> [A5 gate results](A5-anticollapse-recipe.md) §8 (the G2 dispute this harness must
-> settle).
+> **Status:** **implemented and complete** (2026-07-13). The held-out multi-seat
+> harness landed, closed A5's disputed gate, and now deterministically seeds policy
+> sampling. Retained because it defines and protects A8's evaluation contract.
 
 ## 1. Purpose
 
@@ -293,3 +288,17 @@ exactly the policy the full 150k seed-2 run holds at iteration 15. This is the
 smallest mechanism that works *and* keeps §7's "recipe.py: no behavior change
 beyond the `_EvalCollector` import" — an in-run policy-snapshot hook would have
 required a recipe training-path change. Documented in the `--save` help.
+
+## 9. Deterministic policy-sampling correction (2026-07-13)
+
+A8's scale investigation found a reproducibility hole in the original harness.
+Tracks, decks and scripted agents were seeded, but `PPOPolicy.act()` consumed the
+ambient PyTorch RNG stream. Exact sampled-policy tables could therefore vary with
+evaluation order even for byte-identical checkpoints.
+
+The harness now forks and preserves the caller RNG and deterministically seeds
+policy sampling for every game. A regression test checks both repeated-report
+equality and RNG neutrality. Heuristic-only A7 results are unaffected because
+they do not sample through PyTorch. Pre-correction sampled-policy tables remain
+qualitatively informative but are superseded wherever exact values matter; A8's
+scaled tables were rescored with the corrected evaluator.

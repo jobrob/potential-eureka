@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import gymnasium as gym
 import torch
@@ -35,6 +36,7 @@ from torch import nn
 from sb3_contrib import MaskablePPO
 from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.vec_env import VecEnv
 
 from heat.ml import spaces
 
@@ -237,7 +239,7 @@ class HeatMLPExtractor(BaseFeaturesExtractor):
         self.mlp = nn.Sequential(*layers)
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        return self.mlp(observations)
+        return cast(torch.Tensor, self.mlp(observations))
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +247,10 @@ class HeatMLPExtractor(BaseFeaturesExtractor):
 # ---------------------------------------------------------------------------
 
 
-def build_model(env: gym.Env, config: PPOConfig | None = None) -> MaskablePPO:
+def build_model(
+    env: gym.Env[Any, Any] | VecEnv,
+    config: PPOConfig | None = None,
+) -> MaskablePPO:
     """Build a :class:`MaskablePPO` for ``env`` from ``config``.
 
     Uses :class:`MaskableActorCriticPolicy` over the env's ``Discrete(ACTION_DIM)``
@@ -261,7 +266,7 @@ def build_model(env: gym.Env, config: PPOConfig | None = None) -> MaskablePPO:
 
     apply_shaping_config(config)
 
-    policy_kwargs: dict = {
+    policy_kwargs: dict[str, Any] = {
         "net_arch": list(config.net_arch),
         # Idea 13-part-1: explicitly set the share flag (previously omitted ->
         # inherited SB3's True). Default False == separate actor/critic trunks.

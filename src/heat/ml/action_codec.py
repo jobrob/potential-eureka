@@ -20,6 +20,7 @@ representatives from the current hand. No engine rule is changed (§7).
 from __future__ import annotations
 
 import itertools
+from typing import cast
 
 import numpy as np
 
@@ -35,7 +36,6 @@ from heat.ml.spaces import (
     DISCARD_OFFSET,
     DISCARD_SIZE,
     GEAR_OFFSET,
-    GEAR_SIZE,
     REACT_OFFSET,
     REACT_SIZE,
     SLIPSTREAM_OFFSET,
@@ -215,18 +215,20 @@ def legal_action_mask(decision: Decision, state: GameState) -> np.ndarray:
 
     if kind == DecisionKind.GEAR:
         # decision.legal is list[(new_gear, heat_cost)]; gear in 1..4.
-        for new_gear, _heat_cost in decision.legal:
+        legal_gears = cast(list[tuple[int, int]], decision.legal)
+        for new_gear, _heat_cost in legal_gears:
             mask[GEAR_OFFSET + (new_gear - rules.MIN_GEAR)] = True
 
     elif kind == DecisionKind.CARDS:
         # decision.legal is list[tuple[Card, ...]]; collapse to value-multisets.
-        for play in decision.legal:
+        legal_plays = cast(list[tuple[Card, ...]], decision.legal)
+        for play in legal_plays:
             idx = _CARD_MULTISET_INDEX.get(_play_to_multiset(play))
             if idx is not None:
                 mask[CARDS_OFFSET + idx] = True
 
     elif kind == DecisionKind.REACT:
-        opts: rules.ReactOptions = decision.legal
+        opts = cast(rules.ReactOptions, decision.legal)
         for i, slot in enumerate(_REACT_TABLE):
             if _react_slot_legal(slot, opts):
                 mask[REACT_OFFSET + i] = True
@@ -239,7 +241,8 @@ def legal_action_mask(decision: Decision, state: GameState) -> np.ndarray:
     elif kind == DecisionKind.DISCARD:
         # decision.legal is list[Card] (discardable). index 0 = discard none;
         # index k = discard k lowest, for k in 1..min(len, DISCARD_SIZE-1).
-        n = len(decision.legal)
+        discardable = cast(list[Card], decision.legal)
+        n = len(discardable)
         mask[DISCARD_OFFSET + 0] = True
         for k in range(1, DISCARD_SIZE):
             if k <= n:
@@ -257,26 +260,28 @@ def encode_action_index(decision: Decision, engine_action: object) -> int:
     kind = decision.kind
 
     if kind == DecisionKind.GEAR:
-        new_gear, _heat_cost = engine_action  # type: ignore[misc]
+        new_gear, _heat_cost = cast(tuple[int, int], engine_action)
         return GEAR_OFFSET + (new_gear - rules.MIN_GEAR)
 
     if kind == DecisionKind.CARDS:
-        multiset = _play_to_multiset(tuple(engine_action))  # type: ignore[arg-type]
+        cards = cast(tuple[Card, ...], engine_action)
+        multiset = _play_to_multiset(cards)
         idx = _CARD_MULTISET_INDEX.get(multiset)
         if idx is None:
             raise ValueError(f"Card play {engine_action} has no encoding")
         return CARDS_OFFSET + idx
 
     if kind == DecisionKind.REACT:
-        return REACT_OFFSET + _react_to_slot_index(engine_action)  # type: ignore[arg-type]
+        return REACT_OFFSET + _react_to_slot_index(
+            cast(ReactDecision, engine_action)
+        )
 
     if kind == DecisionKind.SLIPSTREAM:
         return SLIPSTREAM_OFFSET + (0 if engine_action else 1)
 
     if kind == DecisionKind.DISCARD:
-        discardable: list[Card] = list(decision.legal)
-        cards = list(engine_action)  # type: ignore[arg-type]
-        k = len(cards)
+        discarded_cards = cast(list[Card], engine_action)
+        k = len(discarded_cards)
         if k >= DISCARD_SIZE:
             raise ValueError(f"Discard of {k} exceeds DISCARD_SIZE")
         return DISCARD_OFFSET + k
@@ -294,7 +299,8 @@ def decode_action(
 
     if kind == DecisionKind.GEAR:
         new_gear = (flat_index - GEAR_OFFSET) + rules.MIN_GEAR
-        for option in decision.legal:  # (new_gear, heat_cost)
+        legal_gears = cast(list[tuple[int, int]], decision.legal)
+        for option in legal_gears:
             if option[0] == new_gear:
                 return option
         raise ValueError(f"Gear index {flat_index} not in legal set")
@@ -308,7 +314,8 @@ def decode_action(
         # re-order to token/id order and fail that identity check for multi-card
         # plays. Only fall back to realizing from the hand when no legal play
         # matches (e.g. a codec round-trip with a hand-only context).
-        for play in decision.legal:
+        legal_plays = cast(list[tuple[Card, ...]], decision.legal)
+        for play in legal_plays:
             if _play_to_multiset(play) == multiset:
                 return play
         player = state.get_player(decision.player_id)
@@ -332,7 +339,7 @@ def decode_action(
         k = flat_index - DISCARD_OFFSET
         if k == 0:
             return []
-        ordered = _discard_order(list(decision.legal))
+        ordered = _discard_order(cast(list[Card], decision.legal))
         return ordered[:k]
 
     raise ValueError(f"Unknown decision kind {kind!r}")

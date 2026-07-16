@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Implementation and experiment design for A8 T2 phase-first policy batching.">
+  <title>A8 T2 — Phase-first batched collector</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">T2a/T2b complete · phase default rejected</span>
+      <h1>A8 T2: batch decisions without changing the rollout.</h1>
+      <p class="hero-copy">Exploit Heat’s simultaneous gear and card phases first. Preserve whole-game trajectories, measure the gain, and add a small multi-game scheduler only if the evidence supports it.</p>
+      <p><strong>Direction A · collector throughput · staged implementation</strong><br><span class="muted">Designed 14 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="Design decision">
+      <span class="board-label">Measured decision</span>
+      <strong>Keep scalar.<br>Median 1.066×.</strong>
+      <p>Phase mode is correct and remains opt-in, but it stopped below the 1.15× continuation threshold.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#decision">Decision</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#options">Options</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#contracts">Contracts</a>
+      <a href="#files">Files</a>
+      <a href="#tests">Tests</a>
+      <a href="#experiments">Experiments</a>
+      <a href="#results">Results</a>
+      <a href="#delivery">Delivery</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="decision">
+        <span class="section-kicker">01 · Design decision</span>
+        <h2>Make the first batch inside each game, not across 32 games.</h2>
+        <p class="lede">The rules engine already treats GEAR and CARDS as simultaneous: it collects every active player’s choice before applying any choice. The collector currently sends those choices through the policy one at a time. T2 should gather the same observations and masks, call <code>policy.act</code> once, then replay the sampled actions through the unchanged driver.</p>
+        <div class="decision-banner"><strong>Result</strong>The reversible first slice was implemented and measured. Keep <code>scalar</code> as the A8 and CLI default. Retain opt-in <code>phase</code> as a tested diagnostic path, but do not implement adaptive lanes: median rollout gain was only 1.066× and live inference wall fell 13.55%.</div>
+        <div class="result-note"><strong>T1 trigger cleared on 16 July 2026.</strong>Three independent seed workers achieved 2.703× fixed-work speed-up with exact policy hashes, step counts, and game counts. That result approves this T2a/T2b first-slice handoff. It does not approve T2c adaptive lanes or the separate 300k learning-safety campaign.</div>
+        <div class="config-panel" aria-label="T2 headline targets">
+          <div><span>Primary target</span><strong>≥1.25× rollout transitions/s</strong></div>
+          <div><span>Expected phase batch</span><strong>2–6 policy decisions</strong></div>
+          <div><span>Learning contract</span><strong>Whole games unchanged</strong></div>
+          <div><span>First-slice confidence</span><strong>70%</strong></div>
+        </div>
+      </section>
+
+      <section id="evidence">
+        <span class="section-kicker">02 · Why the design changed</span>
+        <h2>P0 supports batching, but not a large game pool yet.</h2>
+        <p><a href="A8-p0-timing-profile.html">P0</a> found that rollout consumed 75.7% of measured training time and live-policy inference alone consumed 44.9%. That establishes the target. The same log shows why the earlier 16–32-game sketch is unsafe at the current update size:</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Seats</th><th>Mean games / iteration</th><th>Mean recorded transitions / game</th><th>Safe initial concurrency</th></tr></thead>
+            <tbody>
+              <tr><td>2</td><td>7.74</td><td>147.8</td><td>Up to 4</td></tr>
+              <tr><td>3</td><td>4.65</td><td>280.4</td><td>Up to 3</td></tr>
+              <tr><td>4</td><td>3.84</td><td>344.8</td><td>Up to 3</td></tr>
+              <tr><td>5</td><td>2.79</td><td>455.2</td><td>Up to 2</td></tr>
+              <tr><td>6</td><td>2.25</td><td>613.7</td><td>Up to 2</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>A8 averages only 4.24 completed games per PPO iteration. Starting 16 six-seat games would collect roughly 9,800 transitions before all in-flight games finish—almost ten times the configured rollout. That would change PPO update frequency and temporal correlation at the same time as the performance code.</p>
+        <div class="result-note"><strong>Design feedback.</strong> The original vectorized-collector idea is more complicated than it first appeared because A8 stores rewards over the span from one seat decision to its next decision and computes GAE on complete per-seat streams. Cutting arbitrary lanes at 1,024 transitions would require a new partial-trajectory and bootstrap contract. T2 should not take that on before proving smaller batches are worthwhile.</div>
+      </section>
+
+      <section id="options">
+        <span class="section-kicker">03 · Considered approaches</span>
+        <h2>Choose the approach that preserves the most trusted code.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Approach</th><th>Advantages</th><th>Costs and risks</th><th>Decision</th></tr></thead>
+            <tbody>
+              <tr><td><strong>16–32 complete games</strong></td><td>Largest batches; handles every decision kind.</td><td>Large rollout overshoot, lane-local buffers, stochastic ordering, snapshot-policy routing, and a new scheduler. It changes PPO cadence at today’s <code>n_steps</code>.</td><td class="metric-bad">Not the first slice</td></tr>
+              <tr><td><strong>Phase-first batching</strong></td><td>Uses rules that are already simultaneous; no extra games; no GAE or buffer redesign; existing policy API already accepts batches.</td><td>Only GEAR and CARDS batch. Sequential REACT, SLIPSTREAM, and DISCARD remain scalar.</td><td class="metric-good">Implement first</td></tr>
+              <tr><td><strong>Lean scalar inference</strong></td><td>Smallest code surface; may remove distribution/entropy overhead.</td><td>Still one neural call per decision and gives a lower ceiling. It is a fallback if phase batching misses the speed gate.</td><td>Keep as fallback</td></tr>
+              <tr><td><strong>Multiprocess games + inference server</strong></td><td>Can parallelize both rules and neural work.</td><td>Windows spawn, IPC, policy versioning, snapshot serialization, backpressure, and reproducibility make it a separate large project.</td><td>Defer</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="architecture">
+        <span class="section-kicker">04 · Phase-first architecture</span>
+        <h2>Gather, infer once, then replay through the same generator.</h2>
+        <pre><code>run_round_driver yields first GEAR or CARDS decision
+                    │
+                    ▼
+shared driver helper enumerates that simultaneous phase
+                    │
+        ┌───────────┴───────────┐
+        ▼                       ▼
+ forced / snapshot         live policy choices
+ resolve in seat order     close pending spans
+                            encode obs + masks
+        │                       │
+        └───────────┬───────────┘
+                    ▼
+          one policy.act(B, ...)
+                    │
+                    ▼
+ queue decoded actions by (kind, seat)
+                    │
+                    ▼
+ replay actions into the unchanged generator
+                    │
+                    ▼
+ phase applies only after every choice is present</code></pre>
+
+        <h3 class="table-title">Shared enumeration, not duplicated rules</h3>
+        <p>Extract small helpers in <code>engine/driver.py</code> that return the GEAR or CARDS <code>Decision</code> objects in the exact order the driver uses. The driver itself and the batched collector both call these helpers. This prevents legality, spun-out handling, active-player filtering, and seat order from drifting.</p>
+        <p>There is one prerequisite cleanup: the driver currently sets <code>player.cluttered</code> immediately after each card choice, although <code>phase_play_cards</code> already performs the same detection when all choices are applied. Remove that duplicate early write and retain the phase-level write. This makes simultaneous decision collection genuinely read-only and prevents later agents from observing a transient flag from an earlier seat.</p>
+        <pre><code>def simultaneous_decisions(state, kind) -> list[Decision]:
+    """Return the unapplied choices for one simultaneous phase."""
+
+if batching and decision.kind in {GEAR, CARDS}:
+    ready = prepare_phase(simultaneous_decisions(state, decision.kind))
+    actions, logps, values, _ = policy.act(stack_obs(ready), stack_masks(ready))
+    queue_phase_actions(ready, actions, logps, values)
+
+send_value = queued_action(decision.kind, decision.player_id)</code></pre>
+
+        <h3 class="table-title">Snapshot opponent handling</h3>
+        <p>The A5 recipe uses one frozen snapshot seat in roughly half of iterations. In the first slice, resolve that seat through its existing <code>SnapshotAgent</code> in the same active-player order and batch only live-policy seats. This preserves the recipe and keeps the change small. Telemetry must count snapshot inference separately; if it becomes the dominant residual, a later local extension may batch the one frozen model too.</p>
+
+        <h3 class="table-title">Why the scalar path remains</h3>
+        <p>Add a collector mode such as <code>collector_mode="scalar" | "phase"</code>, defaulting to <code>scalar</code> until T2 passes. The current branch remains available as a reference implementation, a debugging escape hatch, and the exact evaluator path. Do not delete or silently replace it during the spike.</p>
+      </section>
+
+      <section id="contracts">
+        <span class="section-kicker">05 · Correctness and determinism</span>
+        <h2>Preserve semantics; acknowledge the one intentional difference.</h2>
+        <ul class="check-list">
+          <li><strong>Whole-game collection remains unchanged.</strong> Every non-empty stream still ends on <code>done=True</code>; GAE continues to use a zero bootstrap.</li>
+          <li><strong>One buffer per seat remains unchanged.</strong> No concurrent games exist in the first slice, so streams cannot interleave.</li>
+          <li><strong>Rewards close at the same state.</strong> After the duplicate pre-application <code>cluttered</code> write is removed, GEAR and CARDS do not mutate state until all decisions are collected. Closing every seat’s pending span before the batch then matches the scalar collector.</li>
+          <li><strong>Legality is shared.</strong> The same <code>forced_action</code>, <code>legal_action_mask</code>, and <code>decode_legal_action</code> functions remain authoritative.</li>
+          <li><strong>Fixed order is mandatory.</strong> Stack live choices in the driver’s active-player order and scatter results back in that same order.</li>
+          <li><strong>Repeated phase-mode runs must match exactly.</strong> Given the same configuration, Torch seed, and game seed, action traces and buffers must hash identically.</li>
+        </ul>
+        <div class="result-note"><strong>Expected stochastic difference.</strong> PyTorch’s categorical sampler consumes randomness differently for a batch than for repeated batch-of-one calls. A sampled phase-mode trace is therefore not expected to equal the old scalar trace even with the same Torch seed. Correctness equivalence must use a deterministic fixture policy; stochastic testing checks repeatability and distributional legality, not byte identity with scalar sampling.</div>
+      </section>
+
+      <section id="files">
+        <span class="section-kicker">06 · Implementation surface</span>
+        <h2>The first slice stays local; the second slice earns its complexity.</h2>
+        <div class="file-grid">
+          <div class="file-card"><code>src/heat/engine/driver.py</code>Extract shared GEAR/CARDS decision enumeration used by both the generator and collector.</div>
+          <div class="file-card"><code>src/heat/ml/selfplay/multiseat.py</code>Add opt-in phase preparation, one batched live-policy call, action replay, and batch telemetry.</div>
+          <div class="file-card"><code>src/heat/ml/selfplay/phase1.py</code>Thread collector mode into A8 and surface inference-call, decision-kind, and batch-size records.</div>
+          <div class="file-card"><code>scripts/train_selfplay_a8.py</code>Add <code>--collector scalar|phase</code> and aggregate throughput/batch reporting.</div>
+          <div class="file-card"><code>experiments/bench_a8_collector.py</code>Matched scalar/phase benchmark with repeat summaries, progress output, and bounded runs.</div>
+          <div class="file-card"><code>tests/test_multiseat_selfplay.py</code>Focused helper, trace-equivalence, reproducibility, legality, and stream tests.</div>
+        </div>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Slice</th><th>Estimated code</th><th>Reason for range</th></tr></thead>
+            <tbody>
+              <tr><td>Phase-first spike</td><td><strong>420–690 lines</strong></td><td>40–80 driver helper and purity cleanup; 140–220 collector; 60–100 config/telemetry; 100–160 tests; 80–130 benchmark script.</td></tr>
+              <tr><td>Adaptive 2–4-game pool</td><td><strong>Additional 450–750 lines</strong></td><td>Resumable lane state, lane-seat streams, scheduler, deterministic seeding, overshoot accounting, and trace tests.</td></tr>
+              <tr><td>Production total if both pass</td><td><strong>870–1,440 lines</strong></td><td>Larger than the original 700–1,200 estimate because the full design now accounts for whole-game GAE and snapshot routing explicitly.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="tests">
+        <span class="section-kicker">07 · Focused verification</span>
+        <h2>Test the new seam, not every old rule again.</h2>
+        <ol>
+          <li><strong>Decision-helper identity and purity.</strong> On seeded 2- and 6-seat states, helper decisions match the driver’s yielded GEAR/CARDS kinds, seats, and legal payloads; collecting all choices leaves the pre-application state unchanged.</li>
+          <li><strong>Deterministic trace equivalence.</strong> A fixture policy chooses a deterministic legal action per row. Scalar and phase modes must produce identical action traces, terminal states, rewards, dones, and per-seat buffers.</li>
+          <li><strong>Stochastic reproducibility.</strong> Two independent phase-mode runs with equal seeds produce equal action/buffer hashes; a changed seed changes at least one action.</li>
+          <li><strong>Batch accounting.</strong> Every real live-policy decision appears in exactly one inference call; forced and snapshot decisions do not enter the live batch.</li>
+          <li><strong>Existing focused suite.</strong> Re-run multi-seat, A5 snapshot, and A8 tests. No broad new rule matrix is needed because the driver remains authoritative.</li>
+        </ol>
+      </section>
+
+      <section id="experiments">
+        <span class="section-kicker">08 · Staged experiment plan</span>
+        <h2>Prove the cheap batch before building the scheduler.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Stage</th><th>Hypothesis and confidence</th><th>Scope and compute</th><th>Decision rule</th></tr></thead>
+            <tbody>
+              <tr><td><strong>T2a · phase mix</strong><br><span class="metric-good">Completed · passed</span></td><td>GEAR/CARDS account for at least half of live policy decisions and produce a mean batch of at least 2.5. <strong>High confidence, 80%.</strong></td><td>Seed-0 100k CPU scalar run: 121,386 actual transitions, 406 games, 80.55 seconds. Progress appeared every 15–16 seconds under the 15-minute cap.</td><td class="metric-good">Continue gate passed: 50.10% simultaneous decisions and 2.114 mean available batch exceeded the 40% and 2.0 thresholds.</td></tr>
+              <tr><td><strong>T2b · phase throughput</strong><br><span class="metric-bad">Completed · rejected</span></td><td>Phase batching reduces live inference wall time by ≥25% and improves rollout transitions/s by ≥1.25×. <strong>Medium confidence, 70%.</strong></td><td>Three 100k repeats per mode on CPU, same A8 recipe and seeds 0–2. The six-run campaign took 476.93 seconds, below its 30-minute cap.</td><td class="metric-bad">Stop: median rollout gain was 1.066×, below 1.15×, and median inference-wall reduction was 13.55%. Scalar stays default.</td></tr>
+              <tr><td><strong>T2c · adaptive lanes</strong></td><td>Combining phase batches with 2–4 whole-game lanes lifts rollout throughput to ≥1.75× without increasing recorded transitions per PPO update by more than 20%. <strong>Medium-low confidence, 55%.</strong></td><td>Only after T2b passes. Start with lane caps 4/3/3/2/2 for 2/3/4/5/6 seats, then one 100k scalar-versus-hybrid comparison. Estimated engineering 450–750 lines; each run capped at 15 minutes. Ask for permission before implementation.</td><td>Continue to production hardening only if trace gates pass, speed is ≥1.75×, and p95 rollout overshoot stays within 20% of scalar.</td></tr>
+              <tr><td><strong>T2d · CUDA</strong></td><td>CUDA adds at least 20% beyond CPU only once mean batches are large enough. <strong>Low confidence, 40%.</strong></td><td>Only after a CPU batching win and only on an available CUDA build. One bounded 100k comparison per accepted batch configuration, 15-minute cap each.</td><td>Keep CUDA only if end-to-end rollout throughput is ≥1.2× the batched CPU path; otherwise retain CPU inference.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>These are throughput experiments, not skill experiments. Batching changes sampled trajectories while preserving the categorical distribution. Before using the collector for a new scale claim, run a separately approved learning-safety check: two 300k seeds, frozen validation scoring, and no material seat-count regression. Do not bundle that compute into the implementation smoke.</p>
+      </section>
+
+      <section id="results">
+        <span class="section-kicker">09 · Measured result</span>
+        <h2>Correct batching was real, but the batches were too small.</h2>
+        <p>The correctness gate passed before performance work: a deterministic fixture produced identical scalar and phase action traces, terminal states, rewards, dones, and per-seat buffers; repeated stochastic phase runs matched exactly at equal seeds; changed seeds changed actions; stored actions were legal; every non-empty stream ended on <code>done=True</code>; and live decisions reconciled exactly to inference rows and the batch histogram. The focused multi-seat and A8 suites reported 21 passing tests, and Ruff passed on all touched Python files.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Seed</th><th>Scalar transitions/s</th><th>Phase transitions/s</th><th>Rollout speed-up</th><th>Scalar inference</th><th>Phase inference</th><th>Inference reduction</th></tr></thead>
+            <tbody>
+              <tr><td>0</td><td>1,790.3</td><td>1,908.7</td><td>1.066×</td><td>38.462s</td><td>34.080s</td><td>11.39%</td></tr>
+              <tr><td>1</td><td>1,815.3</td><td>1,960.0</td><td>1.080×</td><td>41.552s</td><td>35.922s</td><td>13.55%</td></tr>
+              <tr><td>2</td><td>1,802.5</td><td>1,805.1</td><td>1.001×</td><td>38.738s</td><td>33.106s</td><td>14.54%</td></tr>
+              <tr><td><strong>Median</strong></td><td>1,802.5</td><td>1,908.7</td><td class="metric-bad"><strong>1.066×</strong></td><td>38.738s</td><td>34.080s</td><td class="metric-bad"><strong>13.55%</strong></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>All phase seeds avoided the “more than 5% slower” guard, but that secondary safety gate cannot override the primary thresholds. Across phase repeats, 380,264 live decisions used 282,517 action calls: 25.7% fewer calls per live row, yet the actual mean call batch was only 1.346. Roughly half of decisions remain sequential, so the 2.0–2.1 available simultaneous batch could not produce the predicted end-to-end gain.</p>
+        <div class="decision-banner"><strong>Verdict</strong>Reject phase mode as the production default and stop T2 after T2b. Preserve the scalar reference and opt-in phase implementation for debugging or future collector research. T2c adaptive lanes, T2d CUDA, and the separate 300k learning-safety experiment were not started.</div>
+      </section>
+
+      <section id="delivery">
+        <span class="section-kicker">10 · Delivery order and status</span>
+        <h2>One reversible slice, then a measured decision.</h2>
+        <ol class="step-line" aria-label="Implementation order">
+          <li><strong>Extract</strong><br>shared phase decisions</li>
+          <li><strong>Batch</strong><br>live GEAR/CARDS</li>
+          <li><strong>Verify</strong><br>traces and streams</li>
+          <li><strong>Measure</strong><br>three CPU repeats</li>
+        </ol>
+        <p><strong>Status:</strong> T2a/T2b implementation, correctness verification, and bounded measurement are complete. Phase mode remains opt-in; scalar remains the A8 default because the first slice stopped below the performance threshold. T2c adaptive lanes, T2d CUDA, and the separate 300k learning-safety campaign were not started.</p>
+      </section>
+    </article>
+  </div>
+</main>
+<script src="../design-doc.js"></script>
+</body>
+</html>

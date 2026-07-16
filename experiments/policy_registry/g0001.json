@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "generation_id": "G0001",
+  "display_name": "A8 ten-epoch baseline",
+  "created_date": "2026-07-13",
+  "parent_generation_id": null,
+  "experiment_alias": "A8 scale baseline",
+  "status": "retired_baseline",
+  "decision": "Superseded by G0002 after S1 showed stronger selected-checkpoint skill.",
+  "design_document": "docs/direction-A/A8-full-rules-phase1.html#s1-results",
+  "recipe": {
+    "trainer": "scripts/train_selfplay_a8.py",
+    "training_config": {
+      "n_steps": 1024,
+      "batch_size": 256,
+      "n_epochs": 10,
+      "total_timesteps": 1000000,
+      "gamma": 0.999,
+      "gae_lambda": 0.95,
+      "clip_range": 0.2,
+      "ent_coef": 0.01,
+      "vf_coef": 0.5,
+      "max_grad_norm": 0.5,
+      "learning_rate": 0.0003,
+      "hidden_sizes": [256, 256],
+      "head": "masked",
+      "encoder": "flat",
+      "num_players_compatibility_field": 4,
+      "randomize_seat": true,
+      "device_request": "auto",
+      "entropy_floor": 0.4,
+      "ent_scale_up": 1.5,
+      "ent_scale_down": 0.98,
+      "ent_coef_max": 0.1,
+      "snapshot_every": 10,
+      "pool_capacity": 5,
+      "pool_prob": 0.5,
+      "eval_every": 10,
+      "eval_games": 40,
+      "margin_coef": 0.0,
+      "stage1_iter": 15,
+      "stage1_min_winrate": 0.55,
+      "stage1_enabled": false,
+      "seat_counts": [2, 3, 4, 5, 6],
+      "track_base_seed": 80008,
+      "anchor_share": 0.0,
+      "seed": "per_run"
+    },
+    "track_generator": {
+      "length_range": [50, 90],
+      "num_corners_range": [3, 7],
+      "speed_limit_choices": [1, 2, 3, 4, 5],
+      "laps": 2,
+      "min_corner_gap": 4,
+      "corner_len_range": [1, 3],
+      "multi_lane_fraction": 0.3,
+      "max_lanes": 2,
+      "min_start_positions": 6
+    },
+    "checkpoint_steps": [300000, 500000, 750000, 1000000],
+    "policy_contract": {"codec_version": 3, "obs_dim": 104, "action_dim": 516},
+    "recipe_sha256": "9a7287e65be7376ccaa7abe5ecaffeae23406753668f537f2396076ba65b0376"
+  },
+  "source_provenance": {
+    "quality": "retroactively_reconstructed",
+    "git_commit": null,
+    "dirty_patch_sha256": null,
+    "evidence": [
+      "docs/direction-A/A8-full-rules-phase1.html#s1-results",
+      "runs/a8_scale_1m_seed0/",
+      "runs/a8_scale_1m_seed1/",
+      "runs/a8_scale_1m_seed2/"
+    ],
+    "limitation": "The original campaign did not capture a clean commit and patch, so code-level provenance cannot be reconstructed exactly."
+  },
+  "selection_rule": "The frozen S1 comparison selected the final whole-rollout policy for all three baseline seeds.",
+  "runs": [
+    {
+      "agent_id": "G0001-R00",
+      "seed": 0,
+      "selected_checkpoint_id": "G0001-R00@final",
+      "selected_checkpoint": "runs/a8_1m_seed0.pt",
+      "bytes": 906053,
+      "sha256": "6d35fb166b9cd5bafb3f75f6631de62816bfcf0f0cabe2df5eea511cf64b9914"
+    },
+    {
+      "agent_id": "G0001-R01",
+      "seed": 1,
+      "selected_checkpoint_id": "G0001-R01@final",
+      "selected_checkpoint": "runs/a8_1m_seed1.pt",
+      "bytes": 906053,
+      "sha256": "5e59988ddddcdadb03bcb6a89715d31c5fb1aa99cf425528ee5f8bb0473e395c"
+    },
+    {
+      "agent_id": "G0001-R02",
+      "seed": 2,
+      "selected_checkpoint_id": "G0001-R02@final",
+      "selected_checkpoint": "runs/a8_1m_seed2.pt",
+      "bytes": 906053,
+      "sha256": "280d95f0715e82235a884cf033e9a82abe0f9a6789158f40b92d8ff686dbbd3a"
+    }
+  ]
+}

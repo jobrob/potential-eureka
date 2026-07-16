@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "generation_id": "G0003",
+  "display_name": "A8 fixed-anchor recipe",
+  "created_date": "2026-07-14",
+  "parent_generation_id": "G0002",
+  "experiment_alias": "S2 fixed policy anchor",
+  "status": "preferred_for_selected_skill_only",
+  "decision": "B2 preferred G0003 for selected-checkpoint skill, but S2 rejected it as the default stabilization recipe because checkpoint variability worsened.",
+  "design_document": "docs/direction-A/A8-full-rules-phase1.html#s2-results",
+  "recipe": {
+    "trainer": "scripts/train_selfplay_a8.py",
+    "training_config": {
+      "n_steps": 1024,
+      "batch_size": 256,
+      "n_epochs": 5,
+      "total_timesteps": 1000000,
+      "gamma": 0.999,
+      "gae_lambda": 0.95,
+      "clip_range": 0.2,
+      "ent_coef": 0.01,
+      "vf_coef": 0.5,
+      "max_grad_norm": 0.5,
+      "learning_rate": 0.0003,
+      "hidden_sizes": [256, 256],
+      "head": "masked",
+      "encoder": "flat",
+      "num_players_compatibility_field": 4,
+      "randomize_seat": true,
+      "device_request": "auto",
+      "entropy_floor": 0.4,
+      "ent_scale_up": 1.5,
+      "ent_scale_down": 0.98,
+      "ent_coef_max": 0.1,
+      "snapshot_every": 10,
+      "pool_capacity": 5,
+      "pool_prob": 0.5,
+      "eval_every": 10,
+      "eval_games": 40,
+      "margin_coef": 0.0,
+      "stage1_iter": 15,
+      "stage1_min_winrate": 0.55,
+      "stage1_enabled": false,
+      "seat_counts": [2, 3, 4, 5, 6],
+      "track_base_seed": 80008,
+      "anchor_share": 0.4,
+      "seed": "per_run"
+    },
+    "track_generator": {
+      "length_range": [50, 90],
+      "num_corners_range": [3, 7],
+      "speed_limit_choices": [1, 2, 3, 4, 5],
+      "laps": 2,
+      "min_corner_gap": 4,
+      "corner_len_range": [1, 3],
+      "multi_lane_fraction": 0.3,
+      "max_lanes": 2,
+      "min_start_positions": 6
+    },
+    "opponent_anchor": {
+      "agent_checkpoint_id": "G0002-R00@1000K",
+      "checkpoint": "runs/a8_s1_5ep_seed0/step_1000000.pt",
+      "sha256": "11d92b29b5232862ec2262c05cfddaba1bcbb0c9c3bcbd1d4dfcab99ce756981"
+    },
+    "checkpoint_steps": [300000, 500000, 750000, 1000000],
+    "policy_contract": {"codec_version": 3, "obs_dim": 104, "action_dim": 516},
+    "recipe_sha256": "ebe316cafd4f3d36c4f2052f65696bd27dc8813e5f48a3947bbc2fcbe1fa26bc"
+  },
+  "source_provenance": {
+    "quality": "retroactively_reconstructed",
+    "git_commit": null,
+    "dirty_patch_sha256": null,
+    "evidence": [
+      "docs/direction-A/A8-full-rules-phase1.html#s2-results",
+      "runs/a8_s2_anchor_seed0.log",
+      "runs/a8_s2_anchor_seed1.log",
+      "runs/a8_s2_anchor_seed2.log"
+    ],
+    "limitation": "The original campaign did not capture a clean commit and patch, so code-level provenance cannot be reconstructed exactly."
+  },
+  "selection_rule": "The frozen S2 rule selected the 1M milestone for seed 0 and the final whole-rollout policies for seeds 1 and 2.",
+  "runs": [
+    {
+      "agent_id": "G0003-R00",
+      "seed": 0,
+      "selected_checkpoint_id": "G0003-R00@1000K",
+      "selected_checkpoint": "runs/a8_s2_anchor_seed0/step_1000000.pt",
+      "bytes": 906067,
+      "sha256": "8d2b44a26c600a10fbcd76989bdee4f6c5bc350e89acfc3360840644e026b06b"
+    },
+    {
+      "agent_id": "G0003-R01",
+      "seed": 1,
+      "selected_checkpoint_id": "G0003-R01@final",
+      "selected_checkpoint": "runs/a8_s2_anchor_seed1.pt",
+      "bytes": 906151,
+      "sha256": "91774c0f64f9d30869b8b12cd7b7577dcfc384b19a048c1fd1201e76d8eabae0"
+    },
+    {
+      "agent_id": "G0003-R02",
+      "seed": 2,
+      "selected_checkpoint_id": "G0003-R02@final",
+      "selected_checkpoint": "runs/a8_s2_anchor_seed2.pt",
+      "bytes": 906151,
+      "sha256": "dc0a399cc38151450f6c4f66dff26c3f8d09db4cf48d091a30db8f3121791b23"
+    }
+  ]
+}

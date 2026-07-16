@@ -43,7 +43,7 @@ import numpy as np
 
 from heat.agents.base import BaseAgent
 from heat.agents.heuristic_agent import HeuristicAgent
-from heat.engine.driver import Decision, run_round_driver
+from heat.engine.driver import Decision, RoundDriver, run_round_driver
 from heat.engine.game import MAX_ROUNDS
 from heat.models.game_state import GameState
 from heat.models.track import Track
@@ -85,7 +85,7 @@ def _default_track() -> Track:
     return load_track_by_name("usa")
 
 
-class HeatEnv(gym.Env):
+class HeatEnv(gym.Env[np.ndarray, int]):
     """Single-learning-seat Gymnasium environment over the HEAT engine.
 
     Args:
@@ -151,7 +151,7 @@ class HeatEnv(gym.Env):
 
         # Live episode state, populated by reset().
         self.state: GameState | None = None
-        self._gen = None
+        self._gen: RoundDriver | None = None
         self._decision: Decision | None = None  # current learner decision
         self._opponents: dict[int, BaseAgent] = {}
         self._done = False
@@ -392,5 +392,6 @@ class HeatEnv(gym.Env):
         if decision is None or self._done:
             mask = np.ones(ACTION_DIM, dtype=bool)
         else:
+            assert self.state is not None
             mask = legal_action_mask(decision, self.state)
         return {"action_mask": mask}

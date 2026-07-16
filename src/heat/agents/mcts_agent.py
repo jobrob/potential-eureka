@@ -82,8 +82,9 @@ from __future__ import annotations
 import math
 import os
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol, cast
 
 import numpy as np
 
@@ -95,6 +96,10 @@ from heat.engine.phases import ReactDecision
 from heat.agents.base import BaseAgent
 from heat.agents import _move_eval as ME
 from heat.agents.search_agent import SearchProfile
+
+if TYPE_CHECKING:
+    import torch
+    from sb3_contrib import MaskablePPO
 
 
 # ---------------------------------------------------------------------------
@@ -605,10 +610,10 @@ class EngineTransitionModel:
 # not cold, throughput).
 #:
 #: Module-level so it is shared across all ``NetAdapter`` instances in a process.
-_MODEL_CACHE: dict[tuple[str, float], object] = {}
+_MODEL_CACHE: dict[tuple[str, float], MaskablePPO] = {}
 
 
-def _load_cached_model(model_path: str):
+def _load_cached_model(model_path: str) -> MaskablePPO:
     """Load (or reuse) the SB3 ``MaskablePPO`` for ``model_path``, cached by
     ``(abspath, mtime)`` at process scope.
 
@@ -657,7 +662,7 @@ class NetAdapter:
 
     def __init__(self, model_path: str) -> None:
         self.model_path = model_path
-        self._model = None
+        self._model: MaskablePPO | None = None
         #: Sprint C6: the value transform read from the checkpoint sidecar's
         #: ``value_mode``. ``"rounds"`` (default / absent) returns the raw critic
         #: scalar (the C2-C5 −rounds_remaining quantity, byte-for-byte); ``"winloss"``
@@ -668,7 +673,7 @@ class NetAdapter:
         #: per-leaf forward does not allocate a fresh obs tensor every call (the
         #: ``other`` per-call ``as_tensor``/``reshape`` churn the C7 profile flagged).
         #: Built lazily on first ``evaluate`` (so a pickled adapter stays light).
-        self._obs_buf = None
+        self._obs_buf: torch.Tensor | None = None
         #: Sprint C11: the weight/bias tensors extracted ONCE from the loaded
         #: policy (the 3-linear pi/vf extractors, the two 2-linear MLPs, the two
         #: heads) so the per-leaf forward runs as a plain ``F.linear`` pipeline
@@ -676,9 +681,9 @@ class NetAdapter:
         #: ``_get_tracing_state`` rows the C9 profile flagged). ``None`` until the
         #: first forward builds it from ``_get_model()``; nulled in ``__getstate__``
         #: (process-local scratch derived from the pickle-by-path model).
-        self._fwd = None
+        self._fwd: dict[str, Any] | None = None
 
-    def __getstate__(self) -> dict:
+    def __getstate__(self) -> dict[str, object]:
         state = self.__dict__.copy()
         state["_model"] = None
         # The reused torch input buffer is process-local scratch -- never pickle it.
@@ -721,7 +726,7 @@ class NetAdapter:
         # matching transform. Absent -> "rounds" (the C2-C5 raw-critic path).
         self._value_mode = str(meta.get("value_mode", "rounds"))
 
-    def _get_model(self):
+    def _get_model(self) -> MaskablePPO:
         if self._model is None:
             # Sprint C7: validate the contract (cheap, reads the small .meta.json)
             # then fetch the heavy SB3 module from the process-level cache so the
@@ -732,7 +737,7 @@ class NetAdapter:
 
     # -- the lean combined forward (Sprint C8, single source of truth) ----
 
-    def _obs_tensor(self, obs: np.ndarray):
+    def _obs_tensor(self, obs: np.ndarray) -> torch.Tensor:
         """Marshal ``obs`` into the reused ``(1, OBS_DIM)`` float32 input buffer.
 
         Sprint C8: one allocation per process (lazily, on the first leaf) instead
@@ -754,7 +759,7 @@ class NetAdapter:
 
     # -- the functional forward (Sprint C11, kill the nn.Module dispatch tax) --
 
-    def _get_fwd(self) -> dict:
+    def _get_fwd(self) -> dict[str, Any]:
         """Extract the policy's ``(weight, bias)`` tensors ONCE for a dispatch-free
         forward (Sprint C11, Win 2).
 
@@ -782,7 +787,9 @@ class NetAdapter:
 
         policy = model.policy
 
-        def _linears(seq) -> list:
+        def _linears(
+            seq: Iterable[nn.Module],
+        ) -> list[tuple[torch.Tensor, torch.Tensor | None]]:
             """The ``Linear`` modules of a ``Sequential``, in wiring order, as
             ``(weight, bias)`` pairs (activations are positional -- ReLU/Tanh)."""
             return [(m.weight, m.bias) for m in seq if isinstance(m, nn.Linear)]
@@ -790,8 +797,12 @@ class NetAdapter:
         # Non-shared extractor: separate pi/vf trunks (3 linears each, ReLU after
         # every linear). Shared -> the same module backs both (a tuple-less
         # extract_features); we still split logically so both pipelines work.
-        pi_ex = _linears(policy.pi_features_extractor.mlp)
-        vf_ex = _linears(policy.vf_features_extractor.mlp)
+        pi_ex = _linears(
+            cast(Iterable[nn.Module], policy.pi_features_extractor.mlp)
+        )
+        vf_ex = _linears(
+            cast(Iterable[nn.Module], policy.vf_features_extractor.mlp)
+        )
         # The two head MLPs (2 linears each, Tanh after each).
         pi_mlp = _linears(policy.mlp_extractor.policy_net)
         vf_mlp = _linears(policy.mlp_extractor.value_net)
@@ -810,7 +821,9 @@ class NetAdapter:
         self._fwd = fwd
         return fwd
 
-    def _actor_logits(self, ob, fwd: dict):
+    def _actor_logits(
+        self, ob: torch.Tensor, fwd: dict[str, Any]
+    ) -> torch.Tensor:
         """The raw policy logits for input ``ob`` via the functional actor pipeline.
 
         Mirrors the SB3 wiring exactly: ``pi`` extractor (Linear->ReLU x3) ->
@@ -827,7 +840,9 @@ class NetAdapter:
             x = torch.tanh(F.linear(x, w, b))
         return F.linear(x, fwd["action_w"], fwd["action_b"])
 
-    def _critic_value(self, ob, fwd: dict):
+    def _critic_value(
+        self, ob: torch.Tensor, fwd: dict[str, Any]
+    ) -> torch.Tensor:
         """The critic scalar tensor for input ``ob`` via the functional critic
         pipeline (``vf`` extractor Linear->ReLU x3 -> value MLP Linear->Tanh x2 ->
         ``value_net`` Linear). The ``value_mode`` tanh is applied by the caller.
@@ -844,7 +859,9 @@ class NetAdapter:
         return F.linear(x, fwd["value_w"], fwd["value_b"])
 
     @staticmethod
-    def _masked_softmax(logits, mask):
+    def _masked_softmax(
+        logits: torch.Tensor, mask: np.ndarray
+    ) -> torch.Tensor:
         """SB3-equivalent masked softmax: substitute ``-1e8`` for masked-out
         logits (NOT ``-inf``, matching ``MaskableCategorical``) then softmax."""
         import torch
@@ -1106,6 +1123,18 @@ class Node:
 _TurnSig = tuple[int, int, int, int, int]
 
 
+class PolicyValueNet(Protocol):
+    """Policy and value operations required by the search core."""
+
+    def policy_prior(self, obs: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Return masked action probabilities for one observation."""
+        ...
+
+    def leaf_value(self, obs: np.ndarray) -> float:
+        """Return the scalar value estimate for one observation."""
+        ...
+
+
 class MCTSAgent(BaseAgent):
     """Solo net-guided stochastic MCTS agent (see module docstring).
 
@@ -1128,7 +1157,7 @@ class MCTSAgent(BaseAgent):
     def __init__(
         self,
         *,
-        net: object | None = None,
+        net: PolicyValueNet | None = None,
         model_path: str | None = None,
         config: MCTSConfig | None = None,
         seed: int | None = None,
@@ -1170,7 +1199,7 @@ class MCTSAgent(BaseAgent):
 
     # -- pickle by path: never ship the heavy model ----------------------
 
-    def __getstate__(self) -> dict:
+    def __getstate__(self) -> dict[str, object]:
         state = self.__dict__.copy()
         # If the net is a path-backed NetAdapter, its own __getstate__ nulls the
         # model. If it is an in-process stub (tests), it travels as-is (tests do
@@ -1179,10 +1208,11 @@ class MCTSAgent(BaseAgent):
 
     # -- net access ------------------------------------------------------
 
-    def _get_net(self) -> object:
+    def _get_net(self) -> PolicyValueNet:
         """Return the net adapter, building one from ``model_path`` on first use."""
         if self._net is None:
-            self._net = NetAdapter(self.model_path)  # type: ignore[arg-type]
+            assert self.model_path is not None
+            self._net = NetAdapter(self.model_path)
         return self._net
 
     # -- determinism helpers (the S1 scheme) -----------------------------
@@ -1221,7 +1251,7 @@ class MCTSAgent(BaseAgent):
         if kind == DecisionKind.CARDS:
             seen: set[int] = set()
             kept: list[object] = []
-            for play in decision.legal:  # type: ignore[union-attr]
+            for play in cast(list[tuple[Card, ...]], decision.legal):
                 speed = sum(c.value for c in play)
                 if speed in seen:
                     continue
@@ -1236,7 +1266,7 @@ class MCTSAgent(BaseAgent):
             return self._react_candidates(decision, state)
         if kind == DecisionKind.DISCARD:
             return self._discard_candidates(decision)
-        return list(decision.legal)  # type: ignore[arg-type]
+        return list(cast(list[tuple[int, int]], decision.legal))
 
     @staticmethod
     def _react_candidates(decision: Decision, state: GameState) -> list[object]:
@@ -1263,7 +1293,7 @@ class MCTSAgent(BaseAgent):
         from heat.ml import spaces
         from heat.ml.action_codec import _discard_order
 
-        discardable = list(decision.legal)  # type: ignore[arg-type]
+        discardable = list(cast(list[Card], decision.legal))
         ordered = _discard_order(discardable)
         out: list[object] = [[]]  # discard none
         for k in range(1, min(len(ordered) + 1, spaces.DISCARD_SIZE)):
@@ -1305,7 +1335,7 @@ class MCTSAgent(BaseAgent):
         if obs is None:
             obs = encode_observation(node.state, mover, decision)
         mask = legal_action_mask(decision, node.state)
-        probs = self._get_net().policy_prior(obs, mask)  # type: ignore[attr-defined]
+        probs = self._get_net().policy_prior(obs, mask)
 
         priors: list[float] = []
         for a in actions:
@@ -1595,7 +1625,7 @@ class MCTSAgent(BaseAgent):
         unchanged log-PUCT / DPW machinery. ``None`` (the C1/C2/C3 default) leaves
         the descent byte-for-byte identical.
         """
-        path: list[tuple[Node, object]] = []  # (node, edge-or-outcome) visited
+        path: list[tuple[Node, Edge | ChanceOutcome]] = []
         node = root
 
         while True:
@@ -1665,7 +1695,6 @@ class MCTSAgent(BaseAgent):
         stable first-seen tiebreak.
         """
         cfg = self.config
-        parent_n = max(1, node.n)
         c = self._c_puct(node.n)
         sqrt_total = math.sqrt(node.n)
 
@@ -1763,7 +1792,9 @@ class MCTSAgent(BaseAgent):
         # Replay from the node's clean round-START state (NOT its advanced
         # ``state``, which the partial round already mutated) so the step is a
         # pure replay of ``action_path + (action,)``.
-        res = model.step(node.round_start, node.action_path, edge.action, reseed)
+        round_start = node.round_start
+        assert round_start is not None
+        res = model.step(round_start, node.action_path, edge.action, reseed)
 
         own_spun = self._forced_move_spun(res.state, node, edge)
         if res.terminal:
@@ -1782,8 +1813,8 @@ class MCTSAgent(BaseAgent):
                 kind=NodeKind.CHANCE,
                 # Replay anchor for re-running the crossing advance: the parent's
                 # clean round-start state + the full path including this edge.
-                state=node.round_start,
-                round_start=node.round_start,
+                state=round_start,
+                round_start=round_start,
                 action_path=node.action_path + (edge.action,),  # the crossing advance
                 to_move=self.to_move_pid,
                 decision=res.decision,  # the decision an outcome leads to (one realization)
@@ -1803,7 +1834,7 @@ class MCTSAgent(BaseAgent):
         return Node(
             kind=NodeKind.DECISION,
             state=res.state,
-            round_start=node.round_start,
+            round_start=round_start,
             action_path=node.action_path + (edge.action,),
             to_move=res.decision.player_id if res.decision is not None else self.to_move_pid,
             decision=res.decision,
@@ -1998,7 +2029,7 @@ class MCTSAgent(BaseAgent):
         # to the un-shared encode below.
         if obs is None:
             obs = encode_observation(node.state, self.to_move_pid, decision=None)
-        return self._get_net().leaf_value(obs)  # type: ignore[attr-defined]
+        return self._get_net().leaf_value(obs)
 
     def _terminal_value(self, state: GameState) -> float:
         """Value of a finished state, in the LEARNER's frame.
@@ -2073,7 +2104,10 @@ class MCTSAgent(BaseAgent):
     # -- backup ----------------------------------------------------------
 
     def _backup(
-        self, path: list[tuple[Node, object]], root: Node, value: float
+        self,
+        path: list[tuple[Node, Edge | ChanceOutcome]],
+        root: Node,
+        value: float,
     ) -> None:
         """Propagate ``value`` up the visited path; update [Qmin, Qmax].
 
@@ -2139,7 +2173,7 @@ class MCTSAgent(BaseAgent):
         # The gear is the acted ROOT edge (temperature applies to the root visit
         # distribution during self-play; greedy in C1's eval).
         gear_edge = self._best_edge(root, at_root=True)
-        gear = gear_edge.action  # (new_gear, heat_cost)
+        gear = cast(tuple[int, int], gear_edge.action)
         if gear not in legal_gears:
             gear = legal_gears[0]
 
@@ -2150,14 +2184,14 @@ class MCTSAgent(BaseAgent):
                 and gear_child.decision.kind == DecisionKind.CARDS \
                 and gear_child.edges:
             cards_edge = self._best_edge(gear_child)
-            cards = cards_edge.action  # type: ignore[assignment]
+            cards = cast(tuple[Card, ...], cards_edge.action)
 
         if cards is None:
             # Search did not reach the CARDS node under the chosen gear; pick the
             # net-greedy play at that gear so the move is still sensible (the
             # n_simulations=1 "prior-greedy" degenerate path the spec asks for).
             cards = self._prior_greedy_cards(state, player_id, gear)
-        return gear, cards  # type: ignore[return-value]
+        return gear, cards
 
     def _best_edge(self, node: Node, *, at_root: bool = False) -> Edge:
         """The acted child edge: most-visited (default) or argmax Q̂ (config).
@@ -2229,7 +2263,7 @@ class MCTSAgent(BaseAgent):
             return legal[0] if legal else tuple()
         obs = encode_observation(state, player_id, decision)
         mask = legal_action_mask(decision, state)
-        probs = self._get_net().policy_prior(obs, mask)  # type: ignore[attr-defined]
+        probs = self._get_net().policy_prior(obs, mask)
         best = cand[0]
         best_p = -1.0
         for a in cand:
@@ -2240,7 +2274,7 @@ class MCTSAgent(BaseAgent):
             if p > best_p:
                 best_p = p
                 best = a
-        return best  # type: ignore[return-value]
+        return cast(tuple[Card, ...], best)
 
     # -- plan caching (mirror LookaheadAgent) ----------------------------
 
@@ -2273,7 +2307,8 @@ class MCTSAgent(BaseAgent):
             self._plan_sig = self._turn_signature(state, player_id)
             self._plan_gear = gear
             self._plan_cards = cards
-        return gear  # type: ignore[return-value]
+        assert gear is not None
+        return gear
 
     def choose_cards(
         self,
@@ -2331,7 +2366,7 @@ class MCTSAgent(BaseAgent):
                 has_adrenaline=has_adrenaline,
             ),
         )
-        return self._net_greedy_action(decision, state)  # type: ignore[return-value]
+        return cast(ReactDecision, self._net_greedy_action(decision, state))
 
     def choose_slipstream(self, state: GameState, player_id: int) -> bool:
         decision = Decision(DecisionKind.SLIPSTREAM, player_id, True)
@@ -2341,7 +2376,7 @@ class MCTSAgent(BaseAgent):
         self, state: GameState, player_id: int, discardable: list[Card]
     ) -> list[Card]:
         decision = Decision(DecisionKind.DISCARD, player_id, discardable)
-        return self._net_greedy_action(decision, state)  # type: ignore[return-value]
+        return cast(list[Card], self._net_greedy_action(decision, state))
 
     def _net_greedy_action(self, decision: Decision, state: GameState) -> object:
         """Decode the net's highest-prior legal action for ``decision``.
@@ -2356,7 +2391,7 @@ class MCTSAgent(BaseAgent):
 
         obs = encode_observation(state, decision.player_id, decision)
         mask = legal_action_mask(decision, state)
-        probs = self._get_net().policy_prior(obs, mask)  # type: ignore[attr-defined]
+        probs = self._get_net().policy_prior(obs, mask)
         # Argmax over legal (masked) actions.
         masked = np.where(np.asarray(mask, dtype=bool), probs, -np.inf)
         flat = int(np.argmax(masked))

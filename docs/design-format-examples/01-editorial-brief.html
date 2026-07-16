@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>A8 — Editorial design brief example</title><link rel="stylesheet" href="../design-doc.css"></head>
+<body class="editorial"><div class="sample-note">Format example · representative A8 content · <a href="index.html">compare all three</a></div>
+<header class="hero"><div class="hero-inner"><span class="status">Phase 1 partial</span><h1>Make full-rules self-play stable.</h1><p class="dek">A8 has proved that the sparse-reward PPO system can learn on full generated Heat tracks. The next decision is no longer whether learning exists—it is how to stabilise it without tuning away the evidence.</p><p class="muted">Direction A · Sprint A8 · updated 13 July 2026</p></div></header>
+<main class="layout"><nav aria-label="On this page"><strong>On this page</strong><a href="#decision">Decision</a><a href="#evidence">Evidence</a><a href="#shape">Design shape</a><a href="#risks">Risks</a><a href="#done">Definition of done</a></nav>
+<article>
+  <p class="kicker">Executive decision</p><h2 id="decision">Use the 1M run as the baseline. Stabilise one variable at a time.</h2>
+  <p>The 50k pilot was underpowered. At roughly one million nominal transitions, three seeds produced useful held-out play—especially at four and six seats—but no single checkpoint or seed is reliable across the full grid.</p>
+  <div class="callout"><strong>Recommended next move.</strong> Split evaluation into a development validation band and a fresh untouched test band. Compare one stabilisation change against the unchanged 1M baseline before adding new targets or architecture.</div>
+  <h2 id="evidence">What changed our mind</h2>
+  <ul class="check-list"><li>Three seeds completed in under 45 minutes of CPU training.</li><li>Aggregate play clears chance against weak fields at four and six seats.</li><li>The sparse signal is sufficient to learn; scale, not reward absence, explained the pilot.</li><li>Checkpoint quality oscillates, making selection and reproducibility the binding problem.</li></ul>
+  <h2 id="shape">The design in one line</h2><div class="flow" aria-label="Proposed experiment flow"><span>1M baseline</span><i>→</i><span>validation band</span><i>→</i><span>one stability change</span><i>→</i><span>untouched test</span></div>
+  <p><span class="tag">2–6 seats</span><span class="tag">generated tracks</span><span class="tag">imperfect information</span><span class="tag">snapshot pool</span><span class="tag">sparse placement reward</span></p>
+  <h2 id="risks">Risks carried forward</h2><ul class="risk-list"><li><strong>Validation overfitting:</strong> milestone inspection has already consumed one held-out band.</li><li><strong>Bad yardstick:</strong> the nominally strong heuristic is poorly calibrated on generated tracks.</li><li><strong>Seed sensitivity:</strong> two-seat performance remains materially less stable than larger fields.</li></ul>
+  <h2 id="done">A clean exit from A8</h2><p>A8 is complete when a pre-declared checkpoint rule produces stable, positive held-out placement reward across seeds and seat counts, and the final claim survives a fresh test band that was not used for iteration.</p>
+</article></main></body></html>

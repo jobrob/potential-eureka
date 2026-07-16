@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Implementation and experiment design for the A8 P0 timing profile.">
+  <title>A8 P0 — Timing profile design</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Implemented · measured</span>
+      <h1>A8 P0: locate the training bottleneck.</h1>
+      <p class="hero-copy">Add opt-in, low-surface timing to the existing A8 path and run one bounded 100k-transition CPU profile.</p>
+      <p><strong>Direction A · full rules · performance evidence</strong><br><span class="muted">Designed 13 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="Design status">
+      <span class="board-label">Scope</span>
+      <strong>Threshold passed.<br>Vectorize next.</strong>
+      <p>Rollout consumed 75.7% of measured training time; inference alone consumed 44.9%.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#question">Question</a>
+      <a href="#design">Design</a>
+      <a href="#accounting">Accounting</a>
+      <a href="#experiment">Experiment</a>
+      <a href="#status">Status</a>
+    </nav>
+    <article class="hybrid-content">
+      <section id="question">
+        <span class="section-kicker">01 · Decision question</span>
+        <h2>Should the next speed change target rollout collection?</h2>
+        <p class="lede"><strong>Hypothesis:</strong> rollout collection consumes at least 70% of measured A8 training time, so vectorizing environments is a better next move than tuning PPO minibatches or changing device.</p>
+        <div class="config-panel" aria-label="Hypothesis confidence">
+          <div><span>Prior confidence</span><strong>85%</strong></div>
+          <div><span>Primary threshold</span><strong>Rollout ≥70%</strong></div>
+          <div><span>Run budget</span><strong>100k nominal transitions</strong></div>
+          <div><span>Wall-time limit</span><strong>15 minutes</strong></div>
+        </div>
+      </section>
+
+      <section id="design">
+        <span class="section-kicker">02 · Implementation</span>
+        <h2>Instrument the established path, only when requested.</h2>
+        <ol class="step-line" aria-label="Timing flow">
+          <li><strong>Collect</strong><br>time complete rollout</li>
+          <li><strong>Break down</strong><br>encoding and inference</li>
+          <li><strong>Prepare</strong><br>GAE, concatenate, entropy</li>
+          <li><strong>Update</strong><br>time PPO optimization</li>
+        </ol>
+        <div class="file-grid">
+          <div class="file-card"><code>multiseat.py</code>Add an optional collector timing sink and accumulate encoding and policy-inference wall time.</div>
+          <div class="file-card"><code>phase1.py</code>Time rollout, batch preparation, and PPO update; attach per-iteration seconds to diagnostic records.</div>
+          <div class="file-card"><code>train_selfplay_a8.py</code>Add <code>--profile</code>, print iteration timing, and emit an aggregate mutually-exclusive summary.</div>
+          <div class="file-card"><code>test_a8_phase1.py</code>One focused test checks timing keys are present, finite, non-negative, and internally consistent.</div>
+        </div>
+        <p>The profiler is opt-in. With profiling disabled the collector skips all per-decision clock calls, preserving the baseline training path.</p>
+      </section>
+
+      <section id="accounting">
+        <span class="section-kicker">03 · Accounting model</span>
+        <h2>Nested measurements become exclusive report categories.</h2>
+        <pre><code>rollout = simulation + encoding + inference
+timed training = rollout + preparation + PPO update + overhead
+
+simulation = max(0, rollout - encoding - inference)</code></pre>
+        <p><code>rollout</code> is the primary decision metric. The inner split tells us whether a future collector should focus on rules-engine concurrency, observation construction, or batched neural inference. Preparation is reported separately so GAE and tensor concatenation cannot silently inflate either side.</p>
+      </section>
+
+      <section id="experiment">
+        <span class="section-kicker">04 · Scoped experiment</span>
+        <h2>One CPU seed is enough to choose the next engineering target.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Item</th><th>Plan</th></tr></thead>
+            <tbody>
+              <tr><td>Configuration</td><td>Existing A8 baseline, seed 0, 100k nominal transitions, CPU, 2–6 balanced seats.</td></tr>
+              <tr><td>Progress</td><td>Print every iteration with cumulative transitions, games, and phase seconds.</td></tr>
+              <tr><td>Timeout</td><td>External 15-minute process limit; retain captured log if exceeded.</td></tr>
+              <tr><td>Code scope</td><td>Estimated 70–110 production/test lines plus this design and results prose.</td></tr>
+              <tr><td>Compute</td><td>Expected 2–5 CPU minutes based on the recorded 1M run; hard cap 15 minutes.</td></tr>
+              <tr><td>Decision</td><td>If rollout ≥70%, prioritize vectorization. If PPO update dominates, investigate minibatch/device tuning. If encoding is material, profile the encoder before a collector rewrite.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>This profile measures wall time and therefore includes the real per-step synchronization and Python overhead of the current single-environment collector. It does not make a learning-quality claim.</p>
+      </section>
+
+      <section id="status">
+        <span class="section-kicker">05 · Delivery status</span>
+        <h2>Implemented; the rollout threshold passed.</h2>
+        <p>The seed-0 CPU run completed on 13 July 2026 in 84.1 seconds. The nominal 100k budget produced 124,717 recorded transitions and 411 complete games because the existing collector finishes in-flight games. CUDA was unavailable in the installed CPU-only PyTorch build, so the optional CUDA repeat was not run.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Exclusive phase</th><th>Seconds</th><th>Measured share</th></tr></thead>
+            <tbody>
+              <tr><td>Rules simulation and collection work</td><td>20.263</td><td>24.4%</td></tr>
+              <tr><td>Observation and action-mask encoding</td><td>5.342</td><td>6.4%</td></tr>
+              <tr><td>Single-decision policy inference</td><td>37.274</td><td class="metric-bad">44.9%</td></tr>
+              <tr><td>Batch preparation</td><td>0.607</td><td>0.7%</td></tr>
+              <tr><td>PPO optimization</td><td>19.610</td><td>23.6%</td></tr>
+              <tr><td>Other measured overhead</td><td>0.009</td><td>0.0%</td></tr>
+              <tr><td><strong>Total rollout</strong></td><td><strong>62.878</strong></td><td class="metric-good"><strong>75.7%</strong></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="decision-banner"><strong>Decision</strong>Prioritize policy-decision batching. The <a href="A8-t2-batched-collector-design.html">detailed T2 design</a> starts with the game’s simultaneous GEAR and CARDS phases; it defers a large vectorized game pool because A8’s current whole-game rollout averages only 4.24 games per PPO iteration. PPO-device or minibatch tuning cannot address the dominant 44.9% single-state inference cost.</div>
+        <p>Verification: <code>ruff</code> passed on all changed Python files; the A8 timing tests passed; and the combined multi-seat collector plus A8 suite passed 13 tests. The complete iteration log is <a href="../../runs/a8_p0_timing.log"><code>runs/a8_p0_timing.log</code></a>.</p>
+      </section>
+    </article>
+  </div>
+</main>
+<script src="../design-doc.js"></script>
+</body>
+</html>

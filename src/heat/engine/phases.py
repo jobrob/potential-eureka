@@ -138,7 +138,7 @@ def phase_shift_gears(
         if heat_cost > 0:
             player.pay_heat(heat_cost)
 
-        gear_shift_data: dict = {
+        gear_shift_data: dict[str, object] = {
             "old_gear": old_gear,
             "new_gear": new_gear,
             "heat_cost": heat_cost,

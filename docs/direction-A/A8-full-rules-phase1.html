@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Sprint A8 full-rules, domain-randomized Phase 1 design and results.">
+  <title>Sprint A8 — Full-rules, domain-randomized Phase 1</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Phase 1 partial</span>
+      <h1>Sprint A8: full-rules Phase 1.</h1>
+      <p class="hero-copy">The scale hypothesis is confirmed, and five PPO epochs materially improve held-out skill. S2's fixed opponent anchor lifts selected skill again but makes checkpoint oscillation 28% worse, so the anchor is rejected and stabilization remains open.</p>
+      <p><strong>Direction A · full rules · domain randomization</strong><br><span class="muted">Implementation and evidence record · updated 14 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="Current project status">
+      <span class="board-label">Current conclusion</span>
+      <strong>Scale confirmed.<br>Completion partial.</strong>
+      <p>The original 50k pilot was underpowered. Keep five epochs without the S2 anchor; stability remains open.</p>
+      <div class="palette-dots" aria-label="Document colour palette"><i></i><i></i><i></i><i></i><i></i></div>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#summary">Summary</a>
+      <a href="#objective">Objective</a>
+      <a href="#implementation">Implementation</a>
+      <a href="#budget">Budget</a>
+      <a href="#results">Results</a>
+      <a href="#s1-results">S1 result</a>
+      <a href="#s2-results">S2 result</a>
+      <a href="#interpretation">Interpretation</a>
+      <a href="#next-step">Next step</a>
+      <a href="#yardstick">Stronger yardstick</a>
+      <a href="#throughput">CPU and GPU scale</a>
+      <a href="#experiment-plan">Experiment plan</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="summary">
+        <span class="section-kicker">Executive summary</span>
+        <h2>Scaling changed the conclusion.</h2>
+        <p class="lede">The 50k pilot could not support a method-level conclusion. The scaled campaign shows that the existing sparse-reward PPO system can learn and transfer to held-out generated tracks, but performance still varies by seed, seat count, and checkpoint.</p>
+        <div class="decision-banner"><strong>Decision</strong>Use five PPO epochs without a fixed anchor for future A8 work. S2 raised median selected score from +0.2593 to +0.2987, but checkpoint variability rose from 0.1161 to 0.1491. This fails the experiment's primary stabilization gate, so anchoring remains optional and off by default.</div>
+        <div class="hybrid-stats" aria-label="Headline A8 evidence">
+          <div class="hybrid-stat"><span>Nominal transitions</span><strong>1M × 3</strong><small>three training seeds</small></div>
+          <div class="hybrid-stat"><span>Completed games</span><strong>4,000+</strong><small>per scaled seed</small></div>
+          <div class="hybrid-stat"><span>CPU training</span><strong>&lt;45 min</strong><small>all three seeds</small></div>
+          <div class="hybrid-stat"><span>Current verdict</span><strong>Partial</strong><small>learning is real; stability is open</small></div>
+        </div>
+      </section>
+
+      <section id="objective">
+        <span class="section-kicker">01 · Objective and baseline</span>
+        <h2>Move the stable A5 recipe to full generated Heat.</h2>
+        <p>A8 moves the stable <a href="A5-anticollapse-recipe.md">A5 self-play recipe</a> from Tiny-Heat to full generated Heat tracks, randomizing track geometry and player count during training. The baseline keeps only components that survived earlier gates:</p>
+        <ul class="check-list">
+          <li>masked action head;</li>
+          <li>flat observation encoder;</li>
+          <li>A5 snapshot-pool anti-collapse recipe;</li>
+          <li>sparse placement reward; and</li>
+          <li><a href="A7-eval-harness.md">A7 held-out multi-seat evaluation</a>.</li>
+        </ul>
+        <div class="config-panel" aria-label="Training distribution">
+          <div><span>Track namespace</span><strong><code>80008</code></strong></div>
+          <div><span>Track distribution</span><strong>Length 50–90 · 3–7 corners · two laps · up to two lanes</strong></div>
+          <div><span>Seat schedule</span><strong>Balanced shuffled counts from 2–6</strong></div>
+        </div>
+        <p>The training namespace is disjoint from A7's held-out <code>900000+</code> band.</p>
+      </section>
+
+      <section id="implementation">
+        <span class="section-kicker">02 · Implementation and instrumentation</span>
+        <h2>The training path and evaluator are reproducible.</h2>
+        <div class="file-grid">
+          <div class="file-card"><a href="../../src/heat/ml/selfplay/phase1.py"><code>src/heat/ml/selfplay/phase1.py</code></a>A8 configuration and PPO loop.</div>
+          <div class="file-card"><a href="../../scripts/train_selfplay_a8.py"><code>scripts/train_selfplay_a8.py</code></a>Training, milestone saves, and evaluation.</div>
+          <div class="file-card"><a href="../../src/heat/ml/selfplay/multiseat.py"><code>src/heat/ml/selfplay/multiseat.py</code></a>Exact completed-game accounting.</div>
+          <div class="file-card"><a href="../../tests/test_a8_phase1.py"><code>tests/test_a8_phase1.py</code></a>Schedule, namespace, accounting, and checkpoint tests.</div>
+        </div>
+        <p>The scale run added exact completed-game totals and saved and evaluated checkpoints at declared transition milestones. PyTorch is seeded before policy construction, making a seed control the entire training trajectory. Byte-identical seed-0 300k checkpoints from independent runs confirm reproducibility.</p>
+
+        <h3 class="table-title">A7 evaluator correction</h3>
+        <div class="result-note">A7 previously seeded game and deck randomness but did not independently seed the policy's sampled actions. Exact policy results could therefore depend on ambient PyTorch RNG state and evaluation order.</div>
+        <p>The evaluator now gives every game a deterministic policy-sampling seed, preserves the caller's RNG state, and produces identical repeated reports. A regression test covers reproducibility and RNG neutrality. Policy tables produced before this correction are superseded wherever exact values matter; heuristic-only A7 results are unaffected.</p>
+      </section>
+
+      <section id="budget">
+        <span class="section-kicker">03 · Budget ladder</span>
+        <h2>The campaign progressed from mechanics to a three-seed scale test.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Rung</th><th>Nominal transitions</th><th>Seeds</th><th>Purpose</th><th>Result</th></tr></thead>
+            <tbody>
+              <tr><td>Mechanical</td><td>~3k</td><td>1</td><td>Plumbing and all seat counts</td><td class="metric-good">Pass</td></tr>
+              <tr><td>Early pilot</td><td>50k</td><td>1</td><td>First evidence of movement</td><td>Too small</td></tr>
+              <tr><td>Intermediate</td><td>300k</td><td>1</td><td>Check whether the curve was still moving</td><td class="metric-good">Yes</td></tr>
+              <tr><td>Scaled</td><td>1M</td><td>3</td><td>Test the scale hypothesis</td><td>Useful learning; partial gate</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Collectors finish whole games, so actual transitions exceed nominal budgets. The 50k run used 62,146 transitions and about 148 games. The 300k seed-0 run used 360,100 transitions and 1,383 games. The 1M runs reached roughly 1.2M actual transitions and more than 4,000 completed games per seed.</p>
+        <p>Training took 14.4–15.0 minutes per 1M seed on CPU, plus roughly two minutes for the held-out grid. Three training seeds completed in under 45 minutes total.</p>
+      </section>
+
+      <section id="results">
+        <span class="section-kicker">04 · Corrected results</span>
+        <h2>The scaled policy transfers, but not uniformly.</h2>
+        <p>All values below use the corrected deterministic A7 evaluator: 20 held-out generated tracks, 50 games per cell, seats 2, 4, and 6, and both weak and nominally strong heuristic fields. The latter is diagnostic only because A7 showed that <code>StrongHeuristicAgent</code> is poorly calibrated on generated tracks.</p>
+
+        <h3 class="table-title">50k seed-0 checkpoint</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Opponent</th><th>Seats</th><th>Win rate</th><th>Mean placement reward</th><th>Wilson LB</th><th>Chance</th></tr></thead>
+            <tbody>
+              <tr><td>Weak</td><td>2</td><td>22%</td><td>−0.560</td><td>0.128</td><td>0.500</td></tr>
+              <tr><td>Weak</td><td>4</td><td>10%</td><td>−0.347</td><td>0.043</td><td>0.250</td></tr>
+              <tr><td>Weak</td><td>6</td><td>6%</td><td>−0.632</td><td>0.021</td><td>0.167</td></tr>
+              <tr><td>Strong</td><td>2</td><td>28%</td><td>−0.440</td><td>0.175</td><td>0.500</td></tr>
+              <tr><td>Strong</td><td>4</td><td>12%</td><td>−0.453</td><td>0.056</td><td>0.250</td></tr>
+              <tr><td>Strong</td><td>6</td><td>10%</td><td>−0.368</td><td>0.043</td><td>0.167</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The corrected result is weaker than the original noisy pilot table. It confirms that 50k cannot support a method-level conclusion.</p>
+
+        <h3 class="table-title">Final scaled checkpoints, by seed</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Seed</th><th>Opponent</th><th>2-seat win / reward</th><th>4-seat win / reward</th><th>6-seat win / reward</th></tr></thead>
+            <tbody>
+              <tr><td>0</td><td>Weak</td><td>56% / +0.160</td><td>26% / −0.053</td><td>28% / +0.048</td></tr>
+              <tr><td>1</td><td>Weak</td><td>62% / +0.260</td><td>36% / −0.007</td><td>24% / +0.072</td></tr>
+              <tr><td>2</td><td>Weak</td><td>32% / −0.340</td><td>40% / +0.120</td><td>28% / +0.032</td></tr>
+              <tr><td>0</td><td>Strong</td><td>62% / +0.240</td><td>34% / +0.193</td><td>18% / −0.052</td></tr>
+              <tr><td>1</td><td>Strong</td><td>54% / +0.120</td><td>30% / −0.053</td><td>24% / +0.092</td></tr>
+              <tr><td>2</td><td>Strong</td><td>50% / +0.000</td><td>32% / +0.087</td><td>30% / +0.136</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="table-title">Aggregate final result — 150 games per cell</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Opponent</th><th>Seats</th><th>Wins</th><th>Win rate</th><th>Wilson interval</th><th>Chance</th><th>Mean reward</th></tr></thead>
+            <tbody>
+              <tr><td>Weak</td><td>2</td><td>75/150</td><td>50.0%</td><td>0.421–0.579</td><td>0.500</td><td class="metric-good">+0.027</td></tr>
+              <tr><td>Weak</td><td>4</td><td>51/150</td><td>34.0%</td><td>0.269–0.419</td><td>0.250</td><td class="metric-good">+0.020</td></tr>
+              <tr><td>Weak</td><td>6</td><td>40/150</td><td>26.7%</td><td>0.202–0.343</td><td>0.167</td><td class="metric-good">+0.051</td></tr>
+              <tr><td>Strong</td><td>2</td><td>83/150</td><td>55.3%</td><td>0.473–0.631</td><td>0.500</td><td class="metric-good">+0.120</td></tr>
+              <tr><td>Strong</td><td>4</td><td>48/150</td><td>32.0%</td><td>0.251–0.398</td><td>0.250</td><td class="metric-good">+0.076</td></tr>
+              <tr><td>Strong</td><td>6</td><td>36/150</td><td>24.0%</td><td>0.179–0.314</td><td>0.167</td><td class="metric-good">+0.059</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="result-note">Against weak fields, the aggregate Wilson lower bound clears chance at four and six seats, and mean placement reward is positive at every seat count. At two seats the point estimate is exactly chance and seed 2 remains weak. This is real evidence of learning and transfer, but not a clean all-seed, all-seat pass.</div>
+      </section>
+
+      <section id="s1-results">
+        <span class="section-kicker">04a · S1 gentler PPO result</span>
+        <h2>Five epochs improve skill, but barely change oscillation.</h2>
+        <p>S1 ran three matched one-million-transition seeds with <code>n_epochs=5</code>. All other training settings were unchanged. Each run saved 300k, 500k, 750k, and 1M checkpoints and evaluated them deterministically on the frozen 20-track validation grid with 50 games per opponent × seat cell. Training took 36.7 minutes and the full train-and-evaluate campaign took 42.0 minutes, below the 90-minute cap. Every seed completed more than 5,200 games. Following the gate, both <code>A8Config</code> and the A8 training CLI now default to five epochs while preserving an explicit override.</p>
+
+        <h3 class="table-title">Predeclared decision metrics</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Metric</th><th>10 epochs</th><th>5 epochs</th><th>Interpretation</th></tr></thead>
+            <tbody>
+              <tr><td>Median validation score over matched checkpoints</td><td>−0.0507</td><td class="metric-good">+0.1079</td><td>Material improvement</td></tr>
+              <tr><td>Median selected-checkpoint score</td><td>+0.0807</td><td class="metric-good">+0.2593</td><td>Material improvement</td></tr>
+              <tr><td>Within-seed checkpoint SD</td><td>0.1185</td><td>0.1161</td><td>Only ~2% lower</td></tr>
+              <tr><td>Selected 2-seat mean reward</td><td>+0.0633</td><td class="metric-good">+0.2867</td><td>No regression</td></tr>
+              <tr><td>Selected 4-seat mean reward</td><td>+0.0568</td><td class="metric-good">+0.2845</td><td>No regression</td></tr>
+              <tr><td>Selected 6-seat mean reward</td><td>+0.0553</td><td class="metric-good">+0.1493</td><td>No regression</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>For the variance comparison, the matched policy states available for every baseline seed were 300k, 750k, 1M, and the final whole-rollout policy. The primary score is mean placement reward averaged equally across the six opponent × seat cells. The frozen rule selects the 1M checkpoint for all three five-epoch seeds, with scores of +0.2593, +0.2898, and +0.1713; it selects the final policy for all three ten-epoch seeds.</p>
+
+        <h3 class="table-title">Selected five-epoch checkpoints — aggregate 150 games per cell</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Opponent</th><th>Seats</th><th>Wins</th><th>Win rate</th><th>Wilson interval</th><th>Chance</th><th>Mean reward</th></tr></thead>
+            <tbody>
+              <tr><td>Weak</td><td>2</td><td>88/150</td><td>58.7%</td><td>0.507–0.662</td><td>0.500</td><td class="metric-good">+0.173</td></tr>
+              <tr><td>Weak</td><td>4</td><td>66/150</td><td>44.0%</td><td>0.363–0.520</td><td>0.250</td><td class="metric-good">+0.293</td></tr>
+              <tr><td>Weak</td><td>6</td><td>39/150</td><td>26.0%</td><td>0.196–0.336</td><td>0.167</td><td class="metric-good">+0.131</td></tr>
+              <tr><td>Strong</td><td>2</td><td>105/150</td><td>70.0%</td><td>0.622–0.768</td><td>0.500</td><td class="metric-good">+0.400</td></tr>
+              <tr><td>Strong</td><td>4</td><td>69/150</td><td>46.0%</td><td>0.382–0.540</td><td>0.250</td><td class="metric-good">+0.276</td></tr>
+              <tr><td>Strong</td><td>6</td><td>46/150</td><td>30.7%</td><td>0.238–0.385</td><td>0.167</td><td class="metric-good">+0.168</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="result-note"><strong>Decision: adopt with a caveat.</strong> Five epochs pass the skill and seat-count parts of the gate and narrowly reduce the declared variance statistic, so they become the preferred A8 recipe. The reduction is too small to claim stabilization: milestone regressions remain, and every seed’s final whole-rollout policy is worse than its 1M checkpoint. S2 tests the proposed fixed opponent anchor below.</div>
+      </section>
+
+      <section id="s2-results">
+        <span class="section-kicker">04b · S2 fixed-anchor result</span>
+        <h2>The anchor improves the ceiling, but destabilizes the path.</h2>
+        <p>S2 replaced 40% of recent-snapshot opponent iterations with the frozen S1 seed-0 1M policy. Because scripted opponents still occupied half of rollout iterations, the target mixture was 50% current self, 30% recent snapshot, and 20% fixed anchor. The observed aggregate was 49.0%, 30.5%, and 20.5%. A deterministic smoke test passed before three matched one-million-transition seeds ran with five PPO epochs, milestone logging, the unchanged validation grid, and a 90-minute cap. Training took 35.7 minutes; training plus evaluation took 49.3 minutes.</p>
+
+        <h3 class="table-title">Predeclared S2 gates</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Metric</th><th>S1: no anchor</th><th>S2: fixed anchor</th><th>Gate result</th></tr></thead>
+            <tbody>
+              <tr><td>Median score over matched checkpoints</td><td>+0.1079</td><td class="metric-good">+0.1448</td><td>Skill improved</td></tr>
+              <tr><td>Median selected-checkpoint score</td><td>+0.2593</td><td class="metric-good">+0.2987</td><td class="metric-good">Pass: above +0.2393 floor</td></tr>
+              <tr><td>Within-seed checkpoint SD</td><td>0.1161</td><td class="metric-bad">0.1491</td><td class="metric-bad">Fail: +28.4%, target ≤0.093</td></tr>
+              <tr><td>Selected 2-seat mean reward</td><td>+0.2867</td><td class="metric-good">+0.3300</td><td class="metric-good">Pass</td></tr>
+              <tr><td>Selected 4-seat mean reward</td><td>+0.2845</td><td>+0.2633</td><td class="metric-good">Pass: −0.0212, within −0.03 limit</td></tr>
+              <tr><td>Selected 6-seat mean reward</td><td>+0.1493</td><td class="metric-good">+0.2547</td><td class="metric-good">Pass</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="table-title">Frozen-rule selections</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Seed</th><th>Matched checkpoint scores: 300k / 750k / 1M / final</th><th>Selected policy</th><th>Selected score</th></tr></thead>
+            <tbody>
+              <tr><td>0</td><td>−0.0705 / +0.2445 / +0.3053 / +0.1422</td><td>1M</td><td class="metric-good">+0.3053</td></tr>
+              <tr><td>1</td><td>−0.2707 / +0.0597 / +0.0597 / +0.2987</td><td>Final</td><td class="metric-good">+0.2987</td></tr>
+              <tr><td>2</td><td>+0.0423 / +0.1738 / +0.1475 / +0.2440</td><td>Final</td><td class="metric-good">+0.2440</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Secondary rulers do not show uniform broadening. S2 improves against the weak field and fixed anchor at every seat count, but its selected four-seat reward against legacy strong falls from +0.2757 to +0.1423, and its six-seat reward against repaired strong falls from +0.2413 to +0.1400. These extra opponents were deliberately excluded from the primary S1/S2 metric so the ruler did not change mid-comparison.</p>
+        <div class="decision-banner"><strong>S2 decision: reject as a stabilization recipe.</strong>The selected policy is stronger on the primary score and passes every skill/seat guard, but the declared objective was checkpoint stability and variability worsened materially. Keep the implementation opt-in for future research; retain five epochs with <code>anchor_share=0</code> as the default.</div>
+      </section>
+
+      <section id="interpretation">
+        <span class="section-kicker">05 · Interpretation</span>
+        <h2>The remaining problem is stability, not proof of learning.</h2>
+        <p>The scale hypothesis is confirmed: 50k was much too early, and thousands rather than hundreds of games were needed before the current PPO system showed useful held-out play. This is still far below the millions of self-play games associated with AlphaZero-style systems; PPO is extracting a signal at this scale.</p>
+        <p>Learning is oscillatory. Individual 300k, 500k, 750k, and 1M checkpoints sometimes improve and then regress before recovering. The next issue is therefore training stability and checkpoint selection, not proof that the environment or reward is incapable of learning.</p>
+        <h3 class="table-title">Why A8 is not complete</h3>
+        <ul class="open-list">
+          <li><strong>Seed sensitivity.</strong><br>Two-player performance varies materially by seed.</li>
+          <li><strong>No dominant milestone.</strong><br>No single checkpoint wins at every seat count.</li>
+          <li><strong>Unreliable yardstick.</strong><br>The “strong” generated-track heuristic is poorly calibrated.</li>
+          <li><strong>Consumed holdout.</strong><br>The same held-out band was used to inspect milestones and must not become a repeatedly tuned final test set.</li>
+        </ul>
+      </section>
+
+      <section id="next-step">
+        <span class="section-kicker">06 · Recommended next step</span>
+        <h2>Separate evaluation roles, then change one variable.</h2>
+        <p>Keep this scaled run as the baseline. Before selecting “best” checkpoints or tuning against them, split evaluation into a reusable validation band for development and a fresh untouched test band for final claims. The current <code>900000+</code> band has already been inspected and should become validation data, not the source of the final A8 claim.</p>
+        <ol class="step-line" aria-label="Recommended implementation sequence">
+          <li><strong>Split</strong><br>validation and final-test bands</li>
+          <li><strong>Freeze</strong><br>the checkpoint-selection rule</li>
+          <li><strong>Compare</strong><br>one stabilization change</li>
+          <li><strong>Evaluate</strong><br>once on the untouched test</li>
+        </ol>
+        <h3 class="table-title">What “freeze the rule” means</h3>
+        <p>Choose checkpoints using one declared aggregate over the validation grid, rather than selecting a different milestone for whichever table is being discussed. The recommended primary score is mean placement reward averaged equally across 2-, 4-, and 6-seat cells and across the frozen opponent ladder. Placement reward uses every finishing position and is therefore less volatile than first-place rate, especially with six players. Report win rate and Wilson intervals as supporting evidence, and use them as a tie-break only if two checkpoints have effectively equal placement scores.</p>
+        <div class="config-panel" aria-label="Evaluation data roles">
+          <div><span>Training</span><strong><code>80008</code> namespace<br>unrestricted sampling</strong></div>
+          <div><span>Validation</span><strong>Existing <code>900000+</code> tracks<br>repeatable development use</strong></div>
+          <div><span>Final test</span><strong>New disjoint frozen band<br>one use after decisions freeze</strong></div>
+        </div>
+        <p>S1 established five epochs as the preferred recipe. S2 then tested fixed opponent anchoring as the only training change: selected skill rose, but checkpoint variability worsened by 28.4%, so the anchor is rejected for stabilization. Do not move directly to a staged curriculum, which adds more moving dynamics to the same unresolved failure. Keep frozen checkpoint selection and design the next experiment to act directly on policy-update or checkpoint stability—for example, a separately gated weight-averaging or update-regularization arm—before spending another three-seed budget.</p>
+        <h3 class="table-title">Why these alternatives are ordered this way</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Change</th><th>What it addresses</th><th>Why / trade-off</th><th>Priority</th></tr></thead>
+            <tbody>
+              <tr><td>5 PPO epochs</td><td>Checkpoint oscillation</td><td>Implemented in S1: skill improved materially, but checkpoint variability fell only ~2%.</td><td class="metric-good">Adopted</td></tr>
+              <tr><td>Fixed opponent anchor</td><td>Self-play drift and forgetting</td><td>S2 improved selected skill, but worsened checkpoint SD by 28.4%; the stationary reference did not stabilize this recipe.</td><td class="metric-bad">Tested · rejected for stability</td></tr>
+              <tr><td>Opponent curriculum</td><td>Early learning difficulty</td><td>More moving opponent dynamics are a poor next response after fixed anchoring increased oscillation.</td><td>Deferred</td></tr>
+              <tr><td>Dense target</td><td>Sparse credit assignment</td><td>Potentially useful later, but A8 already learned from sparse placement and the immediate evidence points more strongly to instability.</td><td>Deferred</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="yardstick">
+        <span class="section-kicker">07 · Improving the strong heuristic</span>
+        <h2>Neither repaired heuristic nor static search earns a universal “strong” label.</h2>
+        <p>H1 repaired the severe recovery defect but did not create a calibrated rung. H2 then selected a safe, fast one-round search candidate; B1 implemented it and ran 200 games per opponent × seat cell. StaticSearchV1 confidently beats the repaired heuristic at 2, 4, and 6 seats, yet posts negative placement reward against the weak field at all three seat counts. This is strong evidence of matchup non-transitivity, not a total difficulty ladder.</p>
+        <div class="result-note"><strong>B1 decision.</strong> Do not promote StaticSearchV1 or rename it as the strong benchmark. Keep its exact configuration available only through the explicit <code>--eval-search-candidate</code> option. Preserve the public <code>StrongHeuristicAgent</code> class name for compatibility, but label it <code>heuristic_repaired</code> in new A8 reports. The next benchmark design should aggregate several fixed rulers while retaining each per-style result. <a href="A8-h2-strong-static-benchmark-investigation.html#freeze-gate">Read the full implemented result.</a></div>
+        <div class="result-note"><strong>B2 implemented that recommendation.</strong> Six selected checkpoints from <code>G0002</code> (S1 five epochs) and <code>G0003</code> (S2 fixed anchor) ran against weak, repaired, search, and historical-policy rulers at 2, 4, and 6 seats: 72 cells and 14,400 races. G0003 raised the recipe-median aggregate reward from +0.097 to +0.159, and all four ruler medians improved. The +0.062 lift passes the predeclared breadth gate, although one of three matched runs regressed. Adopt the suite; prefer G0003 for selected-checkpoint skill while retaining the earlier rejection of anchoring as a stabilization fix. <a href="A8-b2-multi-ruler-benchmark.html">Read the full B2 result.</a></div>
+        <div class="result-note"><strong>Important limitation.</strong> A single heuristic must not become the definition of success. Optimizing repeatedly against one scripted style can reward exploitation of its blind spots without improving general play. The heuristic should be one rung in an opponent suite alongside the weak agent, frozen historical policy checkpoints, and cross-seed policy matches.</div>
+
+        <h3 class="table-title">Suggested strong-heuristic work</h3>
+        <ol class="step-line" aria-label="Strong heuristic improvement sequence">
+          <li><strong>Diagnose</strong><br>losses by track and decision type</li>
+          <li><strong>Repair</strong><br>the largest generated-track failure</li>
+          <li><strong>Gate</strong><br>against weak and current strong</li>
+          <li><strong>Freeze</strong><br>version and evaluation tracks</li>
+        </ol>
+        <p>Do not begin by retuning many evaluator constants. First replay a fixed batch of losses and attribute the decisive mistakes: unsafe corner entry, excess heat conservation near the finish, poor gear/card joint choice, missed slipstream or blocking value, or failure on particular length/corner/lane combinations. The agent already contains joint planning, forward heat solvency, a relative objective, and rank-dependent risk posture; the useful question is which of those models fails on generated tracks, not which feature can be added next.</p>
+        <ul class="open-list">
+          <li><strong>Generalization gate.</strong><br>On a heuristic-development band that is disjoint from ML validation and final test, the candidate must beat <code>HeuristicAgent</code> above chance at 2, 4, and 6 seats using a predeclared confidence bound.</li>
+          <li><strong>Regression gate.</strong><br>The candidate must also beat or clearly outrank the current strong agent, while not increasing spin-outs or breaking legality, determinism, seat neutrality, and latency limits.</li>
+          <li><strong>Freeze the opponent.</strong><br>Once the gates pass, name the version and stop tuning it during the stabilization comparison. Otherwise the ruler changes at the same time as the policy.</li>
+          <li><strong>Keep several rulers.</strong><br>Evaluate against weak, strong-v2, an early fixed policy anchor, and frozen policies from other seeds. Agreement across those opponents is much stronger evidence than exploiting one script.</li>
+        </ul>
+
+        <h3 class="table-title">How this improves the A8 decision</h3>
+        <p>A difficulty ladder makes plateau and regression easier to distinguish. A checkpoint that beats weak play but not strong-v2 has learned basic competence; one that improves against strong-v2 and historical policies has broader evidence of progress. The fixed early-policy anchor separately answers whether training is climbing beyond its earlier self. None of these replaces the untouched track test: opponent generalization and track generalization are different claims.</p>
+      </section>
+
+      <section id="throughput">
+        <span class="section-kicker">08 · Scaling experiment throughput</span>
+        <h2>Use CPU parallelism now; batch rollouts before expecting a GPU win.</h2>
+        <p>The code already accepts <code>--device cuda</code>, and PPO minibatch updates can run on the GPU. However, the hot rollout path currently calls the policy with a batch of one state, immediately copies the sampled result back to Python, advances a sequential rules engine, and repeats. The network is small. On that shape of workload, kernel-launch and CPU↔GPU synchronization overhead can outweigh the neural-network work. The scripted heuristics and game rules are Python control flow and cannot be moved to the GPU by changing the device flag.</p>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Approach</th><th>Expected value now</th><th>Reason</th><th>Recommendation</th></tr></thead>
+            <tbody>
+              <tr><td>Run independent seeds concurrently on CPU</td><td class="metric-good">High</td><td>Seeds share no mutable training state and the current three-seed campaign is already naturally parallel.</td><td>Implement first, capped to physical cores and memory bandwidth.</td></tr>
+              <tr><td>Parallelize evaluation cells</td><td class="metric-good">High</td><td>Opponent × seat × split cells are independent; CPU processes suit the Python engine and scripted agents.</td><td>Implement with deterministic per-cell seeds and one policy copy per worker.</td></tr>
+              <tr><td>Current collector with <code>--device cuda</code></td><td>Low / uncertain</td><td>Inference batch size is one and every decision synchronizes back to Python.</td><td>Benchmark, but do not assume a speed-up.</td></tr>
+              <tr><td>Vectorized CPU games + batched policy inference</td><td class="metric-good">Potentially high</td><td>Advance 16–64 independent games until each needs a policy decision, then infer for all ready states together.</td><td>Best engineering path if profiling says collection dominates.</td></tr>
+              <tr><td>Batched collector + GPU inference/update</td><td>Potentially high at scale</td><td>A GPU becomes useful once batches are large enough to amortize launch and transfer costs.</td><td>Evaluate after the vectorized collector exists; compare CPU and CUDA on identical batches.</td></tr>
+              <tr><td>Port the full rules engine to GPU</td><td>Very low</td><td>Large rewrite of branch-heavy game logic with high correctness risk and little reuse at current scale.</td><td>Do not pursue for A8.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="table-title">Proposed batched collector</h3>
+        <p>The <a href="A8-t2-batched-collector-design.html">detailed T2 design</a> narrows the first implementation. Begin inside one game by batching the already-simultaneous GEAR and CARDS choices across active policy seats, then replay the sampled actions through the unchanged driver. This preserves whole-game collection and the current per-seat GAE contract while reducing batch-of-one policy calls.</p>
+        <p>Do not begin with 16–32 complete games. P0 recorded only 4.24 games per 1,024-step iteration, and a six-seat game averaged 613.7 transitions. A large pool would multiply the PPO rollout before all lanes finish. If phase batching passes its correctness gates and improves rollout throughput by at least 25%, a second permission-gated slice may add an adaptive two-to-four-game pool.</p>
+        <div class="decision-banner"><strong>Practical scaling conclusion</strong>The fastest route to more evidence is likely several CPU seed processes plus parallel evaluation. The route to substantially larger single-run budgets is a vectorized collector. A GPU is the final stage of that collector work, not the first switch to flip.</div>
+      </section>
+
+      <section id="experiment-plan">
+        <span class="section-kicker">09 · Scoped experiments</span>
+        <h2>Measure the bottleneck, stabilize learning, then scale.</h2>
+        <p>P0, S1, S2, H1, its selected repair, B1, and B2 are implemented and measured; the remaining rows are proposed experiments. Each is deliberately small enough to produce a decision and includes progress logging or a wall-time limit. Code-size estimates include focused tests and experiment support code, but exclude generated results and report prose. They are planning ranges, not commitments.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Experiment</th><th>Estimated code change</th><th>Hypothesis and confidence</th><th>Scope and time limit</th><th>Decision rule</th></tr></thead>
+            <tbody>
+              <tr><td><strong>P0: timing profile</strong><br><span class="metric-good">Completed</span></td><td><strong>Small</strong><br>Opt-in collector timers, A8 record and CLI reporting, and one focused accounting test. Normal training avoids per-decision clock calls.</td><td>The threshold passed: rollout consumed <strong>75.7%</strong> of measured time. Single-decision inference was the largest exclusive phase at <strong>44.9%</strong>; rules simulation was 24.4%, PPO updates 23.6%, encoding 6.4%, and preparation 0.7%.</td><td>Seed 0, CPU, 100k nominal / 124,717 actual transitions, 411 games, 84.1 seconds. The 15-minute cap was not approached. CUDA was unavailable in the installed CPU-only build.</td><td class="metric-good">Prioritize a vectorized collector with batched policy inference. Do not spend the next performance slice on encoder or minibatch tuning. <a href="A8-p0-timing-profile.html">Design and full result.</a></td></tr>
+              <tr><td><strong>S1: gentler PPO</strong><br><span class="metric-good">Completed and adopted</span></td><td><strong>Tiny</strong><br>The experiment used the existing <code>--n-epochs</code> option. After the gate, the A8 config and CLI defaults changed to five, protected by one focused test; the shared A0/A5 defaults remain unchanged.</td><td>Skill improved strongly: the matched-checkpoint median rose from −0.0507 to +0.1079. The selected-checkpoint median rose from +0.0807 to +0.2593. Variability fell only about 2%, so the stabilization part of the hypothesis received weak support.</td><td>Three matched 1M seeds at 5 epochs, frozen 20-track validation grid, 50 games per cell, milestone logs. Training took 36.7 minutes; training plus evaluation took 42.0 minutes, below the 90-minute cap.</td><td class="metric-good">Five epochs are now the A8 default because score improved and no seat count regressed. Stabilization remains open; S2 tested and rejected fixed anchoring as the next remedy. <a href="#s1-results">Full result.</a></td></tr>
+              <tr><td><strong>S2: fixed policy anchor</strong><br><span class="metric-bad">Completed · rejected for stability</span></td><td><strong>Small</strong><br>Added opt-in checkpoint path and anchor share, reused <code>SnapshotAgent</code>, logged opponent-source counts, and added focused selection, validation, and CLI tests. Defaults remain off.</td><td>The observed mixture was 49.0% current self, 30.5% recent snapshot, and 20.5% anchor. Median selected score improved from +0.2593 to +0.2987, but checkpoint SD worsened from 0.1161 to 0.1491, contrary to the medium-confidence stabilization hypothesis.</td><td>A reproducible smoke test, then three matched 1M seeds at five epochs on the frozen validation rule. Training plus evaluation took 49.3 minutes, below the 90-minute cap; milestone logs and opponent counts confirmed progress.</td><td class="metric-bad">Reject the anchor as the default: the ≤0.093 stability gate failed. Skill and seat gates passed, so retain the opt-in implementation for later research. <a href="#s2-results">Full result.</a></td></tr>
+              <tr><td><strong>H1: heuristic diagnostic and repair</strong><br><span class="metric-good">Completed · safety fix kept</span></td><td><strong>Medium</strong><br>A deterministic loss-replay diagnostic followed by one optional guaranteed-spin guard and focused fixtures. Legacy behavior remains available for historical comparisons.</td><td>The guard reduced sampled spin events from 202 to 13 and repeated locks from 9 to 0. It did not create a StrongHeuristicV2: fresh Wilson strength gates failed at two and four seats.</td><td>The unchanged 108-game screen improved from 31 to 37 wins; a fresh 300-game development gate then tested 100 games per seat count within its ten-minute cap.</td><td>Keep the safety repair enabled, but keep the legacy ruler for matched measurement and do not freeze V2. <a href="A8-h1-heuristic-diagnostic.html#repair-result">Full result.</a></td></tr>
+              <tr><td><strong>B1: static-search freeze gate</strong><br><span class="metric-bad">Completed · not promoted</span></td><td><strong>Small/medium</strong><br>Frozen candidate subclass and factory, opt-in A8 label, reproducible multi-gate harness, and focused contract tests.</td><td>Safety and latency passed, and search beat the repaired heuristic in every seat count. The primary universal-strength hypothesis failed: reward versus weak fields was −0.130, −0.087, and −0.062 at 2, 4, and 6 seats.</td><td>1,794 races: 1,200 strength, 72 tight safety, 72 latency, and 450 checkpoint challenge. Runtime was 5.9 minutes under the 25-minute cap.</td><td class="metric-bad">Do not freeze as strong. Retain opt-in for style-specific comparison and design a multi-ruler benchmark. <a href="A8-h2-strong-static-benchmark-investigation.html#freeze-gate">Full result.</a></td></tr>
+              <tr><td><strong>B2: multi-ruler benchmark</strong><br><span class="metric-good">Completed · suite adopted</span></td><td><strong>Small</strong><br>A resumable fixed-matrix harness, atomic per-cell persistence, progress logging, and focused contract tests. No production-agent behavior changed.</td><td>A several-ruler aggregate would identify broader improvement despite non-transitivity. <strong>Medium confidence (~70%).</strong> G0003 improved the aggregate median by +0.062 over G0002 and all four ruler medians agreed.</td><td>Six checkpoints × four rulers × three seat counts × 200 races: 14,400 races on 40 matched tracks. Runtime was 35.3 minutes, inside the 35–40 minute estimate and 60-minute cap.</td><td class="metric-good">Adopt the suite and preserve its per-style results. Prefer G0003 for selected-checkpoint skill, with a seed-sensitivity warning; do not reverse its rejection as a stabilization recipe. <a href="A8-b2-multi-ruler-benchmark.html">Full result.</a></td></tr>
+              <tr><td><strong>T1: parallel campaign</strong><br><span class="metric-good">Completed · primary gate passed</span></td><td><strong>Medium</strong><br>Added a spawned campaign supervisor, canonical state hashing, opt-in parallel evaluation, bounded benchmark support, and focused process tests.</td><td>All step counts, game counts, policy hashes, evaluation reports, and parent RNG state matched exactly. Three training workers achieved <strong>2.703×</strong> fixed-work speed-up while retaining 94.8% per-worker throughput. The small evaluation grid achieved only 1.006×.</td><td>Three <code>dev-t1-*</code> 50k jobs at 1/2/3 workers completed in 139.210s, 93.392s, and 51.508s. The six-cell, 120-game evaluation took 8.136s sequentially and 8.089s with three workers.</td><td class="metric-good">Adopt three workers for independent seed campaigns and permit T2 review. Keep evaluation parallelism opt-in; its separate ≥1.5× gate failed. <a href="A8-t1-parallel-campaign-design.html#results">Full result.</a></td></tr>
+              <tr><td><strong>T2: phase-first batching</strong><br><span class="metric-bad">Completed · default rejected</span></td><td><strong>Medium</strong><br>Added shared simultaneous-decision helpers, opt-in scalar/phase collection, exact inference and batch telemetry, bounded benchmark support, and focused trace tests. Scalar remains the reference and default.</td><td>Correctness passed, and T2a measured 50.10% simultaneous decisions with a 2.114 mean available batch. T2b improved rollout throughput by only <strong>1.066× median</strong> and reduced inference wall by <strong>13.55%</strong>, below the 1.25× and 25% targets.</td><td>One 100k scalar T2a screen took 80.55s. Three matched 100k CPU repeats per mode took 476.93s, inside the 30-minute cap; per-seed speed-ups were 1.066×, 1.080×, and 1.001×.</td><td class="metric-bad">Stop below the 1.15× continuation threshold. Retain opt-in phase mode, keep scalar defaults, and do not start adaptive lanes, CUDA, or learning-safety compute. <a href="A8-t2-batched-collector-design.html#results">Full result.</a></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The stabilization experiment and throughput work answer different questions. S1 reused the existing campaign as its unchanged baseline because seeds and evaluation are deterministic; performance engineering must not change the learning recipe in the same comparison. If the collector changes rollout ordering, re-establish a small matched baseline before attributing any skill difference to PPO settings.</p>
+
+        <h3 class="table-title">Artifacts</h3>
+        <p>The project-wide <a href="../policy-generation-registry.html">learned policy registry</a> assigns the ten-epoch baseline <code>G0001</code>, S1 five epochs <code>G0002</code>, and S2 fixed anchor <code>G0003</code>. Its manifests preserve selected paths and hashes while the historical generated filenames remain unchanged. Ten-epoch milestone checkpoints are under <code>runs/a8_scale_1m_seed{0,1,2}/</code>; final checkpoints are <code>runs/a8_1m_seed{0,1,2}.pt</code>. S1 five-epoch milestones are under <code>runs/a8_s1_5ep_seed{0,1,2}/</code>. S2 milestones and evaluation reports are under <code>runs/a8_s2_anchor_seed{0,1,2}/</code>, with logs at <code>runs/a8_s2_anchor_seed{0,1,2}.log</code> and final policies at <code>runs/a8_s2_anchor_seed{0,1,2}.pt</code>. B2 raw counts and timing are stored in <code>runs/a8_b2_multi_ruler.json</code>.</p>
+
+        <div class="verification-panel"><strong>Engineering verification</strong><br>The final heuristic-repair and S2 implementation passed <strong>42 focused strong-heuristic, H1, and A8 tests</strong>. B2 added two focused matrix-contract tests and completed all 72 planned cells. Ruff and strict mypy were clean. The S2 smoke policies were tensor-for-tensor reproducible; all three full seeds produced every planned milestone and evaluation report.</div>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer"><strong>Direction A · Sprint A8 · evidence and implementation record</strong></footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

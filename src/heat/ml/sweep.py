@@ -34,7 +34,7 @@ import json
 import os
 import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from heat.ml.model import PPOConfig, net_profile_config
@@ -65,7 +65,7 @@ class FactorAxis:
     """
 
     name: str
-    levels: tuple
+    levels: tuple[Any, ...]
 
 
 @dataclass(frozen=True)
@@ -82,7 +82,7 @@ class RunConfig:
     """
 
     run_id: str
-    factors: dict
+    factors: dict[str, Any]
     ppo: PPOConfig
     curriculum: CurriculumConfig
     phases: list[TrainingPhase]
@@ -226,7 +226,10 @@ def _apply_factor(
 # Base presets (§4.3) -- where expand() branches from.
 # ---------------------------------------------------------------------------
 
-_BASE_PRESETS: dict[str, Callable[[], tuple[PPOConfig, CurriculumConfig, list]]] = {}
+_BASE_PRESETS: dict[
+    str,
+    Callable[[], tuple[PPOConfig, CurriculumConfig, list[TrainingPhase]]],
+] = {}
 
 
 def _sprint_8c_base() -> tuple[PPOConfig, CurriculumConfig, list[TrainingPhase]]:
@@ -288,7 +291,7 @@ class SweepSpec:
         )
         return int(hashlib.sha1(payload.encode("utf-8")).hexdigest()[:8], 16)
 
-    def _cells(self) -> list[dict]:
+    def _cells(self) -> list[dict[str, Any]]:
         """The list of factor cells (``{axis_name: level}``), pre-replication."""
         if self.method not in ("grid", "random", "lhs"):
             raise ValueError(
@@ -303,7 +306,7 @@ class SweepSpec:
             return [{}]
 
         if self.method == "grid":
-            cells: list[dict] = [{}]
+            cells: list[dict[str, Any]] = [{}]
             for axis in self.axes:
                 cells = [
                     {**c, axis.name: lvl} for c in cells for lvl in axis.levels
@@ -319,19 +322,20 @@ class SweepSpec:
             return self._cells_random(rng)
         return self._cells_lhs(rng)
 
-    def _cells_grid_fallback(self) -> list[dict]:
-        cells: list[dict] = [{}]
+    def _cells_grid_fallback(self) -> list[dict[str, Any]]:
+        cells: list[dict[str, Any]] = [{}]
         for axis in self.axes:
             cells = [
                 {**c, axis.name: lvl} for c in cells for lvl in axis.levels
             ]
         return cells
 
-    def _cells_random(self, rng: random.Random) -> list[dict]:
+    def _cells_random(self, rng: random.Random) -> list[dict[str, Any]]:
         """Draw ``max_configs`` distinct random cells (independent per axis)."""
-        n = int(self.max_configs)  # type: ignore[arg-type]
+        assert self.max_configs is not None
+        n = self.max_configs
         seen: set[str] = set()
-        cells: list[dict] = []
+        cells: list[dict[str, Any]] = []
         # Bound attempts so a small factor space (fewer combos than max_configs)
         # terminates rather than spinning forever.
         max_attempts = max(1000, n * 50)
@@ -346,7 +350,7 @@ class SweepSpec:
             cells.append(cell)
         return cells
 
-    def _cells_lhs(self, rng: random.Random) -> list[dict]:
+    def _cells_lhs(self, rng: random.Random) -> list[dict[str, Any]]:
         """Latin-hypercube draw: each axis's levels spread evenly across N draws.
 
         For each axis, build a list of ``max_configs`` level picks where the
@@ -355,7 +359,8 @@ class SweepSpec:
         starved) while decorrelating axes -- the textbook LHS property on a
         discretized grid. Deterministic given the spec hash.
         """
-        n = int(self.max_configs)  # type: ignore[arg-type]
+        assert self.max_configs is not None
+        n = self.max_configs
         columns: list[list[Any]] = []
         for axis in self.axes:
             levels = list(axis.levels)
@@ -366,7 +371,7 @@ class SweepSpec:
                 i += 1
             rng.shuffle(col)
             columns.append(col)
-        cells: list[dict] = []
+        cells: list[dict[str, Any]] = []
         for row in range(n):
             cells.append(
                 {axis.name: columns[c][row] for c, axis in enumerate(self.axes)}
@@ -431,7 +436,7 @@ class ManifestWriter:
         self.path = path
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
-    def _append(self, row: dict) -> None:
+    def _append(self, row: dict[str, Any]) -> None:
         with open(self.path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, sort_keys=True, default=str) + "\n")
 
@@ -498,7 +503,7 @@ class ManifestRow:
 
     run_id: str
     status: str
-    factors: dict
+    factors: dict[str, Any]
     checkpoint: str | None = None
     meta: str | None = None
     git_sha: str | None = None
@@ -581,7 +586,9 @@ def run_campaign(
     just builds the default :class:`SweepSpec` and calls this.
     """
     if train_fn is None:  # pragma: no cover - exercised only in the heavy shell
-        from heat.ml.training import train_self_play as train_fn  # type: ignore
+        from heat.ml.training import train_self_play
+
+        train_fn = train_self_play
 
     manifest_path = os.path.join(out_dir, "manifest.jsonl")
     writer = ManifestWriter(manifest_path)
@@ -624,7 +631,8 @@ def _safe_git_sha(checkpoint: str) -> str | None:
     meta = _meta_sidecar_path(checkpoint)
     try:
         with open(meta, "r", encoding="utf-8") as fh:
-            return json.load(fh).get("git_sha")
+            value = json.load(fh).get("git_sha")
+            return value if isinstance(value, str) else None
     except (OSError, ValueError):
         return None
 
@@ -697,7 +705,7 @@ def balanced_fields(
         # Prefer the most under-represented contenders. Sort by (count, random
         # jitter) so ties break deterministically but without a fixed bias.
         jitter = {lbl: rng.random() for lbl in labels}
-        ordered = sorted(labels, key=lambda l: (counts[l], jitter[l]))
+        ordered = sorted(labels, key=lambda label: (counts[label], jitter[label]))
         field = tuple(sorted(ordered[:num_players]))
         if field in seen:
             # Force diversity: pick a fresh combination by sampling randomly.
@@ -717,7 +725,7 @@ def balanced_fields(
 # ---------------------------------------------------------------------------
 
 
-def _outcome_to_dict(o: GameOutcome) -> dict:
+def _outcome_to_dict(o: GameOutcome) -> dict[str, Any]:
     """Serialize a :class:`GameOutcome` to a plain jsonl-able dict (§7.4)."""
     return {
         "game_index": o.game_index,
@@ -844,9 +852,9 @@ class FactorEffect:
 
     factor: str
     #: ``level -> (mean_rating, ci_lo, ci_hi)`` grouped marginal means.
-    group_means: dict
+    group_means: dict[str, tuple[float, float, float]]
     #: OLS coefficient per non-baseline level: ``level -> (coef, se)``.
-    ols_coefs: dict
+    ols_coefs: dict[str, tuple[float, float]]
 
 
 @dataclass(frozen=True)
@@ -856,7 +864,7 @@ class Attribution:
     ladder: list[LadderEntry]
     effects: list[FactorEffect]
     #: ``run_id -> rating`` for the swept runs that joined to the ladder.
-    run_ratings: dict
+    run_ratings: dict[str, float]
 
 
 def join_ladder(
@@ -922,7 +930,7 @@ def grouped_diffs(
     *,
     factor: str,
     rating_key: str = "rating",
-) -> dict:
+) -> dict[str, tuple[float, float, float]]:
     """Grouped marginal means of ``rating_key`` per level of ``factor`` (§9.2a).
 
     ``rows`` is the joined manifest x ladder table (each row a dict with the
@@ -950,7 +958,7 @@ def ols_effects(
     *,
     factors: Sequence[str],
     rating_key: str = "rating",
-) -> dict:
+) -> dict[str, dict[str, tuple[float, float]]]:
     """OLS of rating on one-hot factor levels (§9.2b), via a normal-equation fit.
 
     Treats every factor as categorical (one-hot, dropping the first level per
@@ -990,7 +998,7 @@ def ols_effects(
             for f in factors
         }
 
-    X = []
+    X: list[list[float]] = []
     for row in design_rows:
         vec = [1.0]
         for (f, lvl) in columns:
@@ -999,7 +1007,7 @@ def ols_effects(
 
     coefs, ses = _ols_fit(X, y)
 
-    out: dict[str, dict] = {f: {} for f in factors}
+    out: dict[str, dict[str, tuple[float, float]]] = {f: {} for f in factors}
     for i, (f, lvl) in enumerate(columns, start=1):
         out[f][_level_key(lvl)] = (coefs[i], ses[i])
     return out
@@ -1078,7 +1086,7 @@ def build_attribution(
     """
     ladder = join_ladder(ratings, rating_attr=("rating" if rating_attr == "rating" else rating_attr))
     run_ratings: dict[str, float] = {}
-    tidy: list[dict] = []
+    tidy: list[dict[str, Any]] = []
     for row in manifest_rows:
         if row.status != "done" or row.run_id not in ratings:
             continue

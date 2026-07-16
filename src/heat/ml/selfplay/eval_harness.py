@@ -31,6 +31,9 @@ Design decisions (see ``docs/direction-A/A7-eval-harness.md``):
 from __future__ import annotations
 
 import copy
+import multiprocessing as mp
+import pickle
+from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
@@ -56,6 +59,27 @@ from heat.tracks.generator import TrackGenParams, track_sampler
 #: generator documents ``900_000+`` as the held-out band reachable ONLY from
 #: ``base_seed == 0`` (see :mod:`heat.tracks.generator`).
 HELDOUT_BASE: int = 900_000
+
+
+@dataclass(frozen=True)
+class _CellSpec:
+    """Picklable identity for one ordered parallel evaluation cell."""
+
+    index: int
+    opponent: str
+    opponent_index: int
+    seat_count: int
+    seat_index: int
+    split: str
+    split_index: int
+    base_seed: int
+
+
+_WORKER_POLICY: PPOPolicy | BaseAgent | None = None
+_WORKER_OPPONENTS: dict[str, Callable[[], BaseAgent]] | None = None
+_WORKER_SPLITS: dict[str, list[Track]] | None = None
+_WORKER_GAMES: int = 0
+_WORKER_DEVICE: torch.device | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +315,10 @@ def _run_cell(
     :class:`~heat.agents.base.BaseAgent` policy skips encoding and plays through
     :func:`_play_scripted_game`; a :class:`PPOPolicy` **samples** (``act``) via
     :class:`_EvalCollector`. Both paths draw the per-game seed from a freshly
-    seeded RNG identically, so equal ``g`` plays the same game.
+    seeded RNG identically, so equal ``g`` plays the same game. Policy sampling
+    also runs inside a forked, per-game-seeded torch RNG context: repeated
+    evaluation of the same checkpoint is byte-for-byte reproducible and does
+    not consume the caller/trainer's torch RNG stream.
     """
     wins = 0
     total_reward = 0.0
@@ -315,8 +342,18 @@ def _run_cell(
             state = _play_scripted_game(track, seat_count, agents, game_seed)
         else:
             collector = _EvalCollector(track, seat_count, scripted_seats=scripted)
-            # n_steps=1 -> exactly one complete game (finish-the-in-flight-game).
-            collector.collect(policy, 1, device, rng, gamma=1.0)
+            cuda_devices: list[int] = []
+            if device.type == "cuda":
+                cuda_devices = [
+                    device.index
+                    if device.index is not None
+                    else torch.cuda.current_device()
+                ]
+            policy_seed = (base_seed + g + 0xA7E7A7) % (2**63 - 1)
+            with torch.random.fork_rng(devices=cuda_devices):
+                torch.manual_seed(policy_seed)
+                # n_steps=1 -> one complete game (finish-the-in-flight-game).
+                collector.collect(policy, 1, device, rng, gamma=1.0)
             assert collector.last_state is not None  # a game always ends
             state = collector.last_state
         total_reward += _placement_reward(state, policy_seat)
@@ -363,6 +400,60 @@ def _cell_seed(seed: int, oi: int, si: int, pi: int) -> int:
     return seed * 1_000_000 + oi * 100_000 + si * 10_000 + pi * 1_000
 
 
+def _preflight_pickle(value: object, name: str) -> None:
+    """Raise a named error before spawning when one parallel input is invalid."""
+    try:
+        pickle.dumps(value)
+    except (pickle.PickleError, TypeError, AttributeError) as exc:
+        raise TypeError(f"parallel evaluation input {name} is not picklable") from exc
+
+
+def _init_eval_worker(
+    policy: PPOPolicy | BaseAgent,
+    opponents: dict[str, Callable[[], BaseAgent]],
+    splits: dict[str, list[Track]],
+    games_per_cell: int,
+) -> None:
+    """Install one policy, opponent map, and track grid in each CPU worker."""
+    global _WORKER_POLICY, _WORKER_OPPONENTS, _WORKER_SPLITS
+    global _WORKER_GAMES, _WORKER_DEVICE
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+    _WORKER_POLICY = policy
+    _WORKER_OPPONENTS = opponents
+    _WORKER_SPLITS = splits
+    _WORKER_GAMES = games_per_cell
+    _WORKER_DEVICE = torch.device("cpu")
+
+
+def _run_parallel_cell(spec: _CellSpec) -> tuple[int, EvalCell]:
+    """Run one initialized worker's cell and preserve its parent order index."""
+    if (
+        _WORKER_POLICY is None
+        or _WORKER_OPPONENTS is None
+        or _WORKER_SPLITS is None
+        or _WORKER_DEVICE is None
+    ):  # pragma: no cover - initializer contract
+        raise RuntimeError("parallel evaluation worker was not initialized")
+    wins, total = _run_cell(
+        _WORKER_POLICY,
+        _WORKER_OPPONENTS[spec.opponent],
+        spec.seat_count,
+        _WORKER_SPLITS[spec.split],
+        _WORKER_GAMES,
+        spec.base_seed,
+        _WORKER_DEVICE,
+    )
+    return spec.index, _make_cell(
+        spec.opponent,
+        spec.seat_count,
+        spec.split,
+        _WORKER_GAMES,
+        wins,
+        total,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public evaluation entry points
 # ---------------------------------------------------------------------------
@@ -377,6 +468,8 @@ def evaluate_policy(
     games_per_cell: int = 50,
     seed: int = 0,
     device: torch.device | None = None,
+    parallel: bool = False,
+    max_workers: int | None = None,
 ) -> EvalReport:
     """Score ``policy`` over the (opponent x seat_count x split) grid.
 
@@ -397,6 +490,8 @@ def evaluate_policy(
         games_per_cell: games per grid cell (default 50).
         seed: base seed (per-cell seeds derive from it deterministically).
         device: torch device (defaults to CPU).
+        parallel: run independent cells in spawned CPU processes when true.
+        max_workers: optional process limit for parallel evaluation.
 
     Returns:
         An :class:`EvalReport` with one :class:`EvalCell` per grid cell.
@@ -412,6 +507,64 @@ def evaluate_policy(
         splits = {"tiny": tiny_heat_track(), "heldout": held_out_tracks()}
     if device is None:
         device = torch.device("cpu")
+
+    if parallel:
+        if device.type == "cuda":
+            raise ValueError("parallel evaluation supports CPU policies only")
+        if max_workers is not None and max_workers < 1:
+            raise ValueError("max_workers must be positive")
+        _preflight_pickle(policy, "policy")
+        for label, factory in opps.items():
+            _preflight_pickle(factory, f"opponents[{label!r}]")
+        normalized_splits = {
+            split_name: _as_track_list(split_val)
+            for split_name, split_val in splits.items()
+        }
+        for label, tracks in normalized_splits.items():
+            _preflight_pickle(tracks, f"splits[{label!r}]")
+
+        specs: list[_CellSpec] = []
+        for oi, opp_name in enumerate(opps):
+            for si, seat_count in enumerate(seat_counts):
+                for pi, split_name in enumerate(normalized_splits):
+                    specs.append(
+                        _CellSpec(
+                            index=len(specs),
+                            opponent=opp_name,
+                            opponent_index=oi,
+                            seat_count=seat_count,
+                            seat_index=si,
+                            split=split_name,
+                            split_index=pi,
+                            base_seed=_cell_seed(seed, oi, si, pi),
+                        )
+                    )
+        ordered: list[EvalCell | None] = [None] * len(specs)
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=mp.get_context("spawn"),
+            initializer=_init_eval_worker,
+            initargs=(policy, opps, normalized_splits, games_per_cell),
+        ) as executor:
+            futures: dict[Future[tuple[int, EvalCell]], _CellSpec] = {
+                executor.submit(_run_parallel_cell, spec): spec for spec in specs
+            }
+            for future in as_completed(futures):
+                spec = futures[future]
+                try:
+                    index, cell = future.result()
+                except BaseException as exc:
+                    identity = f"{spec.opponent}/{spec.seat_count}/{spec.split}"
+                    raise RuntimeError(
+                        f"parallel evaluation cell {identity!r} failed"
+                    ) from exc
+                ordered[index] = cell
+        assert all(cell is not None for cell in ordered)
+        return EvalReport(
+            cells=[cell for cell in ordered if cell is not None],
+            games_per_cell=games_per_cell,
+            seed=seed,
+        )
 
     cells: list[EvalCell] = []
     for oi, (opp_name, opp_factory) in enumerate(opps.items()):

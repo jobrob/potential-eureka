@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="A8 S3 checkpoint-averaging stabilization experiment and untouched final gate.">
+  <title>A8 S3 — Stabilization and final gate</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Approved design · experiment pending</span>
+      <h1>S3: make the final policy less dependent on one checkpoint.</h1>
+      <p class="hero-copy">Average three late G0002 milestones with one rule for every seed, test the candidate on consumed validation data, then evaluate the frozen winner once on untouched tracks.</p>
+      <p><strong>Direction A · A8 completion gate</strong><br><span class="muted">Designed 16 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="S3 decision rule">
+      <span class="board-label">Primary stabilization gate</span>
+      <strong>≥20% less seed variation.<br>≤0.030 skill loss.</strong>
+      <p>The untouched final band remains sealed until the validation decision and checkpoint rule are frozen.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#decision">Decision</a>
+      <a href="#scope">Scope</a>
+      <a href="#method">Method</a>
+      <a href="#validation">Validation gate</a>
+      <a href="#final">Final gate</a>
+      <a href="#implementation">Implementation</a>
+      <a href="#results">Results</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="decision">
+        <span class="section-kicker">01 · Completion decision</span>
+        <h2>Auxiliary heads no longer block A8.</h2>
+        <p>A8 already demonstrated useful full-rules learning and held-out transfer with sparse placement reward. The unresolved evidence is checkpoint and seed sensitivity, not failure to extract a learning signal. Adding auxiliary objectives now would change several mechanisms at once and make the final result harder to attribute.</p>
+        <div class="decision-banner"><strong>Decision</strong>Defer the remaining Direction-C auxiliary heads. Complete A8 with a frozen checkpoint rule, one directly targeted stabilization comparison, and one untouched final evaluation. Reconsider auxiliary heads only if later evidence identifies representation or credit assignment as the limiting factor.</div>
+      </section>
+
+      <section id="scope">
+        <span class="section-kicker">02 · Hypothesis, confidence, and budget</span>
+        <h2>A bounded post-training experiment is enough to answer the open question.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Item</th><th>Predeclared value</th></tr></thead>
+            <tbody>
+              <tr><td>Hypothesis</td><td>Uniformly averaging the 500k, 750k, and 1M G0002 milestones reduces recipe-level seed variation without materially lowering broad multi-ruler skill.</td></tr>
+              <tr><td>Confidence</td><td><strong>Moderate, approximately 60%.</strong> Late checkpoints occupy the same training basin, but neural weight averaging can still cross a poor region.</td></tr>
+              <tr><td>Code scope</td><td><strong>Small.</strong> One checkpoint-averaging helper, one CLI, generalized contender selection in the existing B2 harness, and focused tests.</td></tr>
+              <tr><td>Validation compute</td><td>Six policies × four rulers × three seat counts × 100 races = <strong>7,200 races</strong>; estimated 18–22 minutes, hard cap 40 minutes, atomic per-cell persistence and resume.</td></tr>
+              <tr><td>Final compute</td><td>Three frozen winner policies × four rulers × three seat counts × 200 races = <strong>7,200 races</strong>; estimated 18–22 minutes, hard cap 40 minutes, run once.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="method">
+        <span class="section-kicker">03 · Frozen candidate</span>
+        <h2>Use the same three-way average for every seed.</h2>
+        <p>G0004 is derived independently from each G0002 run. For run <code>R##</code>, average every floating tensor in <code>@500K</code>, <code>@750K</code>, and <code>@1000K</code> with equal weight. Metadata and non-floating tensors must match exactly. The averaging implementation stores the three source checkpoint identities in the output blob.</p>
+        <pre><code>G0004-R## = mean(
+  G0002-R##@500K,
+  G0002-R##@750K,
+  G0002-R##@1000K
+)</code></pre>
+        <p>This is a recipe-level rule, not per-seed checkpoint selection. No seed receives a custom window, weight, or validation-driven milestone.</p>
+      </section>
+
+      <section id="validation">
+        <span class="section-kicker">04 · Consumed validation band</span>
+        <h2>Compare G0004 and G0002 on matched races.</h2>
+        <p>The validation experiment reuses the consumed B2 development band at track seeds <code>714000..714039</code>. Both generations see identical game seeds against weak, repaired-heuristic, StaticSearchV1, and historical G0002-R00 rulers at 2, 4, and 6 seats.</p>
+        <ul class="open-list">
+          <li><strong>Primary stability gate.</strong><br>Standard deviation of the three per-run aggregate placement rewards is at most 80% of G0002's matched standard deviation.</li>
+          <li><strong>Skill guard.</strong><br>G0004's median aggregate placement reward is no more than 0.030 below G0002.</li>
+          <li><strong>Breadth guard.</strong><br>At least three of four ruler-level median differences are non-negative.</li>
+          <li><strong>Selection.</strong><br>Adopt G0004 only if all three gates pass. Otherwise retain G0002. The selected generation and its three registered run checkpoints are frozen before opening final-test results.</li>
+        </ul>
+      </section>
+
+      <section id="final">
+        <span class="section-kicker">05 · Untouched final test</span>
+        <h2>Use a new band exactly once.</h2>
+        <div class="config-panel" aria-label="Evaluation data roles">
+          <div><span>Training</span><strong><code>80008</code> namespace</strong></div>
+          <div><span>Development</span><strong><code>900000+</code> and <code>714000+</code><br>already consumed</strong></div>
+          <div><span>Final test</span><strong><code>1314000..1314039</code><br>sealed until selection</strong></div>
+        </div>
+        <p>The final claim passes when the selected generation has positive median aggregate placement reward, at least two of three runs have positive aggregates, the worst run is above −0.050, and median placement reward against the weak ruler is positive at 2, 4, and 6 seats. Win rates and Wilson intervals remain supporting evidence rather than the primary multi-seat statistic.</p>
+        <div class="decision-banner"><strong>Honest stop rule</strong>The final test is reported as observed. A miss does not reopen model or checkpoint selection on this band; it closes A8 with a failed or partial generalization verdict and hands the evidence to the next direction.</div>
+      </section>
+
+      <section id="implementation">
+        <span class="section-kicker">06 · Implementation handoff</span>
+        <h2>Keep the change reversible and auditable.</h2>
+        <div class="file-grid">
+          <div class="file-card"><code>src/heat/ml/selfplay/checkpoint.py</code>Validate and average compatible policy blobs.</div>
+          <div class="file-card"><code>experiments/stabilize_a8_checkpoints.py</code>Build the three registered G0004 derived policies.</div>
+          <div class="file-card"><code>experiments/eval_multi_ruler_benchmark.py</code>Accept explicit registered contenders and emit a deterministic summary.</div>
+          <div class="file-card"><code>tests/</code>Cover averaging, incompatible inputs, contender selection, and summary gates.</div>
+        </div>
+        <p>Register G0004 before deriving its weights. Capture the clean implementation commit as source provenance. Generated checkpoints and raw result JSON remain under <code>runs/</code>; the registry stores selected paths, sizes, and SHA-256 hashes.</p>
+      </section>
+
+      <section id="results">
+        <span class="section-kicker">07 · Results</span>
+        <h2>Pending implementation and bounded measurement.</h2>
+        <p>This section will record the exact validation metrics, adoption decision, untouched final result, verification commands, and A8 completion verdict. It must be updated before the sprint is marked complete.</p>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer"><strong>Direction A · A8 S3 · stabilization and final gate</strong></footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

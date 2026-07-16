@@ -24,8 +24,6 @@ env builder -- and touches nothing in the engine or the existing ml modules.
 
 from __future__ import annotations
 
-from typing import cast
-
 from heat.models.track import Corner, Space, Track
 from heat.ml.env import HeatEnv, TrackSource
 from heat.ml.selfplay.ppo import A0Config
@@ -130,7 +128,7 @@ def tiny_heat_config(**overrides: object) -> A0Config:
         "n_steps": 512,
     }
     defaults.update(overrides)
-    return A0Config(**cast("dict[str, object]", defaults))  # type: ignore[arg-type]
+    return A0Config(**defaults)  # type: ignore[arg-type]
 
 
 def make_tiny_env(

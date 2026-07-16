@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>A8 — Playful hybrid design example</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<div class="sample-note">New hybrid example · editorial story + dashboard evidence · <a href="index.html">compare all formats</a></div>
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Phase 1 partial</span>
+      <h1>Make full-rules self-play stable.</h1>
+      <p class="hero-copy">A8 has proved that sparse-reward PPO can learn on generated Heat tracks. The next priority is making that skill repeatable across seeds, seats, and checkpoints—without tuning away the evidence.</p>
+      <p><strong>Direction A · Sprint A8</strong><br><span class="muted">Design record · updated 13 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="Current project status">
+      <span class="board-label">Project status / current conclusion</span>
+      <strong>Scale: green.<br>Stability: amber.</strong>
+      <p>Keep the 1M run as the baseline. Change one thing at a time.</p>
+      <div class="palette-dots" aria-label="Document colour palette"><i></i><i></i><i></i><i></i><i></i></div>
+    </aside>
+  </div>
+</header>
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="On this page"><strong>Contents</strong><a href="#decision">Decision</a><a href="#evidence">Evidence</a><a href="#gates">Gates</a><a href="#route">Next steps</a><a href="#finish">Completion</a></nav>
+    <article class="hybrid-content">
+      <h2 id="decision">The decision</h2>
+      <p>The original 50k pilot was too small to answer the method question. At roughly one million nominal transitions, three seeds produced useful held-out play—especially at four and six seats—but no one checkpoint is dependable across the whole grid.</p>
+      <div class="decision-banner"><strong>Recommended next move</strong>Split evaluation into a development validation band and a fresh untouched test band. Compare one stabilisation change against the unchanged 1M baseline before adding targets or architecture.</div>
+
+      <h2 id="evidence">What the last run told us</h2>
+      <div class="hybrid-stats" aria-label="Headline experiment evidence">
+        <div class="hybrid-stat"><span>Nominal transitions</span><strong>1M × 3</strong><small>three independent seeds</small></div>
+        <div class="hybrid-stat"><span>Completed games</span><strong>4,000+</strong><small>per seed</small></div>
+        <div class="hybrid-stat"><span>CPU training</span><strong>&lt;45 min</strong><small>all three seeds</small></div>
+        <div class="hybrid-stat"><span>Method verdict</span><strong>It learns</strong><small>selection still oscillates</small></div>
+      </div>
+      <p>The sparse placement signal is capable of producing transferable play. Scale, not an absent reward signal, explained the weak pilot. The binding issue has moved to training stability and honest checkpoint selection.</p>
+
+      <h2 id="gates">Gate status</h2>
+      <div class="gate-panel">
+        <h3>Phase 1 evidence</h3>
+        <div class="table-wrap"><table><thead><tr><th>Gate</th><th>Evidence</th><th>Call</th></tr></thead><tbody>
+          <tr><td>Full-rules mechanics</td><td>Generated tracks and 2–6 seats complete with exact accounting.</td><td><span class="gate-badge pass">Pass</span></td></tr>
+          <tr><td>Learning signal</td><td>Aggregate placement reward is positive in every evaluated cell.</td><td><span class="gate-badge pass">Pass</span></td></tr>
+          <tr><td>Held-out generalisation</td><td>Four- and six-seat play clears chance; two-seat play remains seed-sensitive.</td><td><span class="gate-badge partial">Partial</span></td></tr>
+          <tr><td>Stable selection</td><td>No milestone dominates every seat count.</td><td><span class="gate-badge open">Open</span></td></tr>
+          <tr><td>Fresh final test</td><td>The current held-out band was inspected during development.</td><td><span class="gate-badge open">Open</span></td></tr>
+        </tbody></table></div>
+      </div>
+
+      <h2 id="route">Implementation sequence</h2>
+      <ol class="step-line" aria-label="Next implementation sequence"><li><strong>Split</strong><br>validation and final-test bands</li><li><strong>Freeze</strong><br>the checkpoint rule</li><li><strong>Compare</strong><br>one stability change</li><li><strong>Open</strong><br>the untouched test</li></ol>
+      <div class="scope-chips" aria-label="Scope constraints"><span>2–6 seats</span><span>generated tracks</span><span>imperfect information</span><span>masked PPO</span><span>snapshot pool</span><span>sparse reward</span></div>
+
+      <h2 id="finish">Completion criteria</h2>
+      <p>A8 is complete when a pre-declared checkpoint rule produces stable, positive held-out placement reward across seeds and seat counts, and the chosen policy survives a fresh test band that was not used for iteration.</p>
+      <ul class="check-list"><li>Same seed reproduces the same checkpoint and report.</li><li>No per-seat or per-opponent checkpoint cherry-picking.</li><li>Every seat-count aggregate remains useful across seeds.</li><li>The final claim survives the untouched test without retuning.</li></ul>
+    </article>
+  </div>
+</main>
+<footer class="hybrid-footer"><strong>Keep the evidence honest.</strong></footer>
+</body>
+</html>

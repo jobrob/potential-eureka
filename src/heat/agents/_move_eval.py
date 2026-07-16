@@ -580,7 +580,7 @@ def _denied_spaces_for_rival(
     # current position, plus the agent at its post-move landing space. We pass
     # this as ``all_players`` to resolve_blocked_position, with the *rival* as
     # the moving player so it counts the agent (and others) as blockers.
-    others: list[PlayerState] = []
+    others: list[rules.PositionedPlayer] = []
     for p in state.players:
         if p.player_id == rival.player_id:
             continue

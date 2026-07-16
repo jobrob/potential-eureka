@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Detailed T1 design for parallel A8 seed campaigns and evaluation cells.">
+  <title>A8 T1 — parallel campaign and evaluation</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Implemented · T1 PASS · T1c not adopted</span>
+      <h1>T1: shorten campaigns without changing a single race.</h1>
+      <p class="hero-copy">Run independent A8 seeds and independent evaluation cells in separate CPU processes, preserve deterministic identities, and adopt only the worker counts that earn a measured wall-time gain.</p>
+      <p><strong>Direction A · A8 performance · CPU process parallelism</strong><br><span class="muted">Detailed design · 16 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="T1 decision">
+      <span class="board-label">Primary acceptance gate</span>
+      <strong>≥1.5× faster.<br>Same outputs.</strong>
+      <p>Three fixed 50k diagnostic seeds, compared at concurrency 1, 2, and 3.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#decision">Decision</a>
+      <a href="#contracts">Contracts</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#campaign">Seed campaign</a>
+      <a href="#evaluation">Evaluation</a>
+      <a href="#files">Implementation</a>
+      <a href="#tests">Tests</a>
+      <a href="#experiment">Experiment</a>
+      <a href="#handoff">Handoff</a>
+      <a href="#results">Results</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="decision">
+        <span class="section-kicker">01 · Design decision</span>
+        <h2>Parallelize outside each game first.</h2>
+        <p class="lede">A8 seeds share no mutable training state, and evaluation cells use disjoint deterministic seeds. T1 exploits those two existing boundaries with spawned CPU processes. It does not alter the collector, policy, PPO update, track schedule, reward, or checkpoint-selection rule.</p>
+        <div class="decision-banner"><strong>Recommendation</strong>Build one small campaign supervisor plus opt-in process parallelism in the A7 evaluator. Fix Torch to one intra-op and one inter-op thread per training worker so process concurrency does not oversubscribe the machine or silently change the numeric execution shape between benchmark modes.</div>
+        <div class="config-panel" aria-label="T1 scope summary">
+          <div><span>Primary workload</span><strong>3 × 50k transitions</strong></div>
+          <div><span>Compared concurrency</span><strong>1 · 2 · 3 workers</strong></div>
+          <div><span>Primary target</span><strong>≥1.5× wall speed</strong></div>
+          <div><span>Expected code</span><strong>250–450 lines</strong></div>
+        </div>
+      </section>
+
+      <section id="contracts">
+        <span class="section-kicker">02 · Invariants</span>
+        <h2>Concurrency may change scheduling, never experiment identity.</h2>
+        <ul class="check-list">
+          <li><strong>Same resolved recipe.</strong> Every worker receives a complete <code>A8Config</code>; it does not inherit changing CLI defaults.</li>
+          <li><strong>Same seed identity.</strong> Run <code>dev-t1-R00</code> always means seed 0, independently of completion order or worker assignment.</li>
+          <li><strong>Same numerical shape.</strong> Every benchmark worker sets one Torch intra-op and one inter-op thread before constructing the policy.</li>
+          <li><strong>Same track streams.</strong> Training keeps namespace <code>80008</code>; evaluation keeps its existing per-cell seed derivation.</li>
+          <li><strong>Stable aggregation.</strong> Results are sorted by run ID or cell index before hashing and reporting.</li>
+          <li><strong>No comparison-worthy policies.</strong> T1 runs are disposable <code>dev-*</code> diagnostics, save no checkpoints, and allocate no policy generation.</li>
+          <li><strong>Opt-in production behaviour.</strong> Existing sequential APIs remain the default until the benchmark passes.</li>
+        </ul>
+        <div class="result-note"><strong>Dirty-tree safety.</strong>T1 records the current commit and dirty flag in its raw JSON result, but it does not create or modify a learned-policy registry entry because the benchmark policies are disposable and never enter a long-lived comparison.</div>
+      </section>
+
+      <section id="architecture">
+        <span class="section-kicker">03 · Architecture</span>
+        <h2>One supervisor; two independent process pools.</h2>
+        <pre><code>T1 benchmark supervisor
+        │
+        ├── training mode ── fixed jobs [seed 0, seed 1, seed 2]
+        │                         │
+        │                  spawn up to N workers
+        │                         │
+        │                  train_selfplay_a8(config)
+        │                         │
+        │                  steps · games · state hash
+        │
+        └── evaluation mode ── ordered cell specifications
+                                  │
+                           initialize one policy copy
+                           and opponent map per worker
+                                  │
+                           _run_cell(cell seed)
+                                  │
+                           sort cells · build EvalReport</code></pre>
+        <p>Use <code>ProcessPoolExecutor</code> with the Windows-safe spawn context. Worker functions, initializers, and argument dataclasses must be module-level and picklable. Do not use lambdas in parallel benchmark opponent maps.</p>
+        <p>The supervisor prints a start row, a heartbeat at least every 15 seconds while jobs are outstanding, and a completion row for every job. Each benchmark mode has a 15-minute hard deadline. A timeout or worker exception fails the mode and prevents T2 from starting.</p>
+      </section>
+
+      <section id="campaign">
+        <span class="section-kicker">04 · Seed campaign</span>
+        <h2>Measure throughput over a fixed amount of learning work.</h2>
+        <p>Add a reusable campaign helper under <code>heat.ml.selfplay</code> and a thin experiment CLI. The helper accepts resolved configs and <code>max_workers</code>, returns one immutable result per run, and contains no A8-specific command-line parsing.</p>
+        <pre><code>@dataclass(frozen=True)
+class CampaignRun:
+    run_id: str
+    config: A8Config
+
+@dataclass(frozen=True)
+class CampaignResult:
+    run_id: str
+    seed: int
+    recorded_steps: int
+    games: int
+    wall_seconds: float
+    policy_sha256: str
+
+def run_campaign(runs, *, max_workers, timeout_seconds):
+    """Run resolved independent A8 jobs and return run-id-sorted results."""</code></pre>
+        <p>The policy hash is over a canonical, name-sorted sequence of state-dict tensor names, dtypes, shapes, and contiguous CPU bytes. It must not depend on <code>torch.save</code> container metadata. Sequential and concurrent execution of a run must produce the same hash, step count, and game count.</p>
+        <p>The benchmark uses <code>total_timesteps=50_000</code>, <code>n_steps=1024</code>, five PPO epochs, the flat masked policy, no anchor, namespace <code>80008</code>, and seeds 0–2. It saves no checkpoint and runs no held-out evaluation. These are <code>dev-t1-R00</code> through <code>dev-t1-R02</code>, not G-numbered policies.</p>
+      </section>
+
+      <section id="evaluation">
+        <span class="section-kicker">05 · Evaluation cells</span>
+        <h2>Load or copy the policy once per worker, not once per race.</h2>
+        <p>Extend <code>evaluate_policy</code> with keyword-only <code>parallel=False</code> and <code>max_workers=None</code>. The sequential branch remains byte-for-byte equivalent in behaviour. The parallel branch builds the same ordered cell specifications, initializes one CPU policy copy and opponent map in each worker, evaluates cells independently, then restores the original order before constructing <code>EvalReport</code>.</p>
+        <ul class="check-list">
+          <li><strong>CPU only in T1.</strong> Reject parallel evaluation on CUDA with a clear error; multiple processes sharing one GPU is a later design.</li>
+          <li><strong>Picklability is explicit.</strong> Preflight the policy and opponent map. Name the first unpicklable input rather than silently falling back.</li>
+          <li><strong>One policy copy per worker.</strong> Use a process initializer; do not serialize the network once per cell or reload it once per game.</li>
+          <li><strong>Exact report equality.</strong> A fixed sequential and parallel call must return equal <code>EvalReport</code> values, including cell order and confidence bounds.</li>
+          <li><strong>Caller RNG neutrality.</strong> The parent Torch RNG state remains unchanged, preserving A7’s existing guarantee.</li>
+        </ul>
+        <p>The timing screen uses the registered <code>G0002-R00@1000K</code> checkpoint, two top-level scripted rulers (<code>weak</code> and <code>heuristic_repaired</code>), seats 2/4/6, ten frozen validation tracks, and 20 games per cell. Compare one worker with the fastest accepted count from the training screen. This is evaluation-only, so it does not allocate a new generation.</p>
+      </section>
+
+      <section id="files">
+        <span class="section-kicker">06 · Implementation surface</span>
+        <h2>Keep orchestration separate from learning code.</h2>
+        <div class="file-grid">
+          <div class="file-card"><code>src/heat/ml/selfplay/campaign.py</code>Resolved run/result dataclasses, canonical policy hash, spawned worker, deterministic aggregation, progress callback, and deadline handling.</div>
+          <div class="file-card"><code>src/heat/ml/selfplay/eval_harness.py</code>Opt-in process-parallel cell execution with one initialized policy copy per worker and ordered aggregation.</div>
+          <div class="file-card"><code>experiments/bench_a8_parallel.py</code>Bounded 1/2/3-worker training screen, evaluation screen, JSON result, human-readable console summary, and explicit pass/fail verdict.</div>
+          <div class="file-card"><code>tests/test_a8_parallel.py</code>Focused hash, campaign ordering/equivalence, evaluation equality, picklability error, and worker-failure tests.</div>
+          <div class="file-card"><code>docs/direction-A/A8-t1-parallel-campaign-design.html</code>Implementation status and measured result appended after the bounded experiment.</div>
+          <div class="file-card"><code>docs/direction-A/A8-full-rules-phase1.html</code>Update T1 status and the next-step decision; leave unrelated A8 findings unchanged.</div>
+        </div>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Area</th><th>Estimated change</th><th>Why</th></tr></thead>
+            <tbody>
+              <tr><td>Campaign helper</td><td>100–170 lines</td><td>Worker contracts, stable hash, process pool, timeout, sorting.</td></tr>
+              <tr><td>Parallel evaluator</td><td>70–130 lines</td><td>Initializer, cell specs, preflight, ordered result assembly.</td></tr>
+              <tr><td>Benchmark CLI</td><td>80–130 lines</td><td>Resolved workload, progress, timing, JSON and verdict.</td></tr>
+              <tr><td>Focused tests</td><td>80–140 lines</td><td>Only the new concurrency seams and invariants.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="tests">
+        <span class="section-kicker">07 · Focused verification</span>
+        <h2>Prove identity before measuring speed.</h2>
+        <ol>
+          <li><strong>Canonical hash.</strong> Equal state dicts hash equally; one changed tensor changes the hash.</li>
+          <li><strong>Campaign equivalence.</strong> Two tiny seeded runs at one and two workers return identical run IDs, step counts, game counts, and policy hashes.</li>
+          <li><strong>Completion-order independence.</strong> Artificially delayed jobs still return sorted results.</li>
+          <li><strong>Parallel evaluation equality.</strong> A small two-cell Tiny-Heat grid equals sequential evaluation exactly and preserves the parent RNG state.</li>
+          <li><strong>Clear invalid-input behaviour.</strong> An unpicklable opponent factory and CUDA parallel request fail before workers launch.</li>
+          <li><strong>Failure propagation.</strong> A worker exception identifies its run/cell and produces a failing verdict.</li>
+          <li><strong>Existing focused suites.</strong> Re-run A7 evaluation and A8 Phase-1 tests; no broad new game-rule matrix is required.</li>
+        </ol>
+      </section>
+
+      <section id="experiment">
+        <span class="section-kicker">08 · Bounded experiment</span>
+        <h2>One campaign decides whether T1 earns adoption.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Stage</th><th>Hypothesis and confidence</th><th>Scope and limit</th><th>Decision</th></tr></thead>
+            <tbody>
+              <tr><td><strong>T1a · correctness</strong></td><td>Spawned execution preserves run identity and evaluation reports exactly. <strong>High, 90%.</strong></td><td>Tiny two-run campaign plus two evaluation cells; expected under 2 minutes, hard cap 5 minutes.</td><td>Any mismatch or worker leak fails T1. Fix once; do not benchmark questionable code.</td></tr>
+              <tr><td><strong>T1b · training throughput</strong></td><td>Three concurrent single-threaded jobs reduce fixed-work wall time by at least 1.5×. <strong>High, 80%.</strong></td><td>Three 50k A8 diagnostic seeds at concurrency 1, 2, 3. Expected 4–8 minutes total; each mode capped at 15 minutes with 15-second heartbeat.</td><td>Primary T1 PASS if the best correct mode is ≥1.5× and no concurrent mode is more than 10% slower than sequential per completed unit of work.</td></tr>
+              <tr><td><strong>T1c · evaluation throughput</strong></td><td>Cell processes improve the six-cell grid by at least 1.5×. <strong>Medium-high, 75%.</strong></td><td>G0002-R00@1000K; weak/repaired × 2/4/6; ten tracks; 20 games/cell. Sequential versus accepted worker count; hard cap 15 minutes per mode.</td><td>Adopt parallel evaluation independently if exact equality holds and speed is ≥1.5×. Otherwise keep it opt-in or remove it.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="decision-banner"><strong>T2 trigger</strong>Proceed to T2 only when T1a passes and T1b reaches ≥1.5×. T1c may pass or fail independently because T2 targets rollout inference rather than evaluation. If T1b misses, stop and report the measured contention before changing the collector.</div>
+      </section>
+
+      <section id="handoff">
+        <span class="section-kicker">09 · Implementation handoff</span>
+        <h2>Deliver in one reversible slice.</h2>
+        <ol class="step-line" aria-label="T1 implementation order">
+          <li><strong>Build</strong><br>campaign contracts</li>
+          <li><strong>Parallelize</strong><br>evaluation cells</li>
+          <li><strong>Prove</strong><br>exact identity</li>
+          <li><strong>Measure</strong><br>fixed work</li>
+        </ol>
+        <p>The implementation agent owns only the files listed above. It must preserve unrelated dirty-tree changes, use <code>apply_patch</code> for edits, run focused tests and Ruff, and return raw benchmark commands plus results. It may run T1a and T1b under the declared limits. It must not begin T2; the primary agent reviews the T1 gate first.</p>
+      </section>
+
+      <section id="results">
+        <span class="section-kicker">10 · Delivery status</span>
+        <h2>Three workers cut the fixed campaign wall time by 63%.</h2>
+        <p><strong>Status:</strong> implemented and measured on 16 July 2026. T1a and T1b passed. The primary T1 gate therefore passes and permits a separately reviewed T2 implementation. T1c preserved exact reports but did not improve the bounded six-cell evaluation, so parallel evaluation remains opt-in and the sequential default is unchanged.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Screen</th><th>Mode</th><th>Wall time</th><th>Speed-up</th><th>Identity</th><th>Decision</th></tr></thead>
+            <tbody>
+              <tr><td rowspan="3"><strong>T1b training</strong><br>191,278 actual transitions<br>510 games</td><td>1 worker</td><td>139.210s</td><td>1.000×</td><td>Reference</td><td>Baseline</td></tr>
+              <tr><td>2 workers</td><td>93.392s</td><td>1.491×</td><td>Exact</td><td>Below 1.5×</td></tr>
+              <tr><td>3 workers</td><td>51.508s</td><td>2.703×</td><td>Exact</td><td class="metric-good">Adopt for seed campaigns</td></tr>
+              <tr><td rowspan="2"><strong>T1c evaluation</strong><br>6 cells · 120 games</td><td>Sequential</td><td>8.136s</td><td>1.000×</td><td>Reference</td><td>Default</td></tr>
+              <tr><td>3 workers</td><td>8.089s</td><td>1.006×</td><td>Exact</td><td class="metric-bad">Do not adopt for this grid</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The three-worker mode retained 94.8% of the sequential per-worker transition rate, above the 90% contention gate. Each seed reproduced the same recorded steps, completed games, and canonical final-policy hash at all worker counts:</p>
+        <ul class="check-list">
+          <li><code>dev-t1-R00</code>: 62,246 steps · 180 games · <code>2571e3ab16266c080bd02bed4c253af1ab34d13680bb9bd4ad9e2c0de0602729</code></li>
+          <li><code>dev-t1-R01</code>: 65,606 steps · 175 games · <code>87170091820b434aa0e031c450e6ce8cb823a4959477eb1e112a8139192cd5fe</code></li>
+          <li><code>dev-t1-R02</code>: 63,426 steps · 155 games · <code>9986a98a2b31273e05117785aadad14eedf6e35bd959ff821f3315b60373a1bf</code></li>
+        </ul>
+        <div class="result-note"><strong>Correctness and provenance.</strong>T1a's one/two-worker campaign identities, two-cell evaluation reports, and parent Torch RNG state matched exactly. The focused A7/A8/T1 regression set passed 22 tests and scoped Ruff was clean. Raw evidence is in <code>runs/a8_t1_parallel.json</code>. These jobs used disposable <code>dev-t1-*</code> identities, saved no checkpoints, and did not allocate <code>G0004</code>.</div>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer"><strong>Direction A · Sprint A8 · T1 parallel campaign</strong></footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

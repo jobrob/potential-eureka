@@ -95,7 +95,7 @@ class HeuristicAgent(BaseAgent):
                 playable_values.append(float(c.value))
         playable_values.sort(reverse=True)
 
-        best_score = -9999
+        best_score = -9999.0
         best_choice = legal_gears[0]
 
         for new_gear, heat_cost in legal_gears:
@@ -151,12 +151,12 @@ class HeuristicAgent(BaseAgent):
 
         player = state.get_player(player_id)
 
-        best_score = -9999
+        best_score = -9999.0
         best_play = legal_plays[0]
 
         for play in legal_plays:
             # Calculate speed (stress estimated at 2.5 for 1-4 deck)
-            speed = 0
+            speed = 0.0
             stress_count = 0
             for card in play:
                 if card.card_type == CardType.STRESS:

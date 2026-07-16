@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="A8 B2 reliable multi-ruler benchmark of S1 and S2 learned policies.">
+  <title>A8 B2 — Multi-ruler benchmark</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">B2 complete · 14,400 races</span>
+      <h1>G0003 is broader than G0002, but it remains seed-sensitive.</h1>
+      <p class="hero-copy">Across four deliberately different rulers, G0003 (S2 fixed anchor) raises median aggregate placement reward by +0.062 over G0002 (S1 five epochs) and improves every ruler median. Two matched runs improve strongly while one regresses, so G0003 is the preferred skill recipe—not a proven stabilization fix or universal winner.</p>
+      <p><strong>Direction A · Sprint A8 · multi-ruler evaluation</strong><br><span class="muted">Completed 16 July 2026 · 35 minutes 18 seconds</span></p>
+    </div>
+    <aside class="status-board" aria-label="B2 decision">
+      <span class="board-label">B2 decision</span>
+      <strong>Adopt the suite.<br>Prefer G0003 for skill.</strong>
+      <p>Keep G0002 as the stable default until the training objective is chosen explicitly; G0003's anchor still failed its checkpoint-stability gate.</p>
+      <div class="palette-dots" aria-label="Document colour palette"><i></i><i></i><i></i><i></i><i></i></div>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#decision">Decision</a>
+      <a href="#design">Design</a>
+      <a href="#recipe">Recipe result</a>
+      <a href="#rulers">Ruler detail</a>
+      <a href="#seeds">Seed sensitivity</a>
+      <a href="#runtime">Runtime</a>
+      <a href="#limits">Reliability and limits</a>
+      <a href="#artifacts">Artifacts</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="decision">
+        <span class="section-kicker">Executive decision</span>
+        <h2>The multi-ruler result passes the predeclared breadth gate.</h2>
+        <div class="hybrid-stats" aria-label="B2 headline evidence">
+          <div class="hybrid-stat"><span>G0002 median</span><strong>+0.097</strong><small>S1 · aggregate placement reward</small></div>
+          <div class="hybrid-stat"><span>G0003 median</span><strong>+0.159</strong><small>S2 · aggregate placement reward</small></div>
+          <div class="hybrid-stat"><span>Median lift</span><strong>+0.062</strong><small>threshold was greater than +0.030</small></div>
+          <div class="hybrid-stat"><span>Ruler agreement</span><strong>4 / 4</strong><small>threshold was at least 3 / 4</small></div>
+        </div>
+        <div class="decision-banner"><strong>Decision</strong>Use B2's four-ruler matrix for future A8 skill comparisons and retain every per-ruler result. G0003 is the better of the two evaluated generations for selected-checkpoint skill. Do not reinterpret this as evidence that anchoring stabilizes training: its S2 experiment still worsened milestone variability, and one of three matched B2 runs regressed.</div>
+      </section>
+
+      <section id="design">
+        <span class="section-kicker">01 · Predeclared design</span>
+        <h2>Several imperfect rulers replace the false promise of one “strong” agent.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Item</th><th>Frozen specification</th></tr></thead>
+            <tbody>
+              <tr><td>Hypothesis</td><td>A matched multi-ruler aggregate plus per-style breakdown will distinguish broader policy improvement more reliably than either heuristic alone.</td></tr>
+              <tr><td>Prior confidence</td><td>Medium, about 70%. B1 established non-transitivity, but only three learned seeds are available per recipe.</td></tr>
+              <tr><td>Contenders</td><td><code>G0002-R00–R02</code> (S1 five epochs) and <code>G0003-R00–R02</code> (S2 fixed anchor), matched by training seed.</td></tr>
+              <tr><td>Rulers</td><td>Weak heuristic, repaired heuristic, StaticSearchV1 candidate, and frozen <code>G0002-R00@1000K</code>.</td></tr>
+              <tr><td>Matrix</td><td>6 contenders × 4 rulers × 3 seat counts × 200 races = <strong>14,400 races</strong> in 72 cells.</td></tr>
+              <tr><td>Tracks and randomization</td><td>Forty generated tracks, seeds <code>714000–714039</code>. Track and race seeds are matched across contenders. This band is now consumed benchmark-development data.</td></tr>
+              <tr><td>Primary metric</td><td>Equal-weight mean placement reward across the 12 ruler × seat cells for each checkpoint; recipe comparison uses the median across its three training seeds.</td></tr>
+              <tr><td>Decision rule</td><td>Material only if the recipe-median aggregate changes by more than 0.030 and at least three of four per-ruler median directions agree.</td></tr>
+              <tr><td>Planned runtime</td><td>Smoke-calibrated estimate 35–40 minutes, hard cap 60 minutes, flushed per-cell progress, atomic partial JSON, and explicit resume support.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="recipe">
+        <span class="section-kicker">02 · Recipe result</span>
+        <h2>G0003 clears the materiality threshold, while varying more across runs.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Recipe</th><th>Seed aggregate rewards</th><th>Median</th><th>Mean</th><th>Across-seed SD</th></tr></thead>
+            <tbody>
+              <tr><td>G0002 · S1 five epochs</td><td>+0.089 · +0.144 · +0.097</td><td>+0.097</td><td>+0.110</td><td>0.030</td></tr>
+              <tr><td class="metric-good">G0003 · S2 fixed anchor</td><td>+0.159 · +0.083 · +0.167</td><td class="metric-good">+0.159</td><td>+0.136</td><td class="metric-bad">0.046</td></tr>
+              <tr><td><strong>G0003 − G0002</strong></td><td>+0.069 · −0.061 · +0.070</td><td class="metric-good">+0.062 recipe-median lift</td><td>+0.026 mean lift</td><td>Two wins, one loss</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The median answers the predeclared recipe question and favors G0003. The smaller mean lift and larger standard deviation show why three runs matter: G0003-R01 is materially weaker, while R00 and R02 improve by almost identical amounts. The result supports a skill preference, but not a claim that anchoring reliably improves every training run.</p>
+      </section>
+
+      <section id="rulers">
+        <span class="section-kicker">03 · Per-style evidence</span>
+        <h2>All four ruler medians favor G0003; the difficult rulers add the most information.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Ruler</th><th>G0002 median</th><th>G0003 median</th><th>Direction</th><th>Interpretation</th></tr></thead>
+            <tbody>
+              <tr><td>Weak heuristic</td><td>+0.184</td><td>+0.205</td><td class="metric-good">+0.020</td><td>Both recipes comfortably clear the basic competence floor.</td></tr>
+              <tr><td>Repaired heuristic</td><td>+0.249</td><td>+0.285</td><td class="metric-good">+0.036</td><td>The largest absolute scores; this ruler is not a total-order “strong” bar.</td></tr>
+              <tr><td>Static search candidate</td><td>−0.019</td><td>+0.069</td><td class="metric-good">+0.088</td><td>G0003 converts the median from slightly negative to clearly positive placement value.</td></tr>
+              <tr><td>Historical <code>G0002-R00@1000K</code></td><td>+0.013</td><td>+0.068</td><td class="metric-good">+0.055</td><td>G0003 more consistently exceeds the frozen learned reference.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="result-note"><strong>Breadth reading.</strong>G0002's median evidence is concentrated against the scripted heuristics; its search median is slightly negative and its historical-policy median is close to zero. G0003 is positive against all four median rulers. The suite therefore supplies a higher bar without pretending any one opponent defines strength.</div>
+
+        <h3 class="table-title">Seat-count medians across all four rulers</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Recipe</th><th>2 seats</th><th>4 seats</th><th>6 seats</th></tr></thead>
+            <tbody>
+              <tr><td>G0002 · S1</td><td>+0.164</td><td>+0.069</td><td>+0.097</td></tr>
+              <tr><td>G0003 · S2</td><td>+0.185</td><td class="metric-good">+0.164</td><td>+0.080</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>G0003's clearest seat-count gain is at four players. Its six-player median is slightly below G0002, despite the four ruler medians all improving; this is a reminder that medians over different slices are not additive and that the underlying cells should remain available.</p>
+      </section>
+
+      <section id="seeds">
+        <span class="section-kicker">04 · Matched-seed evidence</span>
+        <h2>The direction is coherent within each seed—and seed 1 coherently disagrees.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Run</th><th>Aggregate G0003 − G0002</th><th>Weak</th><th>Repaired</th><th>Search</th><th>Historical</th></tr></thead>
+            <tbody>
+              <tr><td>R00</td><td class="metric-good">+0.069</td><td>+0.020</td><td>+0.068</td><td>+0.089</td><td>+0.099</td></tr>
+              <tr><td>R01</td><td class="metric-bad">−0.061</td><td>−0.059</td><td>−0.059</td><td>−0.040</td><td>−0.087</td></tr>
+              <tr><td>R02</td><td class="metric-good">+0.070</td><td>+0.068</td><td>+0.036</td><td>+0.089</td><td>+0.085</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>This pattern is unlikely to be a single-opponent exploit: within each training seed, every ruler moves in the same direction. It instead points to training-run sensitivity. With only three independent seeds, the evidence cannot precisely estimate how often the anchor helps; another seed campaign would be required for a high-confidence population claim.</p>
+      </section>
+
+      <section id="runtime">
+        <span class="section-kicker">05 · Compute accounting</span>
+        <h2>The full serial run took 35.3 minutes, inside its 35–40 minute estimate.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Ruler</th><th>Wall time</th><th>Share</th><th>Future budget reading</th></tr></thead>
+            <tbody>
+              <tr><td>Weak heuristic</td><td>2.11 min</td><td>6.0%</td><td>Cheap enough for frequent checks.</td></tr>
+              <tr><td>Repaired heuristic</td><td>5.69 min</td><td>16.1%</td><td>Still practical for routine campaigns.</td></tr>
+              <tr><td>Static search candidate</td><td>20.81 min</td><td>59.0%</td><td>Dominant cost and first parallelization target.</td></tr>
+              <tr><td>Historical G0002-R00 policy</td><td>6.65 min</td><td>18.9%</td><td>Neural inference cost is moderate on CPU.</td></tr>
+              <tr><td><strong>Total</strong></td><td><strong>35.26 min</strong></td><td>100%</td><td>Use 35–40 minutes serial, or a 60-minute safety cap, for repeats at this exact scale.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="limits">
+        <span class="section-kicker">06 · Reliability and limits</span>
+        <h2>The matchup estimates are useful; the recipe-frequency claim remains modest.</h2>
+        <ul class="open-list">
+          <li><strong>Within-cell precision.</strong><br>Two hundred races give an approximate 95% Wilson half-width of seven percentage points near a 50% win rate. Raw wins, rates, placement rewards, and Wilson bounds are retained for every cell.</li>
+          <li><strong>Matched comparison.</strong><br>All contenders saw identical tracks and cell seeds, reducing evaluation noise in G0003−G0002 differences.</li>
+          <li><strong>Independent training evidence.</strong><br>There are only three runs per generation. Two improve and one regresses, so confidence in “G0003 usually helps” is materially weaker than confidence in these six checkpoints' matchup measurements.</li>
+          <li><strong>Consumed track band.</strong><br>The 40-track <code>714000+</code> band is now benchmark-development data, not an untouched final test. A future final claim needs disjoint tracks.</li>
+          <li><strong>Equal weighting is a policy choice.</strong><br>Each ruler × seat cell contributes equally. The report therefore preserves per-ruler and per-seat slices rather than presenting the aggregate as an objective law.</li>
+          <li><strong>No universal ruler.</strong><br>B1's non-transitivity remains. “Positive against all suite medians” is broader evidence, not proof of optimal or human-level play.</li>
+        </ul>
+      </section>
+
+      <section id="artifacts">
+        <span class="section-kicker">07 · Reproduction</span>
+        <h2>The benchmark is resumable and its raw counts are preserved.</h2>
+        <p>Run <code>PYTHONPATH=src python experiments/eval_multi_ruler_benchmark.py --games 200 --tracks 40 --out runs/a8_b2_multi_ruler.json</code>. Add <code>--resume</code> after interruption. Contender paths and checkpoint identities resolve from the <a href="../policy-generation-registry.html">learned policy registry</a>. Every completed cell is written through a temporary file before replacement.</p>
+        <div class="verification-panel"><strong>Artifacts and verification</strong><br>Raw result: <code>runs/a8_b2_multi_ruler.json</code>. Harness: <code>experiments/eval_multi_ruler_benchmark.py</code>. Contract tests: <code>tests/test_multi_ruler_benchmark.py</code>. All 72 cells contain 200 races and the result is marked complete.</div>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer"><strong>Direction A · Sprint A8 · B2 multi-ruler evidence</strong></footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

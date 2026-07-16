@@ -63,9 +63,12 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
-from heat.models.cards import Card, CardType
+if TYPE_CHECKING:
+    from sb3_contrib import MaskablePPO
+
+from heat.models.cards import Card
 from heat.models.game_state import GameState
 from heat.engine import rules
 from heat.engine.driver import Decision, DecisionKind, run_round_driver
@@ -278,7 +281,7 @@ class LookaheadAgent(BaseAgent):
         #: Lazily-loaded value net (SB3 ``MaskablePPO``) for ``leaf_value ==
         #: "learned"``; ``None`` until the first clean leaf is scored. Nulled in
         #: ``__getstate__`` so the agent pickles by path (the MLAgent pattern).
-        self._value_model = None
+        self._value_model: MaskablePPO | None = None
 
         #: Per-agent profiling (clones/move, ms/move). Always on; cheap.
         self.profile = SearchProfile()
@@ -292,7 +295,7 @@ class LookaheadAgent(BaseAgent):
     # Learned-leaf value net (Sprint A2) -- lazy load, MLAgent patterns
     # ------------------------------------------------------------------
 
-    def __getstate__(self) -> dict:
+    def __getstate__(self) -> dict[str, object]:
         """Pickle by path: never ship the heavy SB3 value model to workers.
 
         Mirrors :meth:`heat.agents.ml_agent.MLAgent.__getstate__`. The model is
@@ -317,8 +320,10 @@ class LookaheadAgent(BaseAgent):
         from heat.ml import spaces
         from heat.ml.training import load_meta
 
+        value_model_path = self.value_model_path
+        assert value_model_path is not None
         try:
-            meta = load_meta(self.value_model_path)
+            meta = load_meta(value_model_path)
         except FileNotFoundError as exc:
             raise CheckpointMismatchError(
                 f"Value-net sidecar not found for {self.value_model_path!r}; "
@@ -342,7 +347,7 @@ class LookaheadAgent(BaseAgent):
                 + "; ".join(mismatches)
             )
 
-    def _get_value_model(self):
+    def _get_value_model(self) -> MaskablePPO:
         """Lazy-load + validate the value net (CPU), caching it on the instance.
 
         Mirrors :meth:`MLAgent._get_model`: validate the sidecar tripwire first,
@@ -353,8 +358,10 @@ class LookaheadAgent(BaseAgent):
             from sb3_contrib import MaskablePPO
 
             self._validate_value_meta()
+            value_model_path = self.value_model_path
+            assert value_model_path is not None
             self._value_model = MaskablePPO.load(
-                self.value_model_path, device="cpu"
+                value_model_path, device="cpu"
             )
         return self._value_model
 

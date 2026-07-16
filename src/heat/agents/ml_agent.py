@@ -36,6 +36,8 @@ though the eval harness defaults to sequential -- see :mod:`heat.ml.evaluate`.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 import numpy as np
 
 from sb3_contrib import MaskablePPO
@@ -52,6 +54,9 @@ from heat.ml import spaces
 from heat.ml.action_codec import decode_action, legal_action_mask
 from heat.ml.features import encode_observation
 from heat.ml.training import load_meta, vecnorm_path_for
+
+if TYPE_CHECKING:
+    from stable_baselines3.common.vec_env import VecNormalize
 
 
 class CheckpointMismatchError(RuntimeError):
@@ -92,7 +97,7 @@ class MLAgent(BaseAgent):
         self._model: MaskablePPO | None = None
         #: Loaded ``VecNormalize`` (obs stats only), or ``None`` for an
         #: un-normalized checkpoint (back-compat with Sprint-5 models).
-        self._vecnorm = None
+        self._vecnorm: VecNormalize | None = None
         #: Whether the checkpoint was trained with obs normalization. Set on load.
         self._norm_obs = False
 
@@ -178,7 +183,7 @@ class MLAgent(BaseAgent):
         self._vecnorm.training = False
         self._vecnorm.norm_reward = False
 
-    def __getstate__(self) -> dict:
+    def __getstate__(self) -> dict[str, object]:
         # Never pickle the heavy SB3 model / stats; reload from path in the
         # worker (§6.5). The vecnorm sidecar is reloaded alongside the model.
         state = self.__dict__.copy()
@@ -193,7 +198,7 @@ class MLAgent(BaseAgent):
         model = self._get_model()
         if self._norm_obs and self._vecnorm is not None:
             # Apply the SAME obs normalization the policy was trained under.
-            obs = self._vecnorm.normalize_obs(obs)
+            obs = cast(np.ndarray, self._vecnorm.normalize_obs(obs))
         action, _ = model.predict(
             obs,
             action_masks=mask,

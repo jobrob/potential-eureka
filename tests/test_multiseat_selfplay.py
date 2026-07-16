@@ -20,16 +20,23 @@ acceptance gates (§5):
 
 from __future__ import annotations
 
+import hashlib
+
 import numpy as np
 import torch
 
 from heat.agents.heuristic_agent import HeuristicAgent
-from heat.engine.driver import Decision, DecisionKind
+from heat.engine.driver import Decision, DecisionKind, simultaneous_decisions
+from heat.models.game_state import GameState
 from heat.ml import action_codec
 from heat.ml.action_codec import decode_legal_action, forced_action, legal_action_mask
 from heat.ml.env import HeatEnv
 from heat.ml.selfplay.buffer import RolloutBuffer
-from heat.ml.selfplay.multiseat import MultiSeatCollector, train_multiseat
+from heat.ml.selfplay.multiseat import (
+    CollectorTiming,
+    MultiSeatCollector,
+    train_multiseat,
+)
 from heat.ml.selfplay.policy import HeatPolicy
 from heat.ml.selfplay.ppo import A0Config
 from heat.ml.selfplay.tiny_heat import tiny_heat_track
@@ -377,3 +384,145 @@ def test_env_delegates_to_action_codec() -> None:
     assert env._decode_legal(real_choice, idx) == decode_legal_action(
         real_choice, env.state, idx
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. T2 phase-first batching
+# ---------------------------------------------------------------------------
+
+
+class _FirstLegalPolicy:
+    """Deterministic fixture policy that records its flattened action trace."""
+
+    def __init__(self) -> None:
+        self.trace: list[int] = []
+
+    def act(
+        self, obs: torch.Tensor, mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Choose the first legal action independently for every row."""
+        actions = mask.to(dtype=torch.int64).argmax(dim=1)
+        self.trace.extend(int(action) for action in actions.tolist())
+        zeros = torch.zeros(actions.shape[0], dtype=torch.float32, device=obs.device)
+        return actions, zeros, zeros, zeros
+
+
+class _TerminalCollector(MultiSeatCollector):
+    """Capture a compact terminal-state fingerprint for mode comparisons."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.terminal: tuple[object, ...] | None = None
+
+    def _on_game_end(
+        self, state: GameState, terminated: bool, truncated: bool
+    ) -> None:
+        self.terminal = (
+            terminated,
+            truncated,
+            state.round_num,
+            tuple(
+                (
+                    player.position,
+                    player.lap,
+                    player.gear,
+                    player.finished,
+                    player.finish_order,
+                )
+                for player in state.players
+            ),
+        )
+
+
+def _buffer_hash(buffers: list[RolloutBuffer]) -> str:
+    """Hash every populated rollout field in stable seat/field order."""
+    digest = hashlib.sha256()
+    for buffer in buffers:
+        n = len(buffer)
+        digest.update(n.to_bytes(8, "little"))
+        for name in ("obs", "actions", "logps", "values", "rewards", "dones", "masks"):
+            digest.update(getattr(buffer, name)[:n].tobytes())
+    return digest.hexdigest()
+
+
+def test_simultaneous_decision_helper_is_read_only() -> None:
+    """Enumerating either simultaneous phase does not alter live state."""
+    state = GameState.create(tiny_heat_track(), 6, seed=19)
+    before = (
+        tuple(repr(player) for player in state.players),
+        tuple(state.turn_order),
+        state.rng.getstate(),
+    )
+    gears = simultaneous_decisions(state, DecisionKind.GEAR)
+    cards = simultaneous_decisions(state, DecisionKind.CARDS)
+    after = (
+        tuple(repr(player) for player in state.players),
+        tuple(state.turn_order),
+        state.rng.getstate(),
+    )
+    assert [decision.player_id for decision in gears] == list(range(6))
+    assert [decision.player_id for decision in cards] == list(range(6))
+    assert before == after
+
+
+def test_phase_mode_matches_scalar_with_deterministic_fixture() -> None:
+    """Scalar and phase modes preserve complete traces, buffers, and endings."""
+    results: dict[str, tuple[list[int], str, tuple[object, ...] | None]] = {}
+    for mode in ("scalar", "phase"):
+        policy = _FirstLegalPolicy()
+        collector = _TerminalCollector(
+            tiny_heat_track(), 6, collector_mode=mode
+        )
+        buffers, _returns = collector.collect(  # type: ignore[arg-type]
+            policy, 1, DEVICE, np.random.default_rng(31), gamma=0.99
+        )
+        results[mode] = (policy.trace, _buffer_hash(buffers), collector.terminal)
+    assert results["scalar"] == results["phase"]
+
+
+def _phase_rollout(sample_seed: int) -> tuple[str, list[int], CollectorTiming]:
+    """Run one reproducible stochastic phase-mode game for T2 checks."""
+    policy = _policy(23)
+    collector = _LegalityCollector(
+        tiny_heat_track(), 4, collector_mode="phase"
+    )
+    timing = CollectorTiming()
+    torch.manual_seed(sample_seed)
+    buffers, _returns = collector.collect(
+        policy,
+        1,
+        DEVICE,
+        np.random.default_rng(47),
+        gamma=0.99,
+        timing=timing,
+    )
+    actions = [
+        int(action)
+        for buffer in buffers
+        for action in buffer.actions[: len(buffer)]
+    ]
+    return _buffer_hash(buffers), actions, timing
+
+
+def test_phase_mode_is_reproducible_legal_and_exactly_accounted() -> None:
+    """Equal seeds reproduce; every live row enters exactly one action call."""
+    first_hash, first_actions, timing = _phase_rollout(101)
+    second_hash, second_actions, _second_timing = _phase_rollout(101)
+    changed_hash, changed_actions, _changed_timing = _phase_rollout(102)
+
+    assert (first_hash, first_actions) == (second_hash, second_actions)
+    assert (changed_hash, changed_actions) != (first_hash, first_actions)
+    assert timing.live_decisions == timing.action_inference_rows
+    assert timing.live_decisions == len(first_actions)
+    assert timing.live_decisions == (
+        timing.simultaneous_live_decisions + timing.sequential_live_decisions
+    )
+    assert timing.action_inference_rows == sum(
+        size * calls for size, calls in timing.action_batch_histogram.items()
+    )
+    assert timing.action_inference_calls == sum(
+        timing.action_batch_histogram.values()
+    )
+    assert timing.available_phase_count > 0
+    assert timing.available_phase_rows >= timing.available_phase_count
+    assert any(size > 1 for size in timing.action_batch_histogram)

@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>A8 — Technical narrative example</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="technical">
+<div class="sample-note">Format example · representative A8 content · <a href="index.html">compare all three</a></div>
+<header class="mast"><div class="mast-inner">
+  <p class="kicker">Direction A / implementation design</p>
+  <h1>A8: stabilising full-rules Phase 1</h1>
+  <p class="muted">Status: scale hypothesis confirmed; completion gate partial · 13 July 2026</p>
+</div></header>
+<main class="page">
+<article>
+  <h2>Purpose</h2>
+  <p>Move the validated A5 self-play recipe from Tiny-Heat to full generated tracks while preserving honest partial observability, seat-count randomisation, and a disjoint evaluation contract.</p>
+  <div class="decision"><strong>Design decision.</strong> Keep the masked head, flat encoder, snapshot-pool recipe, and sparse placement reward. Treat the completed 1M campaign as the control for one-factor stability experiments.</div>
+  <h2>Contract</h2>
+  <pre><code>training namespace: 80008
+seat schedule:       balanced shuffle of [2, 3, 4, 5, 6]
+track distribution:  length 50–90, 3–7 corners, 2 laps
+policy:              shared masked PPO
+promotion evidence:  validation band only
+final claim:         untouched test band</code></pre>
+  <h2>Evidence</h2>
+  <p>The scaled campaign produced more than 4,000 completed games per seed. Aggregate mean placement reward was positive in every evaluated seat/opponent cell. Four- and six-seat win rates cleared their chance baselines against the weak field; the two-seat result remained seed-sensitive.</p>
+  <h2>Implementation sequence</h2>
+  <ol><li>Introduce separate validation and final-test namespaces.</li><li>Encode a pre-declared checkpoint-selection rule in the report path.</li><li>Run the unchanged 1M configuration as the reproducible control.</li><li>Run one stabilisation arm at equal seeds and budget.</li><li>Open the final-test band only after the decision rule is frozen.</li></ol>
+  <h2>Acceptance</h2>
+  <ul class="check-list"><li>Same seed reproduces the same checkpoint and report.</li><li>No checkpoint is selected independently per seat or opponent cell.</li><li>All-seat aggregate placement reward remains positive across seeds.</li><li>The chosen policy clears the untouched final test without retuning.</li></ul>
+</article>
+<aside>
+  <h3>Why this format</h3><p>Numbered prose keeps implementation intent and rationale together. The margin holds durable constraints without interrupting the main reading flow.</p>
+  <h3>Dependencies</h3><p><strong>A5</strong><br>Snapshot-pool recipe</p><p><strong>A7</strong><br>Deterministic held-out evaluator</p>
+  <h3>Out of scope</h3><p>New dense targets, action-head redesign, GPU substrate work, and test-time search.</p>
+  <h3>Source</h3><p><a href="../direction-A/A8-full-rules-phase1.html">Current HTML record</a></p>
+</aside>
+</main>
+</body>
+</html>

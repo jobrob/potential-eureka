@@ -135,6 +135,36 @@ def test_evaluate_policy_grid_smoke_and_invariants() -> None:
         assert c.split == "tiny"
 
 
+def test_policy_evaluation_is_reproducible_and_rng_neutral() -> None:
+    """A7 policy sampling is seeded per game and preserves caller torch RNG."""
+    torch.manual_seed(11)
+    policy = build_policy(A0Config(hidden_sizes=(16,)))
+
+    torch.manual_seed(123)
+    state_before = torch.random.get_rng_state().clone()
+    first = evaluate_policy(
+        policy,
+        opponents={"weak": HeuristicAgent},
+        seat_counts=(2,),
+        splits={"tiny": tiny_heat_track()},
+        games_per_cell=12,
+        seed=77,
+    )
+    assert torch.equal(torch.random.get_rng_state(), state_before)
+
+    # A different ambient RNG state must not change the report.
+    torch.manual_seed(999_999)
+    second = evaluate_policy(
+        policy,
+        opponents={"weak": HeuristicAgent},
+        seat_counts=(2,),
+        splits={"tiny": tiny_heat_track()},
+        games_per_cell=12,
+        seed=77,
+    )
+    assert first == second
+
+
 def test_first_place_win_definition() -> None:
     """A constructed terminal state: first-place seat scores 1, others 0."""
     state = GameState.create(tiny_heat_track(), 3, seed=0)

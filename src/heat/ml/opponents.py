@@ -14,10 +14,13 @@ always return legal moves.
 
 from __future__ import annotations
 
+from typing import cast
+
 from heat.agents.base import BaseAgent
 from heat.engine import rules
 from heat.engine.driver import Decision, DecisionKind
 from heat.engine.phases import ReactDecision
+from heat.models.cards import Card
 from heat.models.game_state import GameState
 
 
@@ -39,15 +42,17 @@ def opponent_action(agent: BaseAgent, decision: Decision, state: GameState) -> o
 
     if kind == DecisionKind.GEAR:
         # legal: list[(new_gear, heat_cost)]
-        return agent.choose_gear(state, pid, decision.legal)
+        legal_gears = cast(list[tuple[int, int]], decision.legal)
+        return agent.choose_gear(state, pid, legal_gears)
 
     if kind == DecisionKind.CARDS:
         # legal: list[tuple[Card, ...]]
-        return agent.choose_cards(state, pid, decision.legal)
+        legal_plays = cast(list[tuple[Card, ...]], decision.legal)
+        return agent.choose_cards(state, pid, legal_plays)
 
     if kind == DecisionKind.REACT:
         # legal: rules.ReactOptions -> unpack into choose_react's fields.
-        opts: rules.ReactOptions = decision.legal
+        opts = cast(rules.ReactOptions, decision.legal)
         result: ReactDecision = agent.choose_react(
             state,
             pid,
@@ -62,6 +67,7 @@ def opponent_action(agent: BaseAgent, decision: Decision, state: GameState) -> o
 
     if kind == DecisionKind.DISCARD:
         # legal: list[Card]
-        return agent.choose_discard(state, pid, decision.legal)
+        discardable = cast(list[Card], decision.legal)
+        return agent.choose_discard(state, pid, discardable)
 
     raise ValueError(f"Unknown decision kind {kind!r}")  # pragma: no cover

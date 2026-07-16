@@ -71,6 +71,10 @@ class A0Config:
     #: ``"dotprod"`` (A3 feature-derived dot-product head). Selected via
     #: :func:`heat.ml.selfplay.policy.build_policy`.
     head: str = "masked"
+    #: Observation encoder: ``"flat"`` keeps the A0 MLP unchanged;
+    #: ``"structured"`` uses A4's own-hand attention + public-state encoder.
+    #: Default stays flat until the A4 ablation gate passes.
+    encoder: str = "flat"
 
     # --- env ---
     #: Total seats (learner + scripted opponents).

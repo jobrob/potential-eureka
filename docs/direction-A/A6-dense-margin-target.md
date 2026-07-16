@@ -1,11 +1,8 @@
 # Sprint A6 — First dense target: terminal margin
 
-> **Status:** design (2026-07-10). Detailed design for Sprint A6 of the
-> [Direction A sprint plan](sprint-plan.md). Implementable spec; read this plus
-> `src/heat/ml/spaces.py` (`step_reward`, `_placement_reward`),
-> `src/heat/ml/selfplay/multiseat.py` (`_play_one_game`'s game-end completion),
-> `src/heat/ml/selfplay/recipe.py` (`A5Config`, `train_selfplay_a5`), and the
-> [A5 gate results](A5-anticollapse-recipe.md) §8 (the baseline this compares to).
+> **Status:** **implemented and complete; gate G2 failed** (2026-07-10). The
+> mechanism is correct and default-off because the one-lap Tiny-Heat gate made the
+> margin identically zero. Retained as a constraint and possible multi-lap follow-up.
 
 ## 1. Purpose
 

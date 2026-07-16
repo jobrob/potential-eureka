@@ -48,6 +48,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Policy/value MLP trunk widths (default: 256 256).")
     parser.add_argument("--head", choices=["masked", "dotprod"], default="masked",
                         help="Action head (default: masked, per the A3 result).")
+    parser.add_argument("--encoder", choices=["flat", "structured"], default="flat",
+                        help="Observation encoder (default: flat until A4 gate passes).")
     parser.add_argument("--arm", choices=["pool", "pure"], default="pool",
                         help="pool (default) uses the snapshot pool; pure sets "
                              "pool_prob=0 (the ablation arm).")
@@ -103,6 +105,7 @@ def build_config(args: argparse.Namespace) -> A5Config:
         device=args.device,
         seed=args.seed,
         head=args.head,
+        encoder=args.encoder,
         entropy_floor=args.entropy_floor,
         pool_prob=0.0 if args.arm == "pure" else args.pool_prob,
         margin_coef=args.margin_coef,
@@ -140,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"arm={args.arm} timesteps={args.timesteps} n_steps={args.n_steps} "
         f"players={args.players} track={args.track} head={args.head} "
+        f"encoder={args.encoder} "
         f"seed={args.seed} entropy_floor={args.entropy_floor} "
         f"pool_prob={config.pool_prob} stage1={config.stage1_enabled}"
     )

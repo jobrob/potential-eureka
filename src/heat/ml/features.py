@@ -14,6 +14,7 @@ lap, finished). Deck-composition features use the learning seat's OWN deck.
 from __future__ import annotations
 
 from itertools import chain
+from typing import TypeAlias, cast
 
 import numpy as np
 
@@ -22,6 +23,7 @@ from heat.engine.driver import Decision, DecisionKind
 from heat.models.cards import CardType
 from heat.models.game_state import GameState
 from heat.models.player_state import PlayerState
+from heat.models.track import Track
 from heat.ml import spaces
 from heat.ml.spaces import OBS_DIM
 
@@ -77,7 +79,7 @@ def _own_gear(player: PlayerState) -> list[float]:
     return vec
 
 
-def _own_kinematics(player: PlayerState, track) -> list[float]:
+def _own_kinematics(player: PlayerState, track: Track) -> list[float]:
     """4 floats: position/length, lap/laps, heat/6, finished."""
     length = track.length or 1
     laps = track.laps or 1
@@ -151,10 +153,13 @@ _TRACK_PRECOMPUTE_CACHE_CAP: int = 8
 #: corner_table is a list of (start, norm_limit, norm_clen, norm_lanes) per corner
 #: in the track's native corner order. ``norm_*`` are the already-divided [0,1]
 #: values. The ``fingerprint`` guards against ``id()`` recycling (see below).
-_track_precompute: "dict[int, tuple]" = {}
+TrackFingerprint: TypeAlias = tuple[int, int, tuple[tuple[int, int, int], ...]]
+CornerFeatures: TypeAlias = tuple[int, float, float, float]
+TrackPrecompute: TypeAlias = tuple[int, int, int, list[CornerFeatures]]
+_track_precompute: dict[int, tuple[TrackFingerprint, TrackPrecompute]] = {}
 
 
-def _track_fingerprint(track) -> tuple:
+def _track_fingerprint(track: Track) -> TrackFingerprint:
     """A cheap structural identity tag for ``track`` (recycled-id guard).
 
     ``id(track)`` is only unique while the object is ALIVE -- once a track is
@@ -173,7 +178,7 @@ def _track_fingerprint(track) -> tuple:
     )
 
 
-def _track_precompute_for(track) -> tuple:
+def _track_precompute_for(track: Track) -> TrackPrecompute:
     """Return (and cache) the state-invariant corner table for ``track``.
 
     Pure function of the TRACK: the normalization maxes and each corner's
@@ -199,7 +204,7 @@ def _track_precompute_for(track) -> tuple:
     max_clen = max(((c.end - c.start + 1) for c in corners), default=1) or 1
     max_lanes = max((s.lanes for s in spaces_list), default=1) or 1
 
-    corner_table = []
+    corner_table: list[CornerFeatures] = []
     for c in corners:
         if 0 <= c.start < n_spaces:
             entry_lanes = spaces_list[c.start].lanes
@@ -224,7 +229,7 @@ def _track_precompute_for(track) -> tuple:
     return result
 
 
-def _track_block(player: PlayerState, track) -> list[float]:
+def _track_block(player: PlayerState, track: Track) -> list[float]:
     """BLOCK_TRACK floats: MAX_CORNERS ego-centric corner slots + a globals
     sub-block (Sprint B Option A whole-track obs; replaces the old 4-dim
     next-corner lookahead).
@@ -328,7 +333,9 @@ def _adrenaline_context(state: GameState, player: PlayerState) -> list[float]:
     return [1.0 if eligible else 0.0, _own_rank(state, player)]
 
 
-def _opponent_slots(state: GameState, player: PlayerState, track) -> list[float]:
+def _opponent_slots(
+    state: GameState, player: PlayerState, track: Track
+) -> list[float]:
     """5 * (MAX_PLAYERS - 1) floats. Per opponent slot:
     [presence, relative_position (signed), gear/4, lap_delta (signed), finished].
     Absent slots are zero-filled (presence 0). Only PUBLIC opponent state."""
@@ -412,7 +419,7 @@ def _phase_context(state: GameState, decision: "Decision | None") -> list[float]
 
     # React-context bits (indices 5..7) when this is a REACT decision.
     if decision.kind == DecisionKind.REACT:
-        opts: rules.ReactOptions = decision.legal
+        opts = cast(rules.ReactOptions, decision.legal)
         block[5] = 1.0 if opts.can_boost else 0.0
         block[6] = 1.0 if opts.has_adrenaline else 0.0
         block[7] = _clip01(opts.max_cooldown / 3.0)
@@ -426,7 +433,9 @@ def _phase_context(state: GameState, decision: "Decision | None") -> list[float]
     return block
 
 
-def _state_prefix(state: GameState, player: PlayerState, track) -> list[float]:
+def _state_prefix(
+    state: GameState, player: PlayerState, track: Track
+) -> list[float]:
     """The seat-state prefix: every observation block BEFORE the phase tail.
 
     This is the portion of the observation that depends ONLY on

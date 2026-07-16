@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "next_generation_number": 4,
+  "convention_document": "docs/policy-generation-registry.html",
+  "generations": [
+    {
+      "generation_id": "G0001",
+      "display_name": "A8 ten-epoch baseline",
+      "created_date": "2026-07-13",
+      "parent_generation_id": null,
+      "status": "retired_baseline",
+      "manifest": "experiments/policy_registry/g0001.json"
+    },
+    {
+      "generation_id": "G0002",
+      "display_name": "A8 five-epoch recipe",
+      "created_date": "2026-07-13",
+      "parent_generation_id": "G0001",
+      "status": "adopted_default",
+      "manifest": "experiments/policy_registry/g0002.json"
+    },
+    {
+      "generation_id": "G0003",
+      "display_name": "A8 fixed-anchor recipe",
+      "created_date": "2026-07-14",
+      "parent_generation_id": "G0002",
+      "status": "preferred_for_selected_skill_only",
+      "manifest": "experiments/policy_registry/g0003.json"
+    }
+  ]
+}

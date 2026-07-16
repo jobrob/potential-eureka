@@ -8,6 +8,7 @@ from heat.agents.random_agent import RandomAgent
 from heat.agents.heuristic_agent import HeuristicAgent
 from heat.agents.strong_heuristic import StrongHeuristicAgent
 from heat.agents.search_agent import LookaheadAgent
+from heat.agents.static_search import StaticSearchAgent
 
 __all__ = [
     "BaseAgent",
@@ -15,4 +16,5 @@ __all__ = [
     "HeuristicAgent",
     "StrongHeuristicAgent",
     "LookaheadAgent",
+    "StaticSearchAgent",
 ]

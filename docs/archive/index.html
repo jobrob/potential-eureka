@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HEAT design archive</title>
+  <style>
+    :root { --ink:#17212b; --muted:#61707d; --paper:#f6f4ee; --card:#fff; --line:#d9d5ca; --accent:#a8462d; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:var(--paper); font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    main { width:min(960px,calc(100% - 40px)); margin:0 auto; padding:64px 0 96px; }
+    h1 { max-width:15ch; margin:0 0 12px; font:700 clamp(2.6rem,7vw,5rem)/.95 Georgia,serif; letter-spacing:-.04em; }
+    h2 { margin-top:48px; font-size:1.35rem; }
+    p { max-width:72ch; }
+    .eyebrow { color:var(--accent); font-weight:750; letter-spacing:.12em; text-transform:uppercase; }
+    .notice { margin:28px 0; padding:20px 24px; border-left:5px solid var(--accent); background:var(--card); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:16px; }
+    section, details { border:1px solid var(--line); border-radius:14px; background:var(--card); padding:22px; }
+    section h2 { margin:0 0 6px; }
+    summary { cursor:pointer; font-weight:700; }
+    ul { padding-left:1.2rem; columns:2 280px; }
+    a { color:#7b321f; text-underline-offset:3px; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Historical record · archived 13 July 2026</p>
+  <h1>Finished design work, kept for context.</h1>
+  <p>This archive holds implemented, superseded, or concluded design lines. Files are preserved as written so their decisions and measured outcomes remain traceable, but they are no longer the implementation queue.</p>
+  <div class="notice"><strong>Current work:</strong> the live roadmap is <a href="../direction-A/sprint-plan.md">Direction A</a>; A8 Phase 1 remains partial. The strategic parent is <a href="../heat-rl-transition-plan.md">the RL transition plan</a>.</div>
+  <div class="grid">
+    <section><h2>Legacy delivery sprints</h2><p>Engine, simulation, ML substrate, training, evaluation, and heuristic work through Sprints 2–8.</p></section>
+    <section><h2>Search and solo planning</h2><p>The concluded imitation, learned-value, DP, and AlphaZero investigation, including findings and throughput work.</p></section>
+    <section><h2>Learning logs</h2><p>Empirical records retained because later decisions cite their failure modes and measurements.</p></section>
+  </div>
+  <h2>Archive contents</h2>
+  <details open><summary>Top-level legacy documents</summary><ul>
+    <li><a href="sprint2-design.md">Sprint 2 game engine</a></li><li><a href="sprint4-design.md">Sprint 4 simulation</a></li>
+    <li><a href="sprint5-engine-readiness-design.md">Sprint 5 engine readiness</a></li><li><a href="sprint5-ml-roadmap.md">Sprint 5 ML roadmap</a></li>
+    <li><a href="sprint6-roadmap.md">Sprint 6 roadmap</a></li><li><a href="sprint6a-track-generation-design.md">Sprint 6A track generation</a></li>
+    <li><a href="sprint6b-benchmark-eval-design.md">Sprint 6B evaluation</a></li><li><a href="sprint6c-training-overhaul-design.md">Sprint 6C training</a></li>
+    <li><a href="sprint6d-league-selfplay-design.md">Sprint 6D league self-play</a></li><li><a href="sprint6e-strong-heuristic-design.md">Sprint 6E heuristic design</a></li>
+    <li><a href="sprint6e-strong-heuristic-redesign.md">Sprint 6E heuristic redesign</a></li><li><a href="sprint-A-trustworthy-run.md">Trustworthy run</a></li>
+    <li><a href="sprint-B-cheap-obs-curriculum.md">Observation curriculum</a></li><li><a href="sprint-8C-solo-pretrain-opponent-curriculum.md">Sprint 8C curriculum</a></li>
+    <li><a href="sprint-8D-mass-training-league-analysis.md">Sprint 8D league analysis</a></li><li><a href="sprint-search-imitation-design.md">Search and imitation</a></li>
+    <li><a href="track-visualisation-plan.md">Track visualisation</a></li><li><a href="ml-performance-improvements.md">ML improvement decisions</a></li>
+    <li><a href="ml-improvement-sprints.md">ML improvement sprints</a></li><li><a href="ml-learnings-solo-pretrain.md">Solo-pretrain learnings</a></li>
+    <li><a href="ml-learnings-8c-collapse-investigation.md">8C collapse investigation</a></li><li><a href="solo-speed-whole-track-planning-options.md">Whole-track planning options</a></li>
+  </ul></details>
+  <details><summary>Solo-speed planning tree</summary><p>Start with the archived <a href="solo-speed-planning/README.md">solo-speed index</a>, including Options A, B, and C, their sprint specifications, findings, and code-review notes.</p></details>
+</main>
+</body>
+</html>

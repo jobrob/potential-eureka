@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="A8 investigation into a stronger, fixed benchmark opponent for generated HEAT tracks.">
+  <title>A8 H2 — Strong static benchmark investigation</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">B1 implemented · candidate rejected</span>
+      <h1>Static search is useful—but it is not a universal stronger rung.</h1>
+      <p class="hero-copy">The full confirmation campaign shows strong non-transitivity: StaticSearchV1 safely beats the repaired heuristic, yet loses placement value against the supposedly weak field. It remains reproducible and opt-in, but it is not promoted as the A8 strong benchmark.</p>
+      <p><strong>Direction A · Sprint A8 · H2/B1 benchmark investigation</strong><br><span class="muted">Implementation and 1,794-race confirmation · updated 16 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="H2 recommendation">
+      <span class="board-label">B1 freeze decision</span>
+      <strong>Do not promote<br>StaticSearchV1.</strong>
+      <p>Keep it opt-in as a style-specific stress test. B2 has now implemented the multi-ruler benchmark rather than forcing a false total order.</p>
+      <div class="palette-dots" aria-label="Document colour palette"><i></i><i></i><i></i><i></i><i></i></div>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#decision">Decision</a>
+      <a href="#question">Question</a>
+      <a href="#existing">Existing agents</a>
+      <a href="#heuristic-screen">Heuristic screen</a>
+      <a href="#search-screen">Search screen</a>
+      <a href="#candidate">Candidate</a>
+      <a href="#policy-challenge">Policy challenge</a>
+      <a href="#alternatives">Alternatives</a>
+      <a href="#freeze-gate">B1 result</a>
+      <a href="#limits">Limits</a>
+      <a href="#artifacts">Artifacts</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="decision">
+        <span class="section-kicker">Executive decision</span>
+        <h2>No tested static player forms a reliable total strength ladder.</h2>
+        <p class="lede">B1 implemented the most promising candidate and tested it at enough scale to overturn the small-screen conclusion. The shallow search mechanism is safe, deterministic, fast enough, and discriminating—but its advantage depends strongly on opponent style and seat count. That makes it a useful additional ruler, not “the strong opponent.”</p>
+        <div class="hybrid-stats" aria-label="H2 headline evidence">
+          <div class="hybrid-stat"><span>B1 search vs weak</span><strong>43.5–27.0–22.5%</strong><small>negative reward at 2 / 4 / 6</small></div>
+          <div class="hybrid-stat"><span>B1 search vs repaired</span><strong>64.0–33.5–47.5%</strong><small>all confidence gates pass</small></div>
+          <div class="hybrid-stat"><span>Six-seat latency</span><strong>6.29 ms</strong><small>median · 7.97 ms p95</small></div>
+          <div class="hybrid-stat"><span>Freeze verdict</span><strong>Rejected</strong><small>primary weak-field gate failed</small></div>
+        </div>
+        <div class="decision-banner"><strong>Decision</strong>Keep <code>StrongHeuristicAgent</code>'s public class name for compatibility, but label it “repaired heuristic” in new reports. Keep <code>StaticSearchV1</code> reproducible behind an explicit opt-in flag. Do not freeze either as the universal strong rung. B2 now aggregates four fixed rulers while exposing every per-style result. <a href="A8-b2-multi-ruler-benchmark.html">Read the completed B2 benchmark.</a></div>
+      </section>
+
+      <section id="question">
+        <span class="section-kicker">01 · Investigation design</span>
+        <h2>The investigation asked whether a stronger fixed player is feasible and where its strength should come from.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Item</th><th>Predeclared scope</th></tr></thead>
+            <tbody>
+              <tr><td>Primary hypothesis</td><td>A deterministic simulator-backed player can beat the weak and repaired heuristic fields above chance across generated tracks more reliably than another scalar retune.</td></tr>
+              <tr><td>Prior confidence</td><td>High, about 85%, because an older four-player search result existed; lower confidence that the old two-round recipe would transfer unchanged to current A8.</td></tr>
+              <tr><td>Engineering scope</td><td>Read existing agents and run existing or inline diagnostic harnesses. No production-agent changes. One new HTML findings document.</td></tr>
+              <tr><td>Compute scope</td><td>Six screens, each capped at ten minutes with flushed cell-level output. Actual total experiment wall time was about 9.2 minutes.</td></tr>
+              <tr><td>Data role</td><td><code>900000+</code> is already consumed development data. New <code>710000+</code>, <code>711000+</code>, and <code>712000+</code> bands become benchmark-development data after this investigation; none is an untouched final test.</td></tr>
+              <tr><td>Decision rule</td><td>Recommend an architecture only if it is deterministic, independent of learned checkpoints, point-estimate above chance with positive placement reward across 2/4/6 seats, and practical for repeatable evaluation.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="existing">
+        <span class="section-kicker">02 · What already exists</span>
+        <h2>The project has three different notions of “static player.”</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Player</th><th>Decision mechanism</th><th>Strength source</th><th>Benchmark suitability</th></tr></thead>
+            <tbody>
+              <tr><td><code>HeuristicAgent</code></td><td>Separate hand-written gear, card, react, slipstream, and discard rules.</td><td>Local constants and simple corner checks.</td><td>Very fast and useful as a floor; too weak to be the main bar.</td></tr>
+              <tr><td><code>StrongHeuristicAgent</code></td><td>Joint gear/card enumeration with a static one-ply value, forward heat-solvency approximation, relative position, and optional blocking.</td><td>Better scoring model; still predicts rather than executes the candidate round.</td><td>Repaired safety baseline, but fresh generated-track strength is inconsistent.</td></tr>
+              <tr><td><code>LookaheadAgent</code></td><td>Clones the exact engine, forces each candidate gear/card plan, simulates forward, averages determinizations, and selects the best line.</td><td>Rules-correct consequences rather than more evaluator weights.</td><td>B1-tested style-specific ruler; not globally stronger than weak play.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>A fixed search agent is still a static benchmark. Its code and configuration do not learn or change between evaluations. The distinction is computational—several small simulations per move—rather than statistical. That independence is preferable to using a frozen learned checkpoint as the only “strong” ruler, because the benchmark does not inherit the learner’s architecture or training blind spots.</p>
+      </section>
+
+      <section id="heuristic-screen">
+        <span class="section-kicker">03 · Incremental heuristic investigation</span>
+        <h2>The existing ladder and heat price do not contain a hidden strong configuration.</h2>
+        <p>Seven repaired-heuristic variants played every starting seat on 20 new default-distribution tracks against homogeneous weak fields. The table shows the three feature rungs and the best scalar variation. Each row contains 40 two-player, 80 four-player, and 120 six-player races.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Variant</th><th>2-seat win / reward</th><th>4-seat win / reward</th><th>6-seat win / reward</th><th>Pooled reward</th></tr></thead>
+            <tbody>
+              <tr><td>Strength 1</td><td>40.0% / −0.200</td><td>25.0% / −0.142</td><td>20.0% / −0.153</td><td>−0.157</td></tr>
+              <tr><td>Strength 2 default</td><td>42.5% / −0.150</td><td>23.7% / −0.167</td><td>20.0% / −0.120</td><td>−0.141</td></tr>
+              <tr><td>Strength 3 blocking</td><td>42.5% / −0.150</td><td>22.5% / −0.175</td><td>20.8% / −0.103</td><td>−0.135</td></tr>
+              <tr><td>Strength 2, heat price 0.75</td><td>42.5% / −0.150</td><td>23.7% / −0.133</td><td>19.2% / −0.110</td><td class="metric-bad">−0.124</td></tr>
+              <tr><td>Strength 2, heat price 2.00</td><td>30.0% / −0.400</td><td>15.0% / −0.250</td><td>17.5% / −0.183</td><td class="metric-bad">−0.242</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="result-note"><strong>Finding:</strong> the ladder features barely move results on this generated band, and scalar heat-price tuning cannot create a reliable advantage. More evaluator constants could fit the development tracks, but they would increase brittleness without addressing simultaneous traffic, random Stress outcomes, or the downstream effect of a complete round.</div>
+      </section>
+
+      <section id="search-screen">
+        <span class="section-kicker">04 · Search architecture investigation</span>
+        <h2>One exact round is more valuable than a deeper approximate rollout.</h2>
+        <p>The first current-rules screen reproduced the broad historical result: two-round determinized lookahead won 40.6% against three weak agents and 47.9% against three repaired strong agents on 24 tight tracks, both above 25% parity. A focused four-player ablation then selected the cheaper one-round configuration.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Search variant vs 3× weak</th><th>Wins</th><th>Mean placement reward</th><th>Rounds</th><th>Decision cost</th><th>Reading</th></tr></thead>
+            <tbody>
+              <tr><td class="metric-good">1 round · weak rollout · progress leaf</td><td class="metric-good">30 / 80 · 37.5%</td><td class="metric-good">+0.067</td><td>21.9</td><td class="metric-good">3.44 ms</td><td>Selected</td></tr>
+              <tr><td>2 rounds · weak rollout · progress leaf</td><td>21 / 80 · 26.3%</td><td>−0.083</td><td>21.4</td><td>6.87 ms</td><td>Extra approximate round hurts</td></tr>
+              <tr><td>2 rounds · repaired rollout · progress leaf</td><td>26 / 80 · 32.5%</td><td class="metric-good">+0.175</td><td>20.7</td><td class="metric-bad">91.25 ms</td><td>Better placement, disproportionate cost</td></tr>
+              <tr><td>2 rounds · weak rollout · move-eval leaf</td><td class="metric-bad">9 / 80 · 11.3%</td><td class="metric-bad">−0.508</td><td>23.5</td><td>6.68 ms</td><td>Static leaf is actively harmful here</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The result identifies the useful mechanism. The exact first round captures candidate speed, corner resolution, traffic blocking, slipstream availability, and random card resolution through the real engine. A second round is driven mostly by an approximate rollout policy, so it adds model error as well as compute. This is why “make the evaluator more complicated” is less attractive than shallow exact simulation.</p>
+      </section>
+
+      <section id="candidate">
+        <span class="section-kicker">05 · Selected static candidate</span>
+        <h2>StaticSearchV1 is a configuration of existing, tested machinery.</h2>
+        <div class="config-panel" aria-label="StaticSearchV1 flow">
+          <div><span>1 · Enumerate</span><strong>legal gear + card plans<br>deduplicate by resulting speed</strong></div>
+          <div><span>2 · Prune</span><strong>top six by fast prior<br>about 11 clones per move</strong></div>
+          <div><span>3 · Simulate</span><strong>one exact engine round<br>two hidden-card determinizations</strong></div>
+          <div><span>4 · Select</span><strong>progress minus spin penalties<br>fixed deterministic argmax</strong></div>
+        </div>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Configuration</th><th>Frozen value</th><th>Reason</th></tr></thead>
+            <tbody>
+              <tr><td>Horizon</td><td><code>1</code></td><td>Best four-player strength/cost result; avoids compounding rollout-policy error.</td></tr>
+              <tr><td>Determinizations</td><td><code>2</code></td><td>Averages own random draws and re-sampled opponent hidden cards.</td></tr>
+              <tr><td>Hidden information</td><td><code>determinize_hidden=True</code></td><td>Does not inspect the real opponent hand/deck partition.</td></tr>
+              <tr><td>Candidate cap</td><td><code>top_k=6</code></td><td>About 11 clones per move; prior ordering drops the least promising plans first.</td></tr>
+              <tr><td>Leaf</td><td><code>progress</code></td><td>Observed to outperform the static move-evaluator leaf substantially.</td></tr>
+              <tr><td>Rollout policy</td><td>Weak heuristic</td><td>Only non-forced decisions within one round; much cheaper than repaired-heuristic rollouts.</td></tr>
+              <tr><td>Learning/adaptation</td><td>None</td><td>Fixed code and configuration; safe to version as an evaluation ruler.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="table-title">Fresh selected-configuration validation</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Opponent field</th><th>Seats</th><th>Wins</th><th>95% Wilson interval</th><th>Chance</th><th>Mean reward</th><th>ms / focal move</th></tr></thead>
+            <tbody>
+              <tr><td>Weak</td><td>2</td><td>23 / 40 · 57.5%</td><td>0.422–0.715</td><td>0.500</td><td class="metric-good">+0.150</td><td>1.62</td></tr>
+              <tr><td>Weak</td><td>4</td><td>31 / 80 · 38.8%</td><td>0.288–0.497</td><td>0.250</td><td class="metric-good">+0.133</td><td>3.42</td></tr>
+              <tr><td>Weak</td><td>6</td><td>35 / 120 · 29.2%</td><td>0.218–0.378</td><td>0.167</td><td class="metric-good">+0.150</td><td>5.29</td></tr>
+              <tr><td>Repaired strong</td><td>2</td><td>29 / 40 · 72.5%</td><td>0.572–0.839</td><td>0.500</td><td class="metric-good">+0.450</td><td>1.68</td></tr>
+              <tr><td>Repaired strong</td><td>4</td><td>26 / 80 · 32.5%</td><td>0.232–0.434</td><td>0.250</td><td class="metric-good">+0.167</td><td>3.54</td></tr>
+              <tr><td>Repaired strong</td><td>6</td><td>39 / 120 · 32.5%</td><td>0.248–0.413</td><td>0.167</td><td class="metric-good">+0.283</td><td>6.05</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="result-note"><strong>Preliminary verdict—superseded by B1:</strong> this small selected-configuration screen passed by point estimate and motivated the confirmation campaign. The independent 200-game cells below reversed the weak-field conclusion, which is why B1—not this exploratory screen—controls the promotion decision.</div>
+      </section>
+
+      <section id="policy-challenge">
+        <span class="section-kicker">06 · Is it a useful A8 ruler?</span>
+        <h2>The candidate creates headroom without making current progress disappear.</h2>
+        <p>The selected <code>G0003-R00@1000K</code> checkpoint (S2 seed 0) played 30 games per seat cell against homogeneous StaticSearchV1 fields on the existing A8 validation tracks. This is a small diagnostic, not a promotion claim.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Seats</th><th>A8 policy wins</th><th>Wilson interval</th><th>Chance</th><th>Mean placement reward</th><th>Interpretation</th></tr></thead>
+            <tbody>
+              <tr><td>2</td><td>19 / 30 · 63.3%</td><td>0.455–0.781</td><td>0.500</td><td class="metric-good">+0.300</td><td>The learned policy can beat the search style head-to-head.</td></tr>
+              <tr><td>4</td><td>10 / 30 · 33.3%</td><td>0.192–0.512</td><td>0.250</td><td>−0.022</td><td>First-place rate is promising; full placement is around neutral.</td></tr>
+              <tr><td>6</td><td>8 / 30 · 26.7%</td><td>0.142–0.444</td><td>0.167</td><td class="metric-bad">−0.107</td><td>The field exposes multiplayer headroom hidden by the weak ladder.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The aggregate placement reward across these three cells is approximately +0.057, far below the same checkpoint's strong result against the weak/legacy primary ladder. The comparison is not numerically interchangeable because the opponent changed, but it demonstrates discrimination: current A8 agents are neither hopeless nor already saturated against this ruler.</p>
+      </section>
+
+      <section id="alternatives">
+        <span class="section-kicker">07 · Architecture options</span>
+        <h2>Search is the smallest credible step; other static approaches remain possible.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Direction</th><th>Advantages</th><th>Problems</th><th>Recommendation</th></tr></thead>
+            <tbody>
+              <tr><td>More strong-heuristic weights</td><td>Fastest runtime; very small code changes.</td><td>Current rung and scalar sweep are flat; risks fitting track bands and accumulating conflicting rules.</td><td class="metric-bad">Do not pursue as the main route.</td></tr>
+              <tr><td>New traffic-aware heuristic terms</td><td>Could improve blocking, slipstream, and pack positioning while remaining cheap.</td><td>Correct traffic consequences already exist in the simulator; approximating them duplicates rules and still misses stochastic interactions.</td><td>Only if search latency later proves unacceptable.</td></tr>
+              <tr><td>Fixed one-round forward search</td><td>Deterministic, training-independent, exact rules, tested at 6.29 ms median in six-player fields.</td><td>B1 produced negative placement reward against weak fields at every seat count.</td><td>Keep opt-in; do not promote.</td></tr>
+              <tr><td>Frozen learned policy snapshot</td><td>Fast inference and easy to add to a ladder.</td><td>Correlated with the learner family, depends on checkpoint/runtime contracts, and may share the same blind spots.</td><td>Use as an additional historical ruler, not the sole strong bar.</td></tr>
+              <tr><td>Policy/value-guided MCTS</td><td>Potentially strongest and can reason more deeply.</td><td>Much larger system; archived experiments struggled to surpass simple lookahead and incurred substantial compute/training complexity.</td><td>Not justified for the benchmark problem yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="freeze-gate">
+        <span class="section-kicker">08 · B1 implemented result</span>
+        <h2>The confirmation campaign rejects StaticSearchV1 as the strong benchmark.</h2>
+        <p>B1 implemented the fixed agent, a picklable factory, an explicit A8 evaluation option, focused tests, and a reproducible gate harness. It ran 1,200 strength races, 72 tight-track safety races, 72 six-seat latency races, and 450 checkpoint-challenge races in 354.9 seconds—well below the 25-minute cap.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Opponent</th><th>Seats</th><th>Wins</th><th>Wilson lower bound</th><th>Chance</th><th>Mean reward</th><th>Gate</th></tr></thead>
+            <tbody>
+              <tr><td>Weak</td><td>2</td><td>87 / 200 · 43.5%</td><td>0.368</td><td>0.500</td><td class="metric-bad">−0.130</td><td class="metric-bad">Fail</td></tr>
+              <tr><td>Weak</td><td>4</td><td>54 / 200 · 27.0%</td><td>0.213</td><td>0.250</td><td class="metric-bad">−0.087</td><td class="metric-bad">Fail</td></tr>
+              <tr><td>Weak</td><td>6</td><td>45 / 200 · 22.5%</td><td>0.173</td><td>0.167</td><td class="metric-bad">−0.062</td><td class="metric-bad">Fail: reward</td></tr>
+              <tr><td>Repaired heuristic</td><td>2</td><td>128 / 200 · 64.0%</td><td>0.571</td><td>0.500</td><td class="metric-good">+0.280</td><td class="metric-good">Pass</td></tr>
+              <tr><td>Repaired heuristic</td><td>4</td><td>67 / 200 · 33.5%</td><td>0.273</td><td>0.250</td><td class="metric-good">+0.133</td><td class="metric-good">Pass</td></tr>
+              <tr><td>Repaired heuristic</td><td>6</td><td>95 / 200 · 47.5%</td><td>0.407</td><td>0.167</td><td class="metric-good">+0.358</td><td class="metric-good">Pass</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 class="table-title">Safety and practical gates</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Measure</th><th>Weak</th><th>Repaired heuristic</th><th>StaticSearchV1</th><th>Result</th></tr></thead>
+            <tbody>
+              <tr><td>Tight L1 spins / passes</td><td>71 / 136</td><td>47 / 122</td><td class="metric-good">19 / 90</td><td class="metric-good">Lowest pooled rate</td></tr>
+              <tr><td>Tight L1 p90 spins / pass</td><td>1.182</td><td class="metric-good">0.429</td><td>0.600</td><td class="metric-good">Pass: below weak</td></tr>
+              <tr><td>Five historical recovery locks</td><td>—</td><td>≤1 spin each</td><td class="metric-good">0 spins in all five</td><td class="metric-good">Pass</td></tr>
+              <tr><td>Six-seat focal latency</td><td>—</td><td>—</td><td class="metric-good">6.29 ms median · 7.97 ms p95</td><td class="metric-good">Pass: median &lt;10 ms</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 class="table-title">Representative G0002 checkpoints against StaticSearchV1</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Checkpoint</th><th>2-seat reward</th><th>4-seat reward</th><th>6-seat reward</th><th>Equal-seat aggregate</th></tr></thead>
+            <tbody>
+              <tr><td><code>G0002-R00@1000K</code></td><td>+0.000</td><td>+0.213</td><td class="metric-bad">−0.208</td><td>+0.002</td></tr>
+              <tr><td><code>G0002-R01@1000K</code></td><td>+0.160</td><td>+0.173</td><td>+0.160</td><td class="metric-good">+0.164</td></tr>
+              <tr><td><code>G0002-R02@1000K</code></td><td>+0.200</td><td>+0.240</td><td class="metric-bad">−0.128</td><td>+0.104</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="decision-banner"><strong>B1 decision: do not freeze.</strong>The candidate passes safety, latency, and repaired-field gates but fails the primary weak-field strength requirement. Its code and factory remain available for explicit comparisons; A8 includes it only with <code>--eval-search-candidate</code>. The evidence supports a multi-ruler benchmark suite, not another attempt to assign a universal “strong” label from pairwise results.</div>
+      </section>
+
+      <section id="limits">
+        <span class="section-kicker">09 · Limits and cautions</span>
+        <h2>A stronger opponent improves measurement, but cannot define success alone.</h2>
+        <ul class="open-list">
+          <li><strong>The freeze hypothesis failed.</strong><br>B1 used a new <code>713000+</code> frozen development band and 200 games per cell. More sampling is unlikely to reverse the negative weak-field placement rewards.</li>
+          <li><strong>“Strong” is not one-dimensional.</strong><br>StaticSearchV1 confidently beats the repaired heuristic but not the weak field. A single ordinal label discards the matchup structure the benchmark is meant to reveal.</li>
+          <li><strong>Non-transitivity is real.</strong><br>Results change with homogeneous weak versus repaired fields and with seat count. “A beats B” does not guarantee a total ordering of all agent styles.</li>
+          <li><strong>Evaluation only.</strong><br>Filling training games with search opponents would multiply rollout cost and could teach exploitation of a style that B1 did not validate as stronger.</li>
+          <li><strong>Keep multiple rulers.</strong><br>B2 now gives equal weight to weak play, repaired scripted play, the opt-in search candidate, and a frozen historical policy while preserving individual results. Its 40-track band is consumed development data, so a later final test still requires untouched tracks. <a href="A8-b2-multi-ruler-benchmark.html">Full B2 result.</a></li>
+        </ul>
+      </section>
+
+      <section id="artifacts">
+        <span class="section-kicker">10 · Evidence and implementation map</span>
+        <h2>The rejected candidate remains reproducible without entering the default ruler suite.</h2>
+        <div class="file-grid">
+          <div class="file-card"><a href="../../src/heat/agents/search_agent.py"><code>src/heat/agents/search_agent.py</code></a>Existing forward simulator, deterministic candidate scoring, hidden-card determinization, top-k pruning, and profiling.</div>
+          <div class="file-card"><a href="../../src/heat/agents/strong_heuristic.py"><code>src/heat/agents/strong_heuristic.py</code></a>Repaired fast scripted baseline and the one-ply evaluator architecture this investigation compared.</div>
+          <div class="file-card"><a href="../../experiments/eval_search.py"><code>experiments/eval_search.py</code></a>Existing tight-track safety and seat-neutral multiplayer screen used by the first diagnostic.</div>
+          <div class="file-card"><a href="../../src/heat/agents/static_search.py"><code>src/heat/agents/static_search.py</code></a>Exact, immutable B1 candidate configuration retained for explicit research comparisons.</div>
+          <div class="file-card"><a href="../../experiments/eval_static_search_v1.py"><code>experiments/eval_static_search_v1.py</code></a>Reproducible strength, safety, latency, lock-replay, and checkpoint-challenge harness.</div>
+          <div class="file-card"><code>runs/a8_h2_lookahead_screen.log</code>Current-rules tight screen and four-player win-rate evidence.</div>
+          <div class="file-card"><code>runs/a8_h2_general_screen.log</code>Two-round default-distribution 2/4/6-seat screen.</div>
+          <div class="file-card"><code>runs/a8_h2_heuristic_sweep.log</code>Strength-rung and heat-price diagnostic.</div>
+          <div class="file-card"><code>runs/a8_h2_search_variant_screen.log</code>Horizon, rollout-policy, and leaf-value ablation.</div>
+          <div class="file-card"><code>runs/a8_h2_static_search_v1_validation.log</code>Fresh selected-configuration validation.</div>
+          <div class="file-card"><code>runs/a8_h2_policy_vs_static_search.log</code>Representative S2 checkpoint challenge.</div>
+          <div class="file-card"><code>runs/a8_b1_static_search_v1.json</code>Full B1 machine-readable evidence; generated and excluded from committed artifacts.</div>
+          <div class="file-card"><code>runs/a8_b1_static_search_v1.log</code>Cell-level progress and result log; generated evidence.</div>
+        </div>
+        <div class="verification-panel"><strong>Implementation verification</strong><br><strong>28 focused StaticSearch, search-agent, and A8 tests passed</strong>. Ruff and strict mypy were clean for the changed production code and experiment harness. The B1 smoke completed every report stage before the full 1,794-race run. The existing public <code>StrongHeuristicAgent</code> name remains intact for compatibility; new A8 output uses <code>heuristic_repaired</code>, and the failed search candidate is opt-in only.</div>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer"><strong>Direction A · Sprint A8 · H2 strong static benchmark investigation</strong></footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

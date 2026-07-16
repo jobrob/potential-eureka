@@ -286,6 +286,9 @@ def step_reward(
     done: bool,
     *,
     terminated: bool = False,
+    reward_mode: str | None = None,
+    shaping_weight: float | None = None,
+    spinout_weight: float | None = None,
 ) -> float:
     """Reward for the learning seat between two driver steps.
 
@@ -306,14 +309,21 @@ def step_reward(
       * Dense progress: the same shaping term below, run with ``SHAPING_WEIGHT > 0``.
 
     ``terminated`` defaults to ``False`` so any existing caller (race mode) is
-    byte-for-byte unchanged; only the solo branch reads it. The shaping
-    coefficients + ``REWARD_MODE`` live as module-level constants so 5c can tune
-    them (via PPOConfig) without editing the 5b environment.
+    byte-for-byte unchanged; only the solo branch reads it. ``reward_mode``,
+    ``shaping_weight``, and ``spinout_weight`` optionally override their mutable
+    module defaults for isolated consumers such as Direction-A self-play, whose
+    sparse reward contract must not inherit configuration from an SB3 run in the
+    same process.
     """
     reward = 0.0
+    active_mode = REWARD_MODE if reward_mode is None else reward_mode
+    active_shaping = SHAPING_WEIGHT if shaping_weight is None else shaping_weight
+    active_spinout = (
+        SHAPING_SPINOUT_WEIGHT if spinout_weight is None else spinout_weight
+    )
 
     if done:
-        if REWARD_MODE == "solo":
+        if active_mode == "solo":
             # Solo terminal: finish bonus ONLY on a real finish (terminated),
             # never on truncation. _placement_reward returns 0 for n<=1, so the
             # placement term contributes nothing -- the bonus is the whole
@@ -323,7 +333,7 @@ def step_reward(
         else:
             reward += _placement_reward(curr, learner_id)
 
-    if SHAPING_WEIGHT != 0.0:
+    if active_shaping != 0.0:
         prev_p = prev.get_player(learner_id)
         curr_p = curr.get_player(learner_id)
         length = curr.track.length or 1
@@ -336,15 +346,15 @@ def step_reward(
         # progress delta negative. Clamp it at 0 in solo so there is never a
         # negative reward -- removing any incentive to crash/spin to stop
         # accruing. Race mode keeps the signed progress unchanged.
-        if REWARD_MODE == "solo":
+        if active_mode == "solo":
             progress = max(0.0, progress)
-        reward += SHAPING_WEIGHT * SHAPING_PROGRESS_COEF * progress
+        reward += active_shaping * SHAPING_PROGRESS_COEF * progress
 
     # Optional bounded anti-spinout penalty (Idea 3); default-off (weight 0). The
     # raw penalty is in [0, 1]; the subtracted magnitude is hard-capped at
     # SHAPING_SPINOUT_CAP so it can never dominate the placement reward.
-    if SHAPING_SPINOUT_WEIGHT != 0.0:
+    if active_spinout != 0.0:
         penalty = _spinout_penalty(prev, curr, learner_id)  # in [0, 1]
-        reward -= min(SHAPING_SPINOUT_CAP, SHAPING_SPINOUT_WEIGHT * penalty)
+        reward -= min(SHAPING_SPINOUT_CAP, active_spinout * penalty)
 
     return reward

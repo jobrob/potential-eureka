@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Immutable chronological naming and recipe provenance for learned HEAT policies.">
+  <title>Learned policy generation registry</title>
+  <link rel="stylesheet" href="design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Implemented · registry schema 1</span>
+      <h1>Generation numbers make policy history readable.</h1>
+      <p class="hero-copy">Every comparison-worthy learned recipe receives one immutable chronological generation ID. Independent seeds remain runs within that generation, while a machine-readable manifest preserves the exact recipe and selected checkpoint identity.</p>
+      <p><strong>Project-wide learned-policy convention</strong><br><span class="muted">Established 16 July 2026 · retroactive A8 catalogue complete</span></p>
+    </div>
+    <aside class="status-board" aria-label="Naming rule">
+      <span class="board-label">Human identity</span>
+      <strong>G####-R##</strong>
+      <p>Generation first, independent run second. Add <code>@checkpoint</code> only when distinguishing a specific non-selected milestone.</p>
+      <div class="palette-dots" aria-label="Document colour palette"><i></i><i></i><i></i><i></i><i></i></div>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#rule">Naming rule</a>
+      <a href="#allocation">Allocation</a>
+      <a href="#tracker">Internal tracker</a>
+      <a href="#workflow">Required workflow</a>
+      <a href="#catalogue">Current catalogue</a>
+      <a href="#legacy">Legacy limits</a>
+      <a href="#enforcement">Enforcement</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="rule">
+        <span class="section-kicker">01 · Stable identity</span>
+        <h2>The ID describes chronology; the alias describes intent.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Form</th><th>Meaning</th><th>Example</th></tr></thead>
+            <tbody>
+              <tr><td><code>G####</code></td><td>One immutable resolved training recipe. The number is globally increasing.</td><td><code>G0003</code> was created after <code>G0002</code>.</td></tr>
+              <tr><td><code>G####-R##</code></td><td>One independent run of that recipe. For current campaigns the run number matches the seed number.</td><td><code>G0003-R02</code> is generation 3, seed/run 2.</td></tr>
+              <tr><td><code>G####-R##@checkpoint</code></td><td>A particular milestone when the base run ID alone would be ambiguous.</td><td><code>G0002-R00@1000K</code>.</td></tr>
+              <tr><td><code>dev-*</code></td><td>Disposable smoke or diagnostic policy that must not enter long-lived comparisons.</td><td><code>dev-anchor-smoke-a</code>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Reports should pair the immutable ID with a short alias on first use—for example, <strong>G0003 (S2 fixed anchor)</strong>—and use the ID thereafter. Experiment labels remain useful descriptions, but they are not policy identities.</p>
+        <p>This namespace is only for learned policies. Fixed scripted rulers retain explicit versioned names such as <code>heuristic_repaired</code> and <code>StaticSearchV1</code>; a learned historical ruler is identified by its registered checkpoint ID.</p>
+      </section>
+
+      <section id="allocation">
+        <span class="section-kicker">02 · When the generation changes</span>
+        <h2>Anything capable of changing learned weights creates the next generation.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Change</th><th>Identity action</th><th>Reason</th></tr></thead>
+            <tbody>
+              <tr><td>PPO/model hyperparameter, reward, observation/action representation, training track distribution, opponent mixture, initialization, parent, anchor, or meaningful trainer behaviour</td><td class="metric-good">Allocate the next <code>G####</code></td><td>The resolved recipe is different.</td></tr>
+              <tr><td>Another seed or exact rerun of the same recipe</td><td>Add the next <code>R##</code> inside the existing generation</td><td>Independent evidence, unchanged recipe.</td></tr>
+              <tr><td>Additional checkpoint from the same run</td><td>Keep the run ID; add an <code>@checkpoint</code> suffix when referenced</td><td>Same learned trajectory.</td></tr>
+              <tr><td>Evaluation opponent, track band, sample size, or report change</td><td>No training-generation change</td><td>The policy weights are unchanged; the evaluation artifact records its own design.</td></tr>
+              <tr><td>Smoke or broken trial</td><td>Use <code>dev-*</code>, or retain an already allocated ID with failed status</td><td>Never reuse an allocated number or rewrite history.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="tracker">
+        <span class="section-kicker">03 · Machine-readable provenance</span>
+        <h2>The central index provides discovery; one immutable manifest describes each recipe.</h2>
+        <pre><code>experiments/policy_registry/
+├── index.json      # chronology and next unused generation
+├── g0001.json      # complete recipe plus registered runs
+├── g0002.json
+└── g0003.json</code></pre>
+        <p>Each manifest records the full resolved training configuration, track generator parameters, policy contract, parent generation, anchor checkpoint identity, selection rule, source provenance, run seeds, selected checkpoint paths, byte sizes, and SHA-256 hashes. A canonical recipe hash detects silent edits.</p>
+        <div class="result-note"><strong>Source of truth.</strong>The registry owns identity and recipe provenance. Files under <code>runs/</code> remain generated artifacts and may keep historical filenames; moving or renaming a checkpoint is not what creates a generation.</div>
+      </section>
+
+      <section id="workflow">
+        <span class="section-kicker">04 · Campaign workflow</span>
+        <h2>Register before compute, finalize hashes after selection.</h2>
+        <ol class="step-line" aria-label="Policy registration workflow">
+          <li><strong>Allocate</strong><br>reserve the next G number</li>
+          <li><strong>Freeze</strong><br>resolved recipe and provenance</li>
+          <li><strong>Train</strong><br>use registered run IDs</li>
+          <li><strong>Select</strong><br>record checkpoint hashes</li>
+        </ol>
+        <ul class="open-list">
+          <li><strong>Before a full run.</strong><br>Add the index entry and manifest; capture the Git commit, whether the tree is dirty, and a saved patch plus SHA-256 when dirty. Record parents and input checkpoint hashes.</li>
+          <li><strong>At launch.</strong><br>Use the registered <code>G####-R##</code> in log, checkpoint, and experiment metadata. Store the complete resolved configuration rather than relying on changing defaults.</li>
+          <li><strong>After selection.</strong><br>Record the immutable selected checkpoint ID, path, size, and SHA-256. A later selection-rule change updates evaluation/selection metadata; it does not alter the recipe history.</li>
+          <li><strong>In evaluation.</strong><br>Persist agent IDs and selected checkpoint IDs alongside paths. Human reports give the alias only as explanatory text.</li>
+        </ul>
+        <p>New manifests use <code>captured_clean</code> provenance with a 40-character commit, or <code>captured_dirty</code> with that commit plus a saved patch and its SHA-256. The validator permits <code>retroactively_reconstructed</code> only for the G0001–G0003 backfill.</p>
+      </section>
+
+      <section id="catalogue">
+        <span class="section-kicker">05 · Retroactive A8 catalogue</span>
+        <h2>The three comparison-worthy A8 campaigns now have chronological identities.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Generation</th><th>Historical alias</th><th>Recipe difference</th><th>Runs</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr><td><code>G0001</code></td><td>A8 scale baseline</td><td>Ten PPO epochs</td><td><code>R00–R02</code>, selected final policies</td><td>Retired baseline</td></tr>
+              <tr><td><code>G0002</code></td><td>S1 gentler PPO</td><td>Five PPO epochs</td><td><code>R00–R02</code>, selected 1M milestones</td><td class="metric-good">Adopted A8 default</td></tr>
+              <tr><td><code>G0003</code></td><td>S2 fixed anchor</td><td>G0002 plus 40% snapshot replacement by <code>G0002-R00@1000K</code></td><td><code>R00</code> selected 1M; <code>R01–R02</code> selected final</td><td>Preferred B2 skill; rejected stabilization default</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>B2 now stores <code>G0002-R00</code> through <code>G0003-R02</code> in its raw result. Its historical learned ruler is explicitly <code>G0002-R00@1000K</code>.</p>
+      </section>
+
+      <section id="legacy">
+        <span class="section-kicker">06 · Honest reconstruction boundary</span>
+        <h2>Checkpoint identity is exact; old source provenance is incomplete.</h2>
+        <p>The selected checkpoint paths, sizes, and SHA-256 hashes are verified. The training settings were reconstructed from A8's experiment record, logs, and preserved defaults. Those old campaigns did not save a clean Git revision and dirty patch at launch, so the manifests mark their source provenance <code>retroactively_reconstructed</code>. They must not imply code-level reproducibility that the original evidence cannot support.</p>
+        <div class="decision-banner"><strong>Future requirement</strong>A new generation is not ready for a full campaign until its resolved recipe and source revision/patch evidence are recorded. This closes the only important provenance gap found during the A8 backfill.</div>
+      </section>
+
+      <section id="enforcement">
+        <span class="section-kicker">07 · How the convention is remembered</span>
+        <h2>AGENTS.md triggers the behaviour; code and tests detect drift.</h2>
+        <p>The concise mandatory rule lives in repository-root <code>AGENTS.md</code>, which Codex reads whenever it works in this project. That is the correct place for the trigger. This document contains the detailed policy, and <code>experiments/policy_registry/index.json</code> is the machine-readable source of truth.</p>
+        <p><code>heat.ml.policy_registry.validate_registry</code> verifies chronology, parents, unique run/checkpoint IDs, canonical recipe hashes, and—when requested—the selected checkpoint sizes and SHA-256 hashes. Focused tests exercise the full retroactive catalogue. Together these layers cover agent behaviour, human explanation, and mechanical integrity without duplicating the entire specification in the prompt.</p>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer"><strong>Learned policy identity · registry schema 1</strong></footer>
+<script src="design-doc.js"></script>
+</body>
+</html>

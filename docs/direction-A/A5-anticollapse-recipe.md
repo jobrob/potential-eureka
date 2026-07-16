@@ -1,10 +1,8 @@
 # Sprint A5 — Anti-collapse self-play recipe
 
-> **Status:** design (2026-07-10). Detailed design for Sprint A5 of the
-> [Direction A sprint plan](sprint-plan.md). Implementable spec; read this plus
-> `src/heat/ml/selfplay/{multiseat,ppo,policy}.py`, `src/heat/ml/opponents.py`
-> (the `opponent_action` dispatch a snapshot agent must satisfy), and the
-> [A2 findings](A2-findings.md) §2 (the naive-self-play probe this builds on).
+> **Status:** **implemented and complete** (2026-07-10). The original gate was
+> partial, then A7's powered fixed-anchor evaluation cleared the disputed G2 as a
+> measurement artifact. The snapshot-pool recipe remains the Direction A baseline.
 
 ## 1. Purpose and starting point
 

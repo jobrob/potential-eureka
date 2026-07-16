@@ -1,9 +1,8 @@
 # Sprint A1 — Tiny-Heat proving ground
 
-> **Status:** design (2026-06-24). Detailed design for Sprint A1 of the
-> [Direction A sprint plan](sprint-plan.md). Implementable spec; read this plus
-> `src/heat/models/track.py`, `src/heat/tracks/generator.py`, `src/heat/ml/env.py`, and
-> `src/heat/ml/selfplay/ppo.py` before starting.
+> **Status:** **implemented and complete** (2026-07-09). The Tiny-Heat proving
+> ground, sanity harness, and supporting tests landed with the A0–A2 implementation.
+> Retained because later Direction A gates use this bed and its assumptions.
 
 ## 1. Purpose
 

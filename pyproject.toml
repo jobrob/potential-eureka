@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "heat-game"
 version = "0.1.0"
 description = "HEAT: Pedal to the Metal board game simulation engine and AI"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "tqdm",
@@ -32,7 +32,7 @@ markers = [
 ]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 strict = true
 
 [tool.ruff]

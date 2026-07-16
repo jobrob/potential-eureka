@@ -1,6 +1,6 @@
 # A2 findings — multi-seat harness green; first non-collapsing self-play
 
-> **Status:** findings (2026-07-09). Results of implementing + validating Sprint A2
+> **Status:** **completed findings** (2026-07-09). Results of implementing + validating Sprint A2
 > ([design](A2-multiseat-selfplay.md)), plus an exploratory pure-self-play probe that
 > pulls the core A5 question forward.
 

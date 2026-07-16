@@ -1,9 +1,8 @@
 # Sprint A3 — Legal-action dot-product head
 
-> **Status:** design (2026-07-09). Detailed design for Sprint A3 of the
-> [Direction A sprint plan](sprint-plan.md). Implementable spec; read this plus
-> `src/heat/ml/selfplay/{policy,ppo,multiseat}.py`, `src/heat/ml/action_codec.py`,
-> and `src/heat/ml/spaces.py` (§ action layout) before starting.
+> **Status:** **implemented and complete; gate G3 failed** (2026-07-09). The
+> dot-product head remains available but default-off; the masked head remains the
+> Direction A default. Retained because the failed gate is an active design constraint.
 
 ## 1. Purpose
 

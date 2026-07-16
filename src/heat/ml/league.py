@@ -31,10 +31,10 @@ mitigation) and never the live League.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 import numpy as np
+import numpy.typing as npt
 
 #: Win-rate (learner's wins / games) attributed to an entry that has not yet been
 #: played enough to estimate -- a neutral prior so new snapshots get sampled.
@@ -96,7 +96,7 @@ def _pfsp_weight(learner_win_rate: float, *, mode: str, exponent: float) -> floa
     if mode in ("even", "variance"):
         return wr * (1.0 - wr)
     if mode == "hard":
-        return (1.0 - wr) ** exponent
+        return float((1.0 - wr) ** exponent)
     raise ValueError(f"unknown PFSP mode {mode!r} (expected 'even'/'variance'/'hard')")
 
 
@@ -271,7 +271,9 @@ class League:
         probs = self._project_to_clamped_simplex(probs)
         return {e.path: float(p) for e, p in zip(self.entries, probs)}
 
-    def _project_to_clamped_simplex(self, probs: np.ndarray) -> np.ndarray:
+    def _project_to_clamped_simplex(
+        self, probs: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
         """Renormalize ``probs`` to sum 1 while honoring ``[p_min, p_max]``.
 
         A single clamp-then-renormalize pass does NOT guarantee the bounds hold
@@ -290,7 +292,7 @@ class League:
         p_max = min(1.0, self.p_max) if self.p_max > 0 else 1.0
         # Guard against an infeasible/degenerate band -> fall back to uniform-clip.
         if p_min > p_max or n == 0:
-            return np.clip(probs, 0.0, 1.0)
+            return np.asarray(np.clip(probs, 0.0, 1.0), dtype=np.float64)
 
         out = probs.astype(np.float64).copy()
         free = np.ones(n, dtype=bool)

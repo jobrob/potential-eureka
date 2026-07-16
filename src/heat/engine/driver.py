@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Generator
+from typing import Generator, cast
 
 from heat.models.cards import Card
 from heat.models.game_state import GameEvent, GameState, Phase
@@ -73,6 +73,39 @@ class Decision:
 RoundDriver = Generator[Decision, object, list[GameEvent]]
 
 
+def simultaneous_decisions(
+    state: GameState, kind: DecisionKind
+) -> list[Decision]:
+    """Return the yielded choices for one unapplied simultaneous phase.
+
+    The helper is intentionally read-only.  Both the round driver and batched
+    rollout collectors use it so active-player filtering, seat order, and legal
+    payload construction cannot drift between the scalar and batched paths.
+    Spun-out gear choices are omitted because the driver resolves them without
+    yielding a decision.
+    """
+    if kind is DecisionKind.GEAR:
+        return [
+            Decision(
+                DecisionKind.GEAR,
+                player.player_id,
+                rules.legal_gear_shifts(player.gear, player.heat_available),
+            )
+            for player in state.active_players
+            if not player.spun_out
+        ]
+    if kind is DecisionKind.CARDS:
+        return [
+            Decision(
+                DecisionKind.CARDS,
+                player.player_id,
+                rules.legal_card_plays(player.hand, player.gear),
+            )
+            for player in state.active_players
+        ]
+    raise ValueError(f"{kind.value} is not a simultaneous decision kind")
+
+
 def run_round_driver(state: GameState) -> RoundDriver:
     """Run ONE round as a pausable generator (see module docstring)."""
     events: list[GameEvent] = []
@@ -86,19 +119,16 @@ def run_round_driver(state: GameState) -> RoundDriver:
     #    BEFORE applying the phase (no peeking at others' moves).
     gear_decisions: dict[int, tuple[int, int]] = {}
     for player in state.active_players:
-        pid = player.player_id
         if player.spun_out:
-            gear_decisions[pid] = (1, 0)  # Forced to gear 1, no cost
-        else:
-            legal_gears = rules.legal_gear_shifts(
-                player.gear, player.heat_available
+            gear_decisions[player.player_id] = (1, 0)
+    for decision in simultaneous_decisions(state, DecisionKind.GEAR):
+        legal_gears = cast(list[tuple[int, int]], decision.legal)
+        chosen = yield decision
+        if chosen not in legal_gears:
+            raise ValueError(
+                f"Agent {decision.player_id} chose illegal gear shift {chosen}"
             )
-            chosen = yield Decision(DecisionKind.GEAR, pid, legal_gears)
-            if chosen not in legal_gears:
-                raise ValueError(
-                    f"Agent {pid} chose illegal gear shift {chosen}"
-                )
-            gear_decisions[pid] = chosen
+        gear_decisions[decision.player_id] = chosen
     events += phase_shift_gears(state, gear_decisions)
 
     # Capture each active player's hand BEFORE playing cards
@@ -111,16 +141,12 @@ def run_round_driver(state: GameState) -> RoundDriver:
 
     # 2. PLAY CARDS (simultaneous): collect all, then apply.
     card_decisions: dict[int, tuple[Card, ...]] = {}
-    for player in state.active_players:
-        pid = player.player_id
-        legal_plays = rules.legal_card_plays(player.hand, player.gear)
-        chosen_cards = yield Decision(DecisionKind.CARDS, pid, legal_plays)
+    for decision in simultaneous_decisions(state, DecisionKind.CARDS):
+        legal_plays = cast(list[tuple[Card, ...]], decision.legal)
+        chosen_cards = yield decision
         if chosen_cards not in legal_plays:
-            raise ValueError(f"Agent {pid} chose illegal card play")
-        # Detect cluttered hand
-        if rules.is_cluttered_hand(player.hand, player.gear):
-            player.cluttered = True
-        card_decisions[pid] = chosen_cards
+            raise ValueError(f"Agent {decision.player_id} chose illegal card play")
+        card_decisions[decision.player_id] = cast(tuple[Card, ...], chosen_cards)
     events += phase_play_cards(state, card_decisions)
 
     # === PER-PLAYER SEQUENTIAL STEPS (front-to-back) ===
@@ -187,8 +213,9 @@ def run_round_driver(state: GameState) -> RoundDriver:
             list(state.active_players),
             state.starting_player_count,
         )
-        react_decision = yield Decision(
-            DecisionKind.REACT, pid, react_options
+        react_decision = cast(
+            ReactDecision,
+            (yield Decision(DecisionKind.REACT, pid, react_options)),
         )
         events += step_react(state, player, react_decision)
         if player.finished:
@@ -201,7 +228,10 @@ def run_round_driver(state: GameState) -> RoundDriver:
             list(state.active_players),
             state.track,
         ):
-            take_slip = yield Decision(DecisionKind.SLIPSTREAM, pid, True)
+            take_slip = cast(
+                bool,
+                (yield Decision(DecisionKind.SLIPSTREAM, pid, True)),
+            )
             events += step_slipstream(state, player, take_slip)
 
         # Step 7: CHECK CORNER
@@ -210,8 +240,9 @@ def run_round_driver(state: GameState) -> RoundDriver:
         # Step 8: DISCARD (agent decision)
         discardable = rules.legal_discards(player)
         if discardable:
-            to_discard = yield Decision(
-                DecisionKind.DISCARD, pid, discardable
+            to_discard = cast(
+                list[Card],
+                (yield Decision(DecisionKind.DISCARD, pid, discardable)),
             )
             events += step_discard(state, player, to_discard)
 

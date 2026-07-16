@@ -31,7 +31,9 @@ import dataclasses
 import json
 import os
 import subprocess
-from dataclasses import dataclass, field
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Any, cast
 
 import numpy as np
 
@@ -51,11 +53,9 @@ from heat.models.game_state import GameState
 from heat.models.track import Track
 from heat.ml import spaces
 from heat.ml.action_codec import decode_action, legal_action_mask
-from heat.ml.env import HeatEnv, TrackSource, _default_track
+from heat.ml.env import OpponentSpec, TrackSource, _default_track
 from heat.tracks.generator import (
-    CurriculumSchedule,
     StepAwareTrackSampler,
-    TrackGenParams,
     TrackSampler,
     default_curriculum_schedule,
     generate_track,
@@ -69,6 +69,7 @@ from heat.ml.model import (
     resolve_device,
 )
 from heat.ml.vec import make_vec_env
+from heat.simulation.runner import AgentFactory
 from heat.simulation.stats import wilson_interval
 
 #: Suffix for the SB3 archive and the JSON sidecar.
@@ -127,7 +128,7 @@ def _git_sha() -> str | None:
     return out.stdout.strip() or None
 
 
-def _dataclass_to_dict(obj) -> dict | None:
+def _dataclass_to_dict(obj: object) -> dict[str, Any] | None:
     """Serialize a dataclass instance to a plain JSON-able dict, or ``None``."""
     if obj is None:
         return None
@@ -145,8 +146,8 @@ def save_checkpoint(
     seed: int | None = None,
     ppo_config: PPOConfig | None = None,
     curriculum_config: "CurriculumConfig | None" = None,
-    track_config: dict | None = None,
-    normalize: dict | None = None,
+    track_config: dict[str, Any] | None = None,
+    normalize: dict[str, Any] | None = None,
     vec_env: VecEnv | None = None,
 ) -> str:
     """Save ``model`` to ``path`` (SB3 zip) plus the ``.meta.json`` sidecar.
@@ -168,7 +169,7 @@ def save_checkpoint(
     """
     model.save(path)
 
-    meta: dict = {
+    meta: dict[str, Any] = {
         "obs_dim": spaces.OBS_DIM,
         "action_dim": spaces.ACTION_DIM,
         "codec_version": spaces.CODEC_VERSION,
@@ -193,10 +194,10 @@ def save_checkpoint(
     return sidecar
 
 
-def load_meta(path: str) -> dict:
+def load_meta(path: str) -> dict[str, Any]:
     """Load and return the checkpoint sidecar metadata for ``path``."""
     with open(meta_path_for(path), "r", encoding="utf-8") as fh:
-        return json.load(fh)
+        return cast(dict[str, Any], json.load(fh))
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +241,7 @@ class FrozenSnapshotAgent(BaseAgent):
             self._model = MaskablePPO.load(self.model_path, device="cpu")
         return self._model
 
-    def __getstate__(self) -> dict:
+    def __getstate__(self) -> dict[str, object]:
         # Never pickle the heavy SB3 model; reload from path in the worker.
         state = self.__dict__.copy()
         state["_model"] = None
@@ -488,7 +489,7 @@ class _StrongHeuristicFactory:
         return StrongHeuristicAgent(strength=self.strength)
 
 
-def _broadened_strong_pool(n_opp: int) -> list:
+def _broadened_strong_pool(n_opp: int) -> list[OpponentSpec]:
     """A varied strong Phase-1 opponent pool of exactly ``n_opp`` entries (Idea 6).
 
     Cycles the template ``[Strong(3), Strong(2), Heuristic, Random]`` to fill the
@@ -496,7 +497,7 @@ def _broadened_strong_pool(n_opp: int) -> list:
     exploration pressure rather than a single repeated class. Each entry is a
     zero-arg picklable callable (a class or :class:`_StrongHeuristicFactory`).
     """
-    template: list = [
+    template: list[OpponentSpec] = [
         _StrongHeuristicFactory(3),
         _StrongHeuristicFactory(2),
         HeuristicAgent,
@@ -631,7 +632,7 @@ def sprint_8c_curriculum(
 
 def _scripted_opponents(
     num_players: int, *, use_strong: bool = False, broaden_mix: bool = False
-) -> list:
+) -> list[OpponentSpec]:
     """Phase-1 opponent factories.
 
     Default pool is mostly :class:`HeuristicAgent` with one :class:`RandomAgent`
@@ -653,13 +654,13 @@ def _scripted_opponents(
     if use_strong and broaden_mix:
         return _broadened_strong_pool(n_opp)
     base: type[BaseAgent] = StrongHeuristicAgent if use_strong else HeuristicAgent
-    pool: list = [base] * n_opp
+    pool: list[OpponentSpec] = [base] * n_opp
     if n_opp >= 1:
         pool[-1] = RandomAgent  # inject some exploration pressure
     return pool
 
 
-def _mixed_strength_pool(num_players: int) -> list:
+def _mixed_strength_pool(num_players: int) -> list[OpponentSpec]:
     """A "mixed" opponent rung between weak and the broadened strong pool (8C).
 
     Cycles the template ``[Strong(2), Heuristic, Random]`` to fill exactly
@@ -670,7 +671,7 @@ def _mixed_strength_pool(num_players: int) -> list:
     ``SubprocVecEnv`` spawn unchanged.
     """
     n_opp = num_players - 1
-    template: list = [
+    template: list[OpponentSpec] = [
         _StrongHeuristicFactory(2),
         HeuristicAgent,
         RandomAgent,
@@ -710,7 +711,7 @@ class OpponentSchedule:
 
     stages: tuple[OpponentStage, ...]
 
-    def pool_for(self, num_players: int, stage: int) -> list:
+    def pool_for(self, num_players: int, stage: int) -> list[OpponentSpec]:
         """Resolve the opponent factory list for ``stage`` (clamped to range).
 
         Out-of-range indices clamp to the final stage so a phase list with more
@@ -796,9 +797,9 @@ class _SnapshotFactory:
 
 def _build_vec_env(
     *,
-    track: Track | None,
+    track: TrackSource | None,
     num_players: int,
-    opponents,
+    opponents: OpponentSpec | Sequence[OpponentSpec] | None,
     learner_id: int,
     config: PPOConfig,
     curriculum: CurriculumConfig,
@@ -848,7 +849,7 @@ def _build_vec_env(
     return venv
 
 
-def _normalize_meta(curriculum: CurriculumConfig) -> dict | None:
+def _normalize_meta(curriculum: CurriculumConfig) -> dict[str, Any] | None:
     """The ``normalize`` meta block (§3.3) describing the stats sidecar, or None."""
     if not (curriculum.normalize_reward or curriculum.normalize_obs):
         return None
@@ -1044,7 +1045,7 @@ def _pooled_win_counts(
     per_track_games: int,
     num_players: int,
     seed: int,
-    opponent_factory,
+    opponent_factory: AgentFactory | None,
 ) -> tuple[int, int]:
     """Pool ``(wins, games)`` for the MLAgent across the held-out gate track(s).
 
@@ -1084,7 +1085,7 @@ def _gate_score(
     track: TrackSource | None,
     seed: int,
     vec_env: VecEnv | None = None,
-    normalize: dict | None = None,
+    normalize: dict[str, Any] | None = None,
 ) -> GateResult:
     """Evaluate the live model on the held-out gate (Ideas 8/9; §2.1 fallback).
 
@@ -1188,7 +1189,7 @@ def train_self_play(
     num_players: int = 4,
     track: TrackSource | None = None,
     learner_id: int = 0,
-    gate_fn=None,
+    gate_fn: Callable[[MaskablePPO], float] | None = None,
     warm_start_path: str | None = None,
     phases: "list[TrainingPhase] | None" = None,
 ) -> tuple[MaskablePPO, str]:
@@ -1349,7 +1350,6 @@ def train_self_play(
     # sampler (process-safe staged rebuilds). The gate's ``track_source`` keeps
     # the original sampler -- gating always uses the fixed full-difficulty
     # held-out set (``_gate_tracks``), so the gate is comparable across stages.
-    use_curriculum = isinstance(track_source, StepAwareTrackSampler)
     cur_stage = 0
     cur_horizon = curriculum.curriculum_horizon_steps
     cur_stages = max(1, curriculum.curriculum_stages)
@@ -1371,7 +1371,7 @@ def train_self_play(
 
         # Advance the curriculum: if this chunk crossed a stage boundary, rebuild
         # the training env with a harder step-pinned sampler and swap it in.
-        if use_curriculum:
+        if isinstance(track_source, StepAwareTrackSampler):
             new_stage = _curriculum_stage_index(
                 total_so_far, cur_horizon, cur_stages
             )
@@ -1530,7 +1530,11 @@ def train_self_play(
         lr = base_lr * (curriculum.phase2_lr_scale if warmup else 1.0)
         ent = config.ent_coef * (curriculum.phase2_ent_scale if warmup else 1.0)
         model.learning_rate = lr
-        model.lr_schedule = (lambda _progress, _lr=lr: _lr)
+        def constant_lr(_progress: float, value: float = lr) -> float:
+            """Return the learning rate fixed for this curriculum chunk."""
+            return value
+
+        model.lr_schedule = constant_lr
         model.ent_coef = ent
 
         chunk = min(step, remaining)
@@ -1659,7 +1663,7 @@ def _train_phases(
     curriculum: CurriculumConfig,
     track: TrackSource | None,
     learner_id: int,
-    gate_fn=None,
+    gate_fn: Callable[[MaskablePPO], float] | None = None,
     warm_start_path: str | None = None,
 ) -> tuple[MaskablePPO, str]:
     """Drive an ordered :class:`TrainingPhase` list (Sprint 8C; §5, §6).
@@ -1924,7 +1928,7 @@ def _mixed_opponent_pool(
     *,
     deterministic: bool = False,
     scripted_cls: type[BaseAgent] = HeuristicAgent,
-):
+) -> list[OpponentSpec]:
     """Build an opponent-spec list mixing scripted agents and frozen snapshots.
 
     Snapshot seats are :class:`_SnapshotFactory` instances bound to a path
@@ -1938,7 +1942,7 @@ def _mixed_opponent_pool(
     n_opp = num_players - 1
     n_snap = min(n_opp, int(round(n_opp * snapshot_mix))) if snapshot_paths else 0
 
-    specs: list = []
+    specs: list[OpponentSpec] = []
     for i in range(n_snap):
         # Spread across distinct snapshots (newest-first) for opponent variety.
         path = snapshot_paths[-(1 + (i % len(snapshot_paths)))]
@@ -1973,7 +1977,7 @@ def _league_opponent_pool(
     *,
     deterministic: bool = False,
     scripted_cls: type[BaseAgent] = HeuristicAgent,
-) -> tuple[list, list[str]]:
+) -> tuple[list[OpponentSpec], list[str]]:
     """Build the Phase-2 opponent specs with snapshot seats chosen by the league.
 
     The same seat count as :func:`_mixed_opponent_pool` (so the §2.4 ramp is
@@ -1991,7 +1995,7 @@ def _league_opponent_pool(
     n_snap = _n_snapshot_seats(num_players, snapshot_mix, len(league))
 
     sampled_paths = league.sample(n_snap, rng)
-    specs: list = [
+    specs: list[OpponentSpec] = [
         _SnapshotFactory(path, deterministic=deterministic) for path in sampled_paths
     ]
     specs.extend(scripted_cls for _ in range(n_opp - len(sampled_paths)))

@@ -1,8 +1,8 @@
 # Sprint A0 — Substrate decision + self-play training skeleton
 
-> **Status:** design (2026-06-24). Detailed design for Sprint A0 of the
-> [Direction A sprint plan](sprint-plan.md). Implementable spec; the developer should
-> read this plus `src/heat/ml/{env,model,action_codec}.py` before starting.
+> **Status:** **implemented and complete** (2026-06-24). The custom PPO substrate
+> was selected, the training skeleton landed, and gate G2 passed. Retained as the
+> decision record for later Direction A work.
 
 ## 1. Purpose
 

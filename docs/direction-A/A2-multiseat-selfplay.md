@@ -1,9 +1,8 @@
 # Sprint A2 — N-agent self-play harness
 
-> **Status:** design (2026-07-09). Detailed design for Sprint A2 of the
-> [Direction A sprint plan](sprint-plan.md). Implementable spec; read this plus
-> `src/heat/ml/selfplay/{ppo,buffer,policy}.py`, `src/heat/ml/env.py`,
-> `src/heat/engine/driver.py`, and `src/heat/ml/action_codec.py` before starting.
+> **Status:** **implemented and complete** (2026-07-09); all A2 gates passed.
+> Retained as the rollout and per-seat credit-assignment contract used by later
+> Direction A work. See [A2 findings](A2-findings.md) for measured results.
 
 ## 1. Purpose
 

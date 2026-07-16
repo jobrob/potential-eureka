@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="A8 H1 deterministic replay diagnostic for strong-heuristic losses on generated tracks.">
+  <title>A8 H1 — Strong-heuristic loss replay</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Repair completed · not promoted</span>
+      <h1>The spin lock is fixed; the heuristic is still not a strong ruler.</h1>
+      <p class="hero-copy">The narrow safety repair removes every repeated recovery lock in the diagnostic sample and shortens the pathological races. A fresh strength gate still fails at two and four seats, so the repaired agent remains a useful safety fix rather than StrongHeuristicV2.</p>
+      <p><strong>Direction A · Sprint A8 · heuristic diagnostic and repair</strong><br><span class="muted">Fixed development bands · updated 14 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="H1 decision">
+      <span class="board-label">Repair decision</span>
+      <strong>Keep the safety fix.<br>Do not freeze V2.</strong>
+      <p>The local defect is repaired, but the candidate did not clear the fresh multi-seat strength gate.</p>
+      <div class="palette-dots" aria-label="Document colour palette"><i></i><i></i><i></i><i></i><i></i></div>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#summary">Decision</a>
+      <a href="#design">Design</a>
+      <a href="#replay">Replay support</a>
+      <a href="#screen">Screen</a>
+      <a href="#signals">Loss signals</a>
+      <a href="#diagnosis">Diagnosis</a>
+      <a href="#next">Next gate</a>
+      <a href="#repair-result">Repair result</a>
+      <a href="#limits">Limits</a>
+      <a href="#verification">Verification</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="summary">
+        <span class="section-kicker">Executive decision</span>
+        <h2>H1 found a local failure worth repairing—but not a single explanation for every loss.</h2>
+        <p class="lede">The fixed screen confirms that the current strong heuristic is not a reliable step above <code>HeuristicAgent</code> on generated tracks. Replays show widespread congestion and conservative gear differences, but the most damaging auditable defect is repeated spinning at tight corners.</p>
+        <div class="hybrid-stats" aria-label="Headline H1 evidence">
+          <div class="hybrid-stat"><span>Fixed screen</span><strong>108 games</strong><small>36 at each seat count</small></div>
+          <div class="hybrid-stat"><span>Verified replays</span><strong>30 / 30</strong><small>same finish order</small></div>
+          <div class="hybrid-stat"><span>Unsafe-corner losses</span><strong>13 / 30</strong><small>all seat counts</small></div>
+          <div class="hybrid-stat"><span>Spin events</span><strong>202</strong><small>recovery stalls dominate</small></div>
+        </div>
+        <div class="decision-banner"><strong>Decision</strong>Keep the implemented guard that rejects a truly guaranteed spin when a legal non-guaranteed plan exists. It fixes the selected failure without a screen regression. Do not promote it as a stronger evaluation rung: the fresh two- and four-seat confidence gates failed.</div>
+      </section>
+
+      <section id="design">
+        <span class="section-kicker">01 · Predeclared design</span>
+        <h2>The sample and decision rule were fixed before the run.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Item</th><th>Declaration</th></tr></thead>
+            <tbody>
+              <tr><td>Hypothesis</td><td>A small number of recurring generated-track decision failures explains most strong-vs-weak underperformance.</td></tr>
+              <tr><td>Prior confidence</td><td>Medium, approximately 65%.</td></tr>
+              <tr><td>Development band</td><td>Direct generated-track seeds <code>700000–700011</code>, disjoint from the consumed <code>900000+</code> ML validation band.</td></tr>
+              <tr><td>Screen</td><td>12 tracks × 3 deterministic games × 2, 4, and 6 seats; the strong agent rotates through starting seats.</td></tr>
+              <tr><td>Replay sample</td><td>The first 10 losses per seat count in fixed track/game-seed order; no hand selection after viewing outcomes.</td></tr>
+              <tr><td>Common-signal threshold</td><td>Present in at least 40% of replays and in at least two seat counts.</td></tr>
+              <tr><td>Engineering scope</td><td>One replay/diagnostic script and focused tests; estimated 150–300 lines before implementation.</td></tr>
+              <tr><td>Compute scope</td><td>Expected under five minutes, hard-capped at ten minutes, with per-seat and five-replay progress logs.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="replay">
+        <span class="section-kicker">02 · Replay support</span>
+        <h2>The project had replay ingredients, not a diagnostic replay.</h2>
+        <p>The engine already had deterministic game seeds, an event log, a human formatter, and internal action replay for MCTS. <code>heat.engine.events</code> still described replay serialization as future work, and the event log did not preserve agent decision alternatives. Nothing useful had been removed from the current history; the general serialized replay anticipated by the module was simply never implemented.</p>
+        <p>H1 adds the smallest missing layer in <a href="../../experiments/diag_h1_heuristic.py"><code>experiments/diag_h1_heuristic.py</code></a>. Every race is addressed by four primitives—seat count, track seed, game seed, and strong seat. Selected losses are rerun from those coordinates. A wrapper records the strong action, a weak-agent shadow action from the same public state, and enough context to classify the decision. The replay aborts if its finish order differs from the screen.</p>
+        <div class="config-panel" aria-label="H1 replay flow">
+          <div><span>1 · Screen</span><strong>Fixed seed coordinate<br>logging off</strong></div>
+          <div><span>2 · Select</span><strong>First ten losses<br>per seat count</strong></div>
+          <div><span>3 · Replay</span><strong>Same coordinate<br>decision trace on</strong></div>
+          <div><span>4 · Verify</span><strong>Finish order equal<br>classify signals</strong></div>
+        </div>
+        <p>The machine-readable trace is written to <code>runs/a8_h1_diagnostic.json</code>, which remains generated evidence and is not intended for source control.</p>
+      </section>
+
+      <section id="screen">
+        <span class="section-kicker">03 · Fixed screen</span>
+        <h2>The supposed strong rung weakens as the field grows.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Seats</th><th>Games</th><th>Strong wins</th><th>Strong losses</th><th>Win rate</th><th>Longest game</th></tr></thead>
+            <tbody>
+              <tr><td>2</td><td>36</td><td>17</td><td>19</td><td>47.2%</td><td>75 rounds</td></tr>
+              <tr><td>4</td><td>36</td><td>10</td><td>26</td><td>27.8%</td><td>140 rounds</td></tr>
+              <tr><td>6</td><td>36</td><td>4</td><td>32</td><td>11.1%</td><td>48 rounds</td></tr>
+              <tr><td><strong>All</strong></td><td><strong>108</strong></td><td><strong>31</strong></td><td><strong>77</strong></td><td><strong>28.7%</strong></td><td>—</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>This is a diagnostic development band, not a new ML test claim. The seat-count pattern agrees with A7's concern that the “strong” opponent is not a calibrated difficulty rung on generated tracks.</p>
+      </section>
+
+      <section id="signals">
+        <span class="section-kicker">04 · Classified loss sample</span>
+        <h2>Four signals clear the frequency threshold, but they do not have equal evidential weight.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Signal</th><th>2 seats</th><th>4 seats</th><th>6 seats</th><th>All losses</th><th>Interpretation</th></tr></thead>
+            <tbody>
+              <tr><td>Late lower gear than weak shadow</td><td>9/10</td><td>4/10</td><td>8/10</td><td>21/30</td><td>Recurring difference, not proven excess conservation.</td></tr>
+              <tr><td>Traffic-blocked card movement</td><td>2/10</td><td>10/10</td><td>9/10</td><td>21/30</td><td>Multiplayer symptom; simultaneous opponent movement complicates a local fix.</td></tr>
+              <tr><td>Declined slipstream taken by weak shadow</td><td>0/10</td><td>6/10</td><td>10/10</td><td>16/30</td><td>Multiplayer divergence; the shadow choice is not a counterfactual outcome.</td></tr>
+              <tr><td class="metric-bad">Strong-agent spin-out</td><td>4/10</td><td>2/10</td><td>7/10</td><td class="metric-bad">13/30</td><td>Direct rules outcome with a local planner decision immediately upstream.</td></tr>
+              <tr><td>Unclassified</td><td>1/10</td><td>0/10</td><td>0/10</td><td>1/30</td><td>The classifier does not force every loss into a preferred story.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="result-note"><strong>The “heat hoarding” hypothesis did not survive decomposition.</strong> There were zero late boost refusals and zero late slower-card choices versus the weak shadow. The 21 late-race differences were all lower gears; ten ended with no usable heat and seven with one heat. Treating these as excess conservation would overstate the trace.</div>
+      </section>
+
+      <section id="diagnosis">
+        <span class="section-kicker">05 · Decisive local diagnosis</span>
+        <h2>Limit-1 corners can trap the planner in repeated certain spins.</h2>
+        <p>Thirteen replayed losses contain a strong-agent spin, spanning 2, 4, and 6 seats. They contain 202 spin events in total: 66 at two seats, 89 at four, and 47 at six. Five races spin 11–88 times. This is not ordinary risk variance; it is a recovery failure that stretches races to 48–140 rounds.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Track</th><th>Affected replay losses</th><th>Spin events</th><th>Relevant geometry</th></tr></thead>
+            <tbody>
+              <tr><td><code>700004</code></td><td>3</td><td class="metric-bad">151</td><td>60 spaces; four corners; two limit-1 corners at spaces 18 and 24.</td></tr>
+              <tr><td><code>700002</code></td><td>3</td><td>24</td><td>68 spaces; four corners; limit-1 corners at spaces 11 and 25.</td></tr>
+              <tr><td><code>700001</code></td><td>2</td><td>16</td><td>74 spaces; six corners; tight recovery states recur in the six-seat sample.</td></tr>
+              <tr><td><code>700000</code></td><td>4</td><td>10</td><td>83 spaces; five corners; the failure appears but usually does not lock.</td></tr>
+              <tr><td><code>700003</code></td><td>1</td><td>1</td><td>Single isolated spin, not a recovery stall.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 class="table-title">Representative deterministic replay</h3>
+        <div class="config-panel" aria-label="Representative replay coordinate and trace">
+          <div><span>Coordinate</span><strong>4 seats · track <code>700004</code><br>game <code>750012</code> · strong seat 0</strong></div>
+          <div><span>Outcome</span><strong>4th place · 140 rounds<br>88 strong-agent spins</strong></div>
+          <div><span>First lock</span><strong>Limit-1 corner at 18<br>heat falls to zero</strong></div>
+          <div><span>Observed choices</span><strong>Strong repeatedly plays speed 3–4<br>weak shadow often selects Stress</strong></div>
+        </div>
+        <p>The move evaluator gives a likely spin a large finite penalty, but it still credits intended progress. In a zero-heat recovery state that permits the planner to prefer a high card even though the engine will move the car back before the corner. The next round starts in nearly the same state, so the mistake repeats. The repair test below confirms this local causal account.</p>
+      </section>
+
+      <section id="next">
+        <span class="section-kicker">06 · Implemented follow-up</span>
+        <h2>A safety guard was tested before touching weights or multiplayer strategy.</h2>
+        <ol class="step-line" aria-label="Implemented repair gate">
+          <li><strong>Detect</strong><br>plays that guarantee a spin even at minimum Stress speed</li>
+          <li><strong>Filter</strong><br>only when a legal non-spinning play exists</li>
+          <li><strong>Replay</strong><br>the five repeated-spin coordinates</li>
+          <li><strong>Gate</strong><br>fresh development games at 2, 4, and 6 seats</li>
+        </ol>
+        <p>The correction should be a planner safety invariant, not a global increase to the spin penalty. A weight change can create new conservatism and still leaves certain spins available as an argmax. The focused gate should require zero repeated-spin locks, no increase in total spins, identical legality and determinism, and no material loss in the unchanged 108-game screen.</p>
+        <div class="result-note">The initial shortcut—treating evaluator <code>p_spinout == 1</code> as certainty—was too broad because Stress can resolve to a lower speed. The implemented guard instead evaluates the lowest possible speed from the available Basic cards, preserving legal Stress recovery choices.</div>
+      </section>
+
+      <section id="repair-result">
+        <span class="section-kicker">07 · Repair evaluation</span>
+        <h2>The local failure is gone, but the global strength bar is not met.</h2>
+        <p><strong>Hypothesis:</strong> one narrow guaranteed-spin guard would eliminate the selected recovery locks without weakening the unchanged screen. Confidence was high for the five fixtures and medium for general strength. Engineering scope was one optional planner guard plus focused tests; compute scope was the 108-game screen and a fresh 300-game development gate, with deterministic progress output and a ten-minute cap.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Measure</th><th>Legacy strong</th><th>Repaired strong</th><th>Result</th></tr></thead>
+            <tbody>
+              <tr><td>Repeated locks in sampled losses</td><td class="metric-bad">9</td><td class="metric-good">0</td><td class="metric-good">Local gate passed</td></tr>
+              <tr><td>Spin events in sampled losses</td><td>202</td><td>13</td><td class="metric-good">Large reduction</td></tr>
+              <tr><td>Wins on unchanged 108-game screen</td><td>31 / 108</td><td>37 / 108</td><td class="metric-good">No regression</td></tr>
+              <tr><td>Longest game at 2 / 4 / 6 seats</td><td>75 / 140 / 48</td><td>36 / 28 / 42</td><td class="metric-good">Pathological races removed</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 class="table-title">Fresh development-band strength gate</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Seats</th><th>Wins</th><th>Win rate</th><th>95% Wilson lower bound</th><th>Chance bar</th><th>Gate</th></tr></thead>
+            <tbody>
+              <tr><td>2</td><td>46 / 100</td><td>46.0%</td><td>0.366</td><td>0.500</td><td class="metric-bad">Fail</td></tr>
+              <tr><td>4</td><td>28 / 100</td><td>28.0%</td><td>0.201</td><td>0.250</td><td class="metric-bad">Fail</td></tr>
+              <tr><td>6</td><td>24 / 100</td><td>24.0%</td><td>0.167</td><td>0.167</td><td class="metric-good">Pass</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="decision-banner"><strong>Repair decision</strong>Keep the guard enabled as a safety correction, with an explicit legacy mode for matched historical evaluation. Do not name or freeze a StrongHeuristicV2, and do not replace the existing A8 ruler until a candidate clears every seat-count strength gate.</div>
+      </section>
+
+      <section id="limits">
+        <span class="section-kicker">08 · Limits</span>
+        <h2>The repair is proven locally; broader heuristic quality remains open.</h2>
+        <ul class="open-list">
+          <li><strong>Loss-only sample.</strong><br>The classifier was applied to fixed losses, not a matched set of wins. Frequency identifies recurring failure candidates, not causal effect size.</li>
+          <li><strong>Shadow choices are contrasts.</strong><br>The weak agent's action from the same public state does not replay the full race under that alternative.</li>
+          <li><strong>Signals overlap.</strong><br>Congestion, a declined slipstream, lower gear, and a spin can occur in one race. Counts must not be added as independent explanations.</li>
+          <li><strong>Development data only.</strong><br>The <code>700000+</code> band is now heuristic-development data. It must not become the A8 untouched ML final test.</li>
+          <li><strong>No broad rewrite justified.</strong><br>Traffic prediction and slipstream valuation remain possible later investigations, but H1 did not isolate a comparably small, causal correction for them.</li>
+        </ul>
+      </section>
+
+      <section id="verification">
+        <span class="section-kicker">09 · Verification</span>
+        <h2>The diagnostic and repair are reproducible and narrowly tested.</h2>
+        <div class="file-grid">
+          <div class="file-card"><a href="../../experiments/diag_h1_heuristic.py"><code>experiments/diag_h1_heuristic.py</code></a>Fixed screen, deterministic loss replay, shadow trace, classification, and JSON output.</div>
+          <div class="file-card"><a href="../../tests/test_h1_heuristic_diagnostic.py"><code>tests/test_h1_heuristic_diagnostic.py</code></a>Fixed coordinates, trace determinism, and signal classification.</div>
+          <div class="file-card"><code>runs/a8_h1_diagnostic.json</code>Generated full decision traces and per-race evidence; excluded from committed artifacts.</div>
+        </div>
+        <div class="verification-panel"><strong>Observed and verified</strong><br>The original 108-game screen plus 30 selected-loss replays completed in <strong>2.9 seconds</strong>. The repaired screen and fresh 300-game gate also completed within the ten-minute cap. The five known recovery fixtures now produce at most one spin each. Across the final repair and S2 implementation, <strong>42 focused strong-heuristic, H1, and A8 tests passed</strong>; Ruff and strict mypy were clean.</div>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer"><strong>Direction A · Sprint A8 · H1 heuristic diagnostic</strong></footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

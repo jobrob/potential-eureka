@@ -24,17 +24,144 @@ exactly these shapes and return tuples, so the trainer is untouched.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
 from torch.distributions import Categorical
 
 from heat.ml.selfplay.action_features import ACTION_FEAT_DIM, action_feature_table
-from heat.ml.spaces import ACTION_DIM, OBS_DIM
+from heat.ml.spaces import (
+    ACTION_DIM,
+    BLOCK_HAND_HISTOGRAM,
+    OBS_DIM,
+)
 
 if TYPE_CHECKING:
     from heat.ml.selfplay.ppo import A0Config
+
+
+CARD_EMBED_DIM = 32
+"""Width of A4's learned card-token embeddings."""
+
+
+class StructuredObservationEncoder(nn.Module):
+    """A4 encoder separating the private own hand from public state.
+
+    The frozen observation contract already has the information boundary A4
+    needs: indices ``0:8`` are the acting seat's private hand histogram and the
+    remainder contains own/public state, including only public opponent fields.
+    The histogram stores counts divided by seven.  We recover those counts and
+    use them as multiplicities in attention over eight learned card-token
+    embeddings.  Adding ``log(count)`` to a token's attention score is exactly
+    equivalent to expanding that token into ``count`` identical card slots, but
+    avoids a per-batch ragged representation.
+
+    The public block is encoded by its own MLP.  Hand and public embeddings are
+    fused only after their separate encoders, preserving a visible architectural
+    boundary that the leakage tests can audit.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int = OBS_DIM,
+        hidden_sizes: tuple[int, ...] = (256, 256),
+        *,
+        card_embed_dim: int = CARD_EMBED_DIM,
+    ) -> None:
+        super().__init__()
+        if obs_dim < BLOCK_HAND_HISTOGRAM:
+            raise ValueError(
+                f"obs_dim {obs_dim} is smaller than hand block "
+                f"{BLOCK_HAND_HISTOGRAM}"
+            )
+        if not hidden_sizes:
+            raise ValueError("structured encoder requires at least one hidden size")
+
+        self.obs_dim = obs_dim
+        self.output_dim = hidden_sizes[-1]
+        self.card_embeddings = nn.Embedding(BLOCK_HAND_HISTOGRAM, card_embed_dim)
+        self.hand_query = nn.Parameter(torch.empty(card_embed_dim))
+        self.empty_hand = nn.Parameter(torch.empty(card_embed_dim))
+
+        public_layers: list[nn.Module] = []
+        public_prev = obs_dim - BLOCK_HAND_HISTOGRAM
+        for width in hidden_sizes:
+            public_layers.append(nn.Linear(public_prev, width))
+            public_layers.append(nn.Tanh())
+            public_prev = width
+        self.public_encoder = nn.Sequential(*public_layers)
+        self.fusion = nn.Sequential(
+            # Keep the raw multiplicities alongside attention pooling.  Pure
+            # softmax attention represents composition but would map one S3 and
+            # two S3 cards to the same vector; the histogram preserves that
+            # strategically important count information exactly.
+            nn.Linear(
+                public_prev + card_embed_dim + BLOCK_HAND_HISTOGRAM,
+                self.output_dim,
+            ),
+            nn.Tanh(),
+        )
+
+        nn.init.normal_(self.hand_query, std=1.0 / math.sqrt(card_embed_dim))
+        nn.init.normal_(self.empty_hand, std=1.0 / math.sqrt(card_embed_dim))
+
+    def _encode_hand(self, hand_histogram: torch.Tensor) -> torch.Tensor:
+        """Attention-pool the private hand histogram into ``(B, E)``."""
+        # The feature contract stores integer card counts / 7.  Rounding makes
+        # the reconstruction robust to float32 representation noise.
+        counts = torch.round(hand_histogram.clamp(0.0, 1.0) * 7.0)
+        token_emb = self.card_embeddings.weight  # (8, E)
+        scores = (token_emb @ self.hand_query) / math.sqrt(token_emb.shape[1])
+        scores = scores.unsqueeze(0).expand(counts.shape[0], -1)
+        present = counts > 0
+        weighted_scores = scores + torch.log(counts.clamp_min(1.0))
+        neg_inf = torch.finfo(weighted_scores.dtype).min
+        weights = torch.softmax(weighted_scores.masked_fill(~present, neg_inf), dim=-1)
+        pooled = weights @ token_emb
+
+        # All-masked softmax is numerically defined here because finite min is
+        # used, but it would produce a meaningless uniform mixture.  Empty hands
+        # receive an explicit learned representation instead.
+        empty = ~present.any(dim=-1)
+        return torch.where(empty.unsqueeze(-1), self.empty_hand, pooled)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        """Return the fused structured state embedding for ``obs``."""
+        if obs.shape[-1] != self.obs_dim:
+            raise ValueError(
+                f"expected observation width {self.obs_dim}, got {obs.shape[-1]}"
+            )
+        hand = self._encode_hand(obs[:, :BLOCK_HAND_HISTOGRAM])
+        public = self.public_encoder(obs[:, BLOCK_HAND_HISTOGRAM:])
+        histogram = obs[:, :BLOCK_HAND_HISTOGRAM]
+        return cast(
+            torch.Tensor,
+            self.fusion(torch.cat((hand, histogram, public), dim=-1)),
+        )
+
+
+def _build_trunk(
+    obs_dim: int,
+    hidden_sizes: tuple[int, ...],
+    encoder: str,
+) -> tuple[nn.Module, int]:
+    """Build the selected observation trunk and return it plus output width."""
+    if encoder == "structured":
+        structured = StructuredObservationEncoder(obs_dim, hidden_sizes)
+        return structured, structured.output_dim
+    if encoder != "flat":
+        raise ValueError(
+            f"unknown encoder {encoder!r} (expected 'flat' or 'structured')"
+        )
+
+    layers: list[nn.Module] = []
+    prev = obs_dim
+    for width in hidden_sizes:
+        layers.append(nn.Linear(prev, width))
+        layers.append(nn.Tanh())
+        prev = width
+    return nn.Sequential(*layers), prev
 
 
 class HeatPolicy(nn.Module):
@@ -58,18 +185,15 @@ class HeatPolicy(nn.Module):
         obs_dim: int = OBS_DIM,
         action_dim: int = ACTION_DIM,
         hidden_sizes: tuple[int, ...] = (256, 256),
+        *,
+        encoder: str = "flat",
     ) -> None:
         super().__init__()
         self.obs_dim = obs_dim
         self.action_dim = action_dim
 
-        layers: list[nn.Module] = []
-        prev = obs_dim
-        for h in hidden_sizes:
-            layers.append(nn.Linear(prev, h))
-            layers.append(nn.Tanh())
-            prev = h
-        self.trunk = nn.Sequential(*layers)
+        self.encoder = encoder
+        self.trunk, prev = _build_trunk(obs_dim, hidden_sizes, encoder)
         self.policy_head = nn.Linear(prev, action_dim)
         self.value_head = nn.Linear(prev, 1)
 
@@ -180,6 +304,7 @@ class DotProductPolicy(nn.Module):
         action_dim: int = ACTION_DIM,
         hidden_sizes: tuple[int, ...] = (256, 256),
         *,
+        encoder: str = "flat",
         embed_dim: int = 64,
         action_mlp_hidden: tuple[int, ...] = (64,),
     ) -> None:
@@ -187,15 +312,10 @@ class DotProductPolicy(nn.Module):
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.embed_dim = embed_dim
+        self.encoder = encoder
 
-        # Trunk: identical MLP-over-obs shape as HeatPolicy (equal-compute gate).
-        layers: list[nn.Module] = []
-        prev = obs_dim
-        for h in hidden_sizes:
-            layers.append(nn.Linear(prev, h))
-            layers.append(nn.Tanh())
-            prev = h
-        self.trunk = nn.Sequential(*layers)
+        # State trunk is shared with HeatPolicy; A4 swaps only this component.
+        self.trunk, prev = _build_trunk(obs_dim, hidden_sizes, encoder)
 
         # Static per-action feature table as a (non-parameter) buffer: it moves
         # with .to(device) and is saved in checkpoints but never optimized.
@@ -296,11 +416,17 @@ def build_policy(config: A0Config) -> PPOPolicy:
     """
     if config.head == "masked":
         return HeatPolicy(
-            obs_dim=OBS_DIM, action_dim=ACTION_DIM, hidden_sizes=config.hidden_sizes
+            obs_dim=OBS_DIM,
+            action_dim=ACTION_DIM,
+            hidden_sizes=config.hidden_sizes,
+            encoder=config.encoder,
         )
     if config.head == "dotprod":
         return DotProductPolicy(
-            obs_dim=OBS_DIM, action_dim=ACTION_DIM, hidden_sizes=config.hidden_sizes
+            obs_dim=OBS_DIM,
+            action_dim=ACTION_DIM,
+            hidden_sizes=config.hidden_sizes,
+            encoder=config.encoder,
         )
     raise ValueError(
         f"unknown head {config.head!r} (expected 'masked' or 'dotprod')"

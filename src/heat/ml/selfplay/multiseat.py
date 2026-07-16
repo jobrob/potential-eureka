@@ -37,14 +37,21 @@ mean per-seat return is ~0 by construction; it is not a learning signal.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import perf_counter
+from typing import Literal
 
 import numpy as np
 import torch
 from numpy.typing import NDArray
 
 from heat.agents.base import BaseAgent
-from heat.engine.driver import Decision, run_round_driver
+from heat.engine.driver import (
+    Decision,
+    DecisionKind,
+    run_round_driver,
+    simultaneous_decisions,
+)
 from heat.engine.game import MAX_ROUNDS
 from heat.models.game_state import GameState
 from heat.models.track import Track
@@ -90,6 +97,45 @@ class _Pending:
     prev_state: GameState
 
 
+@dataclass
+class CollectorTiming:
+    """Optional wall-time and exact inference counters for one collection."""
+
+    encoding_seconds: float = 0.0
+    inference_seconds: float = 0.0
+    live_decisions: int = 0
+    simultaneous_live_decisions: int = 0
+    sequential_live_decisions: int = 0
+    action_inference_calls: int = 0
+    action_inference_rows: int = 0
+    bootstrap_inference_calls: int = 0
+    available_phase_count: int = 0
+    available_phase_rows: int = 0
+    action_batch_histogram: dict[int, int] = field(default_factory=dict)
+
+    def reset(self) -> None:
+        """Clear counters so one instance can safely measure another call."""
+        self.encoding_seconds = 0.0
+        self.inference_seconds = 0.0
+        self.live_decisions = 0
+        self.simultaneous_live_decisions = 0
+        self.sequential_live_decisions = 0
+        self.action_inference_calls = 0
+        self.action_inference_rows = 0
+        self.bootstrap_inference_calls = 0
+        self.available_phase_count = 0
+        self.available_phase_rows = 0
+        self.action_batch_histogram.clear()
+
+    def record_action_call(self, batch_size: int) -> None:
+        """Account for one live-policy action inference call exactly."""
+        self.action_inference_calls += 1
+        self.action_inference_rows += batch_size
+        self.action_batch_histogram[batch_size] = (
+            self.action_batch_histogram.get(batch_size, 0) + 1
+        )
+
+
 class MultiSeatCollector:
     """Collect per-seat self-play trajectories by driving the round generator.
 
@@ -120,13 +166,22 @@ class MultiSeatCollector:
         *,
         scripted_seats: dict[int, BaseAgent] | None = None,
         margin_coef: float = 0.0,
+        collector_mode: Literal["scalar", "phase"] = "scalar",
     ) -> None:
         if num_players < 2:
             raise ValueError(f"num_players must be >= 2, got {num_players}")
         self._track_source = track
         self.num_players = num_players
         self.margin_coef = margin_coef
+        if collector_mode not in {"scalar", "phase"}:
+            raise ValueError(
+                f"collector_mode must be 'scalar' or 'phase', got {collector_mode!r}"
+            )
+        self.collector_mode = collector_mode
         self.scripted_seats: dict[int, BaseAgent] = dict(scripted_seats or {})
+        #: Exact number of complete games run by the most recent ``collect``.
+        #: A8 uses this to report game scale rather than only decision rows.
+        self.last_games_collected: int = 0
         for seat in self.scripted_seats:
             if not (0 <= seat < num_players):
                 raise ValueError(f"scripted seat {seat} out of range")
@@ -226,6 +281,7 @@ class MultiSeatCollector:
         rng: np.random.Generator,
         *,
         gamma: float = A0Config.gamma,
+        timing: CollectorTiming | None = None,
     ) -> tuple[list[RolloutBuffer], list[float]]:
         """Run whole games until ``sum(len(buf) for policy seats) >= n_steps``.
 
@@ -242,6 +298,7 @@ class MultiSeatCollector:
                 to the :class:`A0Config` discount (kept as a keyword so
                 ``collect`` still matches the design's positional signature while
                 enabling the fold the design mandates).
+            timing: optional counters for observation encoding and policy inference.
 
         Returns:
             ``(buffers, episode_returns)`` -- one :class:`RolloutBuffer` per seat
@@ -260,15 +317,163 @@ class MultiSeatCollector:
             for _ in range(self.num_players)
         ]
         episode_returns: list[float] = []
+        self.last_games_collected = 0
+        if timing is not None:
+            timing.reset()
 
         recorded = 0
         while recorded < n_steps:
             episode_returns.extend(
-                self._play_one_game(policy, buffers, device, rng, gamma)
+                self._play_one_game(policy, buffers, device, rng, gamma, timing)
             )
+            self.last_games_collected += 1
             recorded = sum(len(buffers[s]) for s in self.policy_seats)
 
         return buffers, episode_returns
+
+    def _record_available_phase(
+        self,
+        state: GameState,
+        kind: DecisionKind,
+        timing: CollectorTiming | None,
+    ) -> None:
+        """Record the live, non-forced batch available in one phase."""
+        if timing is None:
+            return
+        available = 0
+        for decision in simultaneous_decisions(state, kind):
+            if decision.player_id in self.scripted_seats:
+                continue
+            if forced_action(decision, state) is NO_FORCED:
+                available += 1
+        if available:
+            timing.available_phase_count += 1
+            timing.available_phase_rows += available
+
+    def _infer_live_choices(
+        self,
+        decisions: list[Decision],
+        state: GameState,
+        policy: PPOPolicy,
+        buffers: list[RolloutBuffer],
+        pending: dict[int, _Pending],
+        seat_return: dict[int, float],
+        seat_recorded: dict[int, int],
+        device: torch.device,
+        timing: CollectorTiming | None,
+    ) -> dict[tuple[DecisionKind, int], object]:
+        """Close spans and infer one action batch for real live choices."""
+        if not decisions:
+            return {}
+
+        for decision in decisions:
+            seat = decision.player_id
+            if seat in pending:
+                prev = pending.pop(seat)
+                reward = step_reward(
+                    prev.prev_state,
+                    state,
+                    seat,
+                    done=False,
+                    terminated=False,
+                    reward_mode="race",
+                    shaping_weight=0.0,
+                    spinout_weight=0.0,
+                )
+                self._store(buffers, seat, prev, reward, done=False)
+                seat_return[seat] += reward
+                seat_recorded[seat] += 1
+
+        encode_started = perf_counter() if timing is not None else 0.0
+        observations = [
+            encode_observation(state, decision.player_id, decision)
+            for decision in decisions
+        ]
+        masks = [legal_action_mask(decision, state) for decision in decisions]
+        if timing is not None:
+            timing.encoding_seconds += perf_counter() - encode_started
+
+        inference_started = perf_counter() if timing is not None else 0.0
+        obs_t = torch.as_tensor(
+            np.stack(observations), dtype=torch.float32, device=device
+        )
+        mask_t = torch.as_tensor(
+            np.stack(masks), dtype=torch.bool, device=device
+        )
+        action_t, logp_t, value_t, _entropy = policy.act(obs_t, mask_t)
+        if timing is not None:
+            timing.inference_seconds += perf_counter() - inference_started
+            timing.record_action_call(len(decisions))
+            timing.live_decisions += len(decisions)
+            simultaneous = sum(
+                decision.kind in {DecisionKind.GEAR, DecisionKind.CARDS}
+                for decision in decisions
+            )
+            timing.simultaneous_live_decisions += simultaneous
+            timing.sequential_live_decisions += len(decisions) - simultaneous
+
+        queued: dict[tuple[DecisionKind, int], object] = {}
+        for row, decision in enumerate(decisions):
+            seat = decision.player_id
+            action = int(action_t[row].item())
+            pending[seat] = _Pending(
+                obs=observations[row],
+                action=action,
+                logp=float(logp_t[row].item()),
+                value=float(value_t[row].item()),
+                mask=masks[row],
+                # Every simultaneous choice snapshots the same unapplied state.
+                prev_state=state.clone(reseed=0),
+            )
+            queued[(decision.kind, seat)] = decode_legal_action(
+                decision, state, action
+            )
+        return queued
+
+    def _prepare_phase(
+        self,
+        kind: DecisionKind,
+        state: GameState,
+        policy: PPOPolicy,
+        buffers: list[RolloutBuffer],
+        pending: dict[int, _Pending],
+        seat_return: dict[int, float],
+        seat_recorded: dict[int, int],
+        device: torch.device,
+        timing: CollectorTiming | None,
+    ) -> dict[tuple[DecisionKind, int], object]:
+        """Resolve one simultaneous phase, batching only live-policy rows."""
+        decisions = simultaneous_decisions(state, kind)
+        self._record_available_phase(state, kind, timing)
+        queued: dict[tuple[DecisionKind, int], object] = {}
+        live: list[Decision] = []
+        for decision in decisions:
+            seat = decision.player_id
+            key = (decision.kind, seat)
+            if seat in self.scripted_seats:
+                queued[key] = opponent_action(
+                    self.scripted_seats[seat], decision, state
+                )
+                continue
+            forced = forced_action(decision, state)
+            if forced is not NO_FORCED:
+                queued[key] = forced
+                continue
+            live.append(decision)
+        queued.update(
+            self._infer_live_choices(
+                live,
+                state,
+                policy,
+                buffers,
+                pending,
+                seat_return,
+                seat_recorded,
+                device,
+                timing,
+            )
+        )
+        return queued
 
     def _play_one_game(
         self,
@@ -277,6 +482,7 @@ class MultiSeatCollector:
         device: torch.device,
         rng: np.random.Generator,
         gamma: float,
+        timing: CollectorTiming | None,
     ) -> list[float]:
         """Play one complete self-play game, recording every policy seat's stream.
 
@@ -296,6 +502,8 @@ class MultiSeatCollector:
         pending: dict[int, _Pending] = {}
         seat_return: dict[int, float] = {s: 0.0 for s in self.policy_seats}
         seat_recorded: dict[int, int] = {s: 0 for s in self.policy_seats}
+        queued_actions: dict[tuple[DecisionKind, int], object] = {}
+        observed_scalar_phases: set[tuple[int, DecisionKind]] = set()
 
         while True:
             terminated, truncated = self._episode_flags(state)
@@ -315,6 +523,35 @@ class MultiSeatCollector:
                 continue
 
             seat = decision.player_id
+            key = (decision.kind, seat)
+
+            if key in queued_actions:
+                send_value = queued_actions.pop(key)
+                continue
+
+            if (
+                self.collector_mode == "phase"
+                and decision.kind in {DecisionKind.GEAR, DecisionKind.CARDS}
+            ):
+                queued_actions = self._prepare_phase(
+                    decision.kind,
+                    state,
+                    policy,
+                    buffers,
+                    pending,
+                    seat_return,
+                    seat_recorded,
+                    device,
+                    timing,
+                )
+                send_value = queued_actions.pop(key)
+                continue
+
+            if decision.kind in {DecisionKind.GEAR, DecisionKind.CARDS}:
+                phase_key = (state.round_num, decision.kind)
+                if phase_key not in observed_scalar_phases:
+                    observed_scalar_phases.add(phase_key)
+                    self._record_available_phase(state, decision.kind, timing)
 
             # Scripted seat: advance, never record.
             if seat in self.scripted_seats:
@@ -330,44 +567,31 @@ class MultiSeatCollector:
                 send_value = forced
                 continue
 
-            # A real policy decision for this seat. First close out this seat's
-            # PENDING transition (its span ran to here), done=False.
-            if seat in pending:
-                prev = pending.pop(seat)
-                reward = step_reward(
-                    prev.prev_state, state, seat, done=False, terminated=False
-                )
-                self._store(buffers, seat, prev, reward, done=False)
-                seat_return[seat] += reward
-                seat_recorded[seat] += 1
-
-            obs = encode_observation(state, seat, decision)
-            mask = legal_action_mask(decision, state)
-            obs_t = torch.as_tensor(
-                obs, dtype=torch.float32, device=device
-            ).unsqueeze(0)
-            mask_t = torch.as_tensor(
-                mask, dtype=torch.bool, device=device
-            ).unsqueeze(0)
-            action_t, logp_t, value_t, _entropy = policy.act(obs_t, mask_t)
-            action = int(action_t.item())
-
-            pending[seat] = _Pending(
-                obs=obs,
-                action=action,
-                logp=float(logp_t.item()),
-                value=float(value_t.item()),
-                mask=mask,
-                # clone(reseed=0): snapshot without perturbing the live game RNG.
-                prev_state=state.clone(reseed=0),
+            inferred = self._infer_live_choices(
+                [decision],
+                state,
+                policy,
+                buffers,
+                pending,
+                seat_return,
+                seat_recorded,
+                device,
+                timing,
             )
-            send_value = decode_legal_action(decision, state, action)
+            send_value = inferred[key]
 
         # Game ended: complete every pending transition with done=True.
         terminated, truncated = self._episode_flags(state)
         for seat, prev in pending.items():
             reward = step_reward(
-                prev.prev_state, state, seat, done=True, terminated=terminated
+                prev.prev_state,
+                state,
+                seat,
+                done=True,
+                terminated=terminated,
+                reward_mode="race",
+                shaping_weight=0.0,
+                spinout_weight=0.0,
             )
             # A6 dense terminal-margin target (design §4.2): add the graded
             # progress lead over the field at game end, on BOTH terminated and
@@ -382,8 +606,15 @@ class MultiSeatCollector:
             # gamma * V(s_next) into the final reward (s_next = the post-game obs
             # for this seat with no pending decision), keeping done=True.
             if truncated and not terminated:
+                encode_started = perf_counter() if timing is not None else 0.0
                 s_next = encode_observation(state, seat, None)
+                if timing is not None:
+                    timing.encoding_seconds += perf_counter() - encode_started
+                inference_started = perf_counter() if timing is not None else 0.0
                 reward += gamma * self._seat_value(policy, s_next, device)
+                if timing is not None:
+                    timing.inference_seconds += perf_counter() - inference_started
+                    timing.bootstrap_inference_calls += 1
             self._store(buffers, seat, prev, reward, done=True)
             seat_return[seat] += reward
             seat_recorded[seat] += 1

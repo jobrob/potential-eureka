@@ -6,7 +6,7 @@ memory, so a trained run cannot be scored later. A7 adds the smallest possible
 checkpoint that makes a policy *evaluable*:
 
 * :func:`save_policy` writes a single ``torch.save`` blob carrying the policy
-  ``state_dict`` plus the four numbers needed to rebuild it (``head``,
+  ``state_dict`` plus the fields needed to rebuild it (``head``, ``encoder``,
   ``hidden_sizes``, ``obs_dim``, ``action_dim``) and a ``codec_version``
   tripwire.
 * :func:`load_policy` rebuilds the policy via the same
@@ -23,7 +23,9 @@ checkpoints.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -43,6 +45,97 @@ class CheckpointMismatchError(RuntimeError):
     """
 
 
+_AVERAGE_METADATA_KEYS = (
+    "head",
+    "encoder",
+    "hidden_sizes",
+    "obs_dim",
+    "action_dim",
+    "codec_version",
+)
+
+
+def average_policy_checkpoints(
+    paths: Sequence[str | Path], output_path: str | Path
+) -> None:
+    """Uniformly average compatible policy checkpoints into one derived policy.
+
+    Floating tensors are accumulated in float64 and cast back to their original
+    dtype. Non-floating tensors must be identical. Architecture and codec
+    metadata must also match exactly, so averaging can never bridge incompatible
+    policies silently.
+
+    Args:
+        paths: two or more compatible source checkpoint paths.
+        output_path: destination for the derived checkpoint blob.
+
+    Raises:
+        ValueError: when fewer than two sources are supplied or any metadata,
+            state key, shape, dtype, or non-floating tensor differs.
+    """
+    sources = [Path(path) for path in paths]
+    if len(sources) < 2:
+        raise ValueError("checkpoint averaging requires at least two sources")
+
+    blobs: list[dict[str, Any]] = [
+        torch.load(str(path), map_location="cpu", weights_only=False)
+        for path in sources
+    ]
+    first = blobs[0]
+    for path, blob in zip(sources[1:], blobs[1:], strict=True):
+        for key in _AVERAGE_METADATA_KEYS:
+            if blob.get(key) != first.get(key):
+                raise ValueError(
+                    f"checkpoint {path} has incompatible {key}: "
+                    f"{blob.get(key)!r} != {first.get(key)!r}"
+                )
+
+    states = [blob.get("state_dict") for blob in blobs]
+    if not all(isinstance(state, dict) for state in states):
+        raise ValueError("every checkpoint must contain a state_dict")
+    typed_states = [state for state in states if isinstance(state, dict)]
+    keys = list(typed_states[0])
+    if any(list(state) != keys for state in typed_states[1:]):
+        raise ValueError("checkpoint state_dict keys or ordering differ")
+
+    averaged: dict[str, torch.Tensor] = {}
+    for key in keys:
+        tensors = [state[key] for state in typed_states]
+        reference = tensors[0]
+        if not all(isinstance(tensor, torch.Tensor) for tensor in tensors):
+            raise ValueError(f"state_dict entry {key!r} is not a tensor")
+        if any(
+            tensor.shape != reference.shape or tensor.dtype != reference.dtype
+            for tensor in tensors[1:]
+        ):
+            raise ValueError(f"checkpoint tensor {key!r} shape or dtype differs")
+        if reference.is_floating_point() or reference.is_complex():
+            accumulation_dtype = (
+                torch.complex128 if reference.is_complex() else torch.float64
+            )
+            averaged[key] = (
+                torch.stack([tensor.to(accumulation_dtype) for tensor in tensors])
+                .mean(dim=0)
+                .to(reference.dtype)
+            )
+        else:
+            if any(not torch.equal(reference, tensor) for tensor in tensors[1:]):
+                raise ValueError(f"non-floating checkpoint tensor {key!r} differs")
+            averaged[key] = reference.clone()
+
+    output = {key: value for key, value in first.items() if key != "state_dict"}
+    output["state_dict"] = averaged
+    output["derived_from"] = [str(path).replace("\\", "/") for path in sources]
+    output["derivation"] = {
+        "method": "uniform_parameter_mean",
+        "count": len(sources),
+        "accumulation_dtype": "float64_or_complex128",
+    }
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(output, str(destination))
+
+
 def save_policy(policy: PPOPolicy, config: A0Config, path: str | Path) -> None:
     """Write ``policy`` to ``path`` with the contract fields needed to reload it.
 
@@ -60,6 +153,7 @@ def save_policy(policy: PPOPolicy, config: A0Config, path: str | Path) -> None:
     blob = {
         "state_dict": policy.state_dict(),
         "head": config.head,
+        "encoder": config.encoder,
         "hidden_sizes": list(config.hidden_sizes),
         "obs_dim": int(policy.obs_dim),
         "action_dim": int(policy.action_dim),
@@ -101,6 +195,7 @@ def load_policy(path: str | Path) -> PPOPolicy:
 
     config = A0Config(
         head=str(blob["head"]),
+        encoder=str(blob.get("encoder", "flat")),
         hidden_sizes=tuple(int(h) for h in blob["hidden_sizes"]),
     )
     policy = build_policy(config)

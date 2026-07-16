@@ -22,6 +22,7 @@ from heat.simulation.runner import (
     PlayerOutcome,
     heuristic_agent_factory,
     random_agent_factory,
+    static_search_agent_factory,
     run_batch,
     run_single_game,
 )
@@ -40,6 +41,7 @@ __all__ = [
     "run_single_game",
     "random_agent_factory",
     "heuristic_agent_factory",
+    "static_search_agent_factory",
     "AgentStats",
     "SimulationStats",
     "aggregate_stats",

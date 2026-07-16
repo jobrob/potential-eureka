@@ -40,13 +40,17 @@ dependency on it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 import torch as th
 from torch.nn import functional as F
+from torch.distributions import Categorical
 
 from sb3_contrib import MaskablePPO
+from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy
 
 from heat.ml.model import resolve_device
 
@@ -63,7 +67,7 @@ _STATE = _KLState()
 #: Set once the class-level ``train`` wrapper has been installed.
 _PATCHED = False
 #: The original (unwrapped) ``MaskablePPO.train``, captured at patch time.
-_ORIG_TRAIN = None
+_ORIG_TRAIN: Callable[[MaskablePPO], None] | None = None
 
 
 def set_kl_to_bc(
@@ -108,11 +112,15 @@ def _reference_masked_logprobs(
         dist = ref.policy.get_distribution(obs, action_masks=action_masks)
         # MaskableCategorical exposes the (masked) per-action logits; log-softmax
         # over them is the masked log-prob vector.
-        logits = dist.distribution.logits
+        logits = cast(Categorical, dist.distribution).logits
         return F.log_softmax(logits, dim=1)
 
 
-def _kl_to_reference(policy, obs: th.Tensor, action_masks: np.ndarray) -> th.Tensor:
+def _kl_to_reference(
+    policy: MaskableActorCriticPolicy,
+    obs: th.Tensor,
+    action_masks: np.ndarray,
+) -> th.Tensor:
     """``mean_b KL( pi_theta(.|s_b) || pi_BC(.|s_b) )`` over the masked actions.
 
     Both distributions are the masked categorical. KL is computed in the standard
@@ -122,7 +130,10 @@ def _kl_to_reference(policy, obs: th.Tensor, action_masks: np.ndarray) -> th.Ten
     only; we guard the ``0 * -inf`` with ``nan_to_num``.
     """
     cur = policy.get_distribution(obs, action_masks=action_masks)
-    cur_logp = F.log_softmax(cur.distribution.logits, dim=1)
+    cur_logp = F.log_softmax(
+        cast(Categorical, cur.distribution).logits,
+        dim=1,
+    )
     ref_logp = _reference_masked_logprobs(obs, action_masks)
     p = cur_logp.exp()
     kl = p * (cur_logp - ref_logp)
@@ -137,10 +148,12 @@ def _install_patch() -> None:
         return
     _ORIG_TRAIN = MaskablePPO.train
 
-    def _train_with_kl(self) -> None:  # noqa: ANN001
+    original_train = _ORIG_TRAIN
+
+    def _train_with_kl(self: MaskablePPO) -> None:
         if _STATE.reference is None or _STATE.coef <= 0.0:
             # Disabled: behave exactly like stock MaskablePPO.
-            return _ORIG_TRAIN(self)
+            return original_train(self)
         _train_loop_with_kl(self, _STATE.reference, _STATE.coef)
 
     MaskablePPO.train = _train_with_kl  # type: ignore[method-assign]
@@ -162,10 +175,12 @@ def _train_loop_with_kl(
 
     self.policy.set_training_mode(True)
     self._update_learning_rate(self.policy.optimizer)
-    clip_range = self.clip_range(self._current_progress_remaining)
+    clip_schedule = cast(Callable[[float], float], self.clip_range)
+    clip_range = clip_schedule(self._current_progress_remaining)
     clip_range_vf = None
     if self.clip_range_vf is not None:
-        clip_range_vf = self.clip_range_vf(self._current_progress_remaining)
+        clip_vf_schedule = cast(Callable[[float], float], self.clip_range_vf)
+        clip_range_vf = clip_vf_schedule(self._current_progress_remaining)
 
     entropy_losses = []
     pg_losses, value_losses = [], []
@@ -208,6 +223,7 @@ def _train_loop_with_kl(
             if self.clip_range_vf is None:
                 values_pred = values
             else:
+                assert clip_range_vf is not None
                 values_pred = rollout_data.old_values + th.clamp(
                     values - rollout_data.old_values,
                     -clip_range_vf,
@@ -226,7 +242,7 @@ def _train_loop_with_kl(
             kl_bc = _kl_to_reference(
                 self.policy,
                 rollout_data.observations,
-                rollout_data.action_masks,
+                cast(np.ndarray, rollout_data.action_masks),
             )
             kl_to_bc_losses.append(kl_bc.item())
 
@@ -249,7 +265,7 @@ def _train_loop_with_kl(
                 break
 
             self.policy.optimizer.zero_grad()
-            loss.backward()
+            loss.backward()  # type: ignore[no-untyped-call]
             th.nn.utils.clip_grad_norm_(
                 self.policy.parameters(), self.max_grad_norm
             )

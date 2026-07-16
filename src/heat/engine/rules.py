@@ -8,7 +8,9 @@ draw from the deck). The engine and agents both depend on this module.
 from __future__ import annotations
 
 import itertools
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from heat.models.cards import Card, CardType, Deck
 from heat.models.player_state import PlayerState
@@ -236,6 +238,7 @@ def corners_crossed(
     # Build the set of positions traversed (excluding start). Walk the
     # path forward space-by-space so a full-lap (or multi-lap) move
     # correctly includes every corner, even when it lands on start_pos.
+    traversed_positions: range | list[int]
     if spaces_moved >= length:
         # One or more full laps: every space on the track is traversed.
         traversed_positions = range(length)
@@ -512,10 +515,23 @@ def corner_speed_for_check(player: PlayerState) -> int:
 # 19. Collision / blocking resolution
 # ---------------------------------------------------------------------------
 
+class PositionedPlayer(Protocol):
+    """Minimal car state required by blocking resolution."""
+
+    @property
+    def player_id(self) -> int: ...
+
+    @property
+    def position(self) -> int: ...
+
+    @property
+    def finished(self) -> bool: ...
+
+
 def resolve_blocked_position(
     target_pos: int,
     track: Track,
-    all_players: list[PlayerState],
+    all_players: Sequence[PositionedPlayer],
     moving_player_id: int,
 ) -> int:
     """Resolve blocking when a space is full.

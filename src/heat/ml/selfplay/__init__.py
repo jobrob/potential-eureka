@@ -39,7 +39,18 @@ from heat.ml.selfplay.eval_harness import (
     held_out_tracks,
 )
 from heat.ml.selfplay.multiseat import MultiSeatCollector, train_multiseat
-from heat.ml.selfplay.policy import DotProductPolicy, HeatPolicy, build_policy
+from heat.ml.selfplay.phase1 import (
+    A8Config,
+    SeatCountSchedule,
+    train_selfplay_a8,
+    training_track_source,
+)
+from heat.ml.selfplay.policy import (
+    DotProductPolicy,
+    HeatPolicy,
+    StructuredObservationEncoder,
+    build_policy,
+)
 from heat.ml.selfplay.ppo import A0Config, train
 from heat.ml.selfplay.recipe import (
     A5Config,
@@ -52,6 +63,7 @@ from heat.ml.selfplay.snapshots import SnapshotAgent, SnapshotPool
 __all__ = [
     "A0Config",
     "A5Config",
+    "A8Config",
     "CheckpointMismatchError",
     "DotProductPolicy",
     "EntropyController",
@@ -62,7 +74,9 @@ __all__ = [
     "RolloutBuffer",
     "SnapshotAgent",
     "SnapshotPool",
+    "SeatCountSchedule",
     "Stage1ValidationError",
+    "StructuredObservationEncoder",
     "build_policy",
     "evaluate_policy",
     "evaluate_vs_anchor",
@@ -72,4 +86,6 @@ __all__ = [
     "train",
     "train_multiseat",
     "train_selfplay_a5",
+    "train_selfplay_a8",
+    "training_track_source",
 ]

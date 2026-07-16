@@ -1,6 +1,7 @@
 # Direction A — sprint plan (PPO self-play workhorse, the Big 2 path)
 
-> **Status:** high-level sprint sequencing (2026-06-24). Turns Direction A of
+> **Status:** **active roadmap** (updated 2026-07-13). A0–A7 are implemented;
+> A8 Phase 1 is partial and remains the active work. Turns Direction A of
 > [`heat-rl-transition-plan.md`](../heat-rl-transition-plan.md) into an ordered set of
 > sprints with go/no-go gates. **High-level only** — each sprint gets a detailed design
 > when we reach it. Grounded in the current code (`src/heat/ml/{env,model,features,
@@ -121,7 +122,7 @@ track split, with Wilson-LB).
 **Gate:** harness reproduces known baselines (strong beats weak by the expected margin);
 held-out track split is genuinely disjoint from any training track.
 
-### A8 — Full-rules, small-scale, domain-randomized (Phase 1)
+### [A8 — Full-rules, small-scale, domain-randomized (Phase 1)](A8-full-rules-phase1.html)
 **Goal:** lift the proven method from Tiny-Heat to **full Heat rules, full generated-track
 distribution, 2–6 seats, imperfect info**, still modest net/games. Train with **domain
 randomization over tracks and seat counts from the start** (directly attacks the prior

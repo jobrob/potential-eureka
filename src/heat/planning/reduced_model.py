@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from heat.engine import rules
-from heat.models.track import Track
+from heat.models.track import Corner, Track
 from heat.planning.resource_model import SpeedResourceModel
 
 
@@ -116,7 +116,9 @@ def _shift_gear(gear: int, dgear: int, heat: int) -> tuple[int, int]:
     return best[0], best[1]
 
 
-def _corner_cost_at_speed(track: Track, pos: int, speed: int) -> tuple[list, int]:
+def _corner_cost_at_speed(
+    track: Track, pos: int, speed: int
+) -> tuple[list[Corner], int]:
     """Corners crossed advancing ``speed`` from ``pos`` and their total heat cost.
 
     Pure reuse of ``rules.corners_crossed`` + ``rules.corner_heat_cost`` -- the
@@ -148,7 +150,9 @@ def _expected_cooldown(gear: int, heat_after: int) -> int:
     return int(min(amount, _EXPECTED_HEAT_IN_HAND, room))
 
 
-def _resolve_speed(model: SpeedResourceModel, gear: int, intent: str, mode: str):
+def _resolve_speed(
+    model: SpeedResourceModel, gear: int, intent: str, mode: str
+) -> tuple[int, dict[int, float]]:
     """Return ``(point_speed, distribution)`` for ``(gear, intent)`` under ``mode``.
 
     * ``expected`` -- point speed is ``round(E[S])``; the distribution is still

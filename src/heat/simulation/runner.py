@@ -36,9 +36,10 @@ import functools
 import logging
 import pickle
 import random
+from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Callable, Sequence, TypeVar, cast
 
 from heat.agents.heuristic_agent import HeuristicAgent
 from heat.agents.random_agent import RandomAgent
@@ -48,6 +49,7 @@ from heat.engine.game import Agent, Game
 from heat.models.track import Track
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 # A factory takes (player_id, seed) and returns a fresh agent instance.
 AgentFactory = Callable[[int, "int | None"], Agent]
@@ -191,6 +193,22 @@ def strong_heuristic_agent_factory(
     )
 
 
+def _make_static_search(
+    player_id: int, seed: int | None, name: str | None
+) -> Agent:
+    """Top-level constructor for the fixed StaticSearchV1 candidate."""
+    from heat.agents.static_search import StaticSearchAgent
+
+    del seed  # StaticSearchV1 is deterministic and never uses a game seed.
+    agent_name = name if name is not None else f"StaticSearchV1-{player_id}"
+    return StaticSearchAgent(name=agent_name)
+
+
+def static_search_agent_factory(name: str | None = None) -> AgentFactory:
+    """Return a picklable factory for explicit StaticSearchV1 comparisons."""
+    return functools.partial(_make_static_search, name=name)
+
+
 def _make_lookahead(
     player_id: int,
     seed: int | None,
@@ -304,7 +322,7 @@ def _first_unpicklable(
     Used as a pre-flight check before spawning a process pool, since spawn
     surfaces pickling failures only asynchronously (and after partial work).
     """
-    candidates = [("track", track)]
+    candidates: list[tuple[str, object]] = [("track", track)]
     candidates += [
         (f"agent_factories[{i}]", f) for i, f in enumerate(agent_factories)
     ]
@@ -414,7 +432,7 @@ def _run_sequential(
     progress: bool,
 ) -> list[GameOutcome]:
     """Run all games sequentially in this process."""
-    indices: Sequence[int] = range(num_games)
+    indices: Iterable[int] = range(num_games)
     indices = _maybe_progress(indices, total=num_games, enabled=progress)
     return [
         run_single_game(track, agent_factories, i, base_seed, laps)
@@ -450,7 +468,9 @@ def _run_parallel(
     return outcomes
 
 
-def _maybe_progress(iterable, total: int, enabled: bool):
+def _maybe_progress(
+    iterable: Iterable[_T], total: int, enabled: bool
+) -> Iterable[_T]:
     """Wrap an iterable in a tqdm progress bar if requested and available."""
     if not enabled:
         return iterable
@@ -459,7 +479,7 @@ def _maybe_progress(iterable, total: int, enabled: bool):
     except ImportError:  # pragma: no cover - tqdm is optional
         logger.warning("tqdm not installed; progress bar disabled.")
         return iterable
-    return tqdm(iterable, total=total)
+    return cast(Iterable[_T], tqdm(iterable, total=total))
 
 
 def run_batch(

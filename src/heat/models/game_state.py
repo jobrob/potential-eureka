@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from heat.models.player_state import PlayerState
 from heat.models.track import Track
@@ -40,7 +41,7 @@ class GameEvent:
     phase: Phase
     player_id: int | None
     event_type: str
-    data: dict = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -110,7 +111,7 @@ class GameState:
         self,
         event_type: str,
         player_id: int | None = None,
-        data: dict | None = None,
+        data: dict[str, Any] | None = None,
     ) -> None:
         """Record a game event if logging is enabled."""
         if self.logging_enabled:

@@ -28,22 +28,22 @@ Design constraints (from the design doc and the frozen contract):
 
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
+import gymnasium as gym
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv
 
-from heat.models.track import Track
 from heat.ml import spaces
-from heat.ml.env import HeatEnv, OpponentSpec
+from heat.ml.env import HeatEnv, OpponentSpec, TrackSource
 
 #: A zero-arg callable returning a fresh ``HeatEnv`` (the SB3 env-fn convention).
-EnvFn = Callable[[], HeatEnv]
+EnvFn = Callable[[], gym.Env[Any, Any]]
 
 
 def heat_env_factory(
     *,
-    track: Track | None,
+    track: TrackSource | None,
     num_players: int,
     opponents: OpponentSpec | Sequence[OpponentSpec] | None,
     learner_id: int,
@@ -97,7 +97,7 @@ class _EnvBuilder:
     via :func:`heat_env_factory`.
     """
 
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         self._kwargs = kwargs
 
     def __call__(self) -> HeatEnv:
@@ -106,7 +106,7 @@ class _EnvBuilder:
 
 def make_vec_env(
     *,
-    track: Track | None,
+    track: TrackSource | None,
     num_players: int,
     opponents: OpponentSpec | Sequence[OpponentSpec] | None,
     learner_id: int,
@@ -167,7 +167,7 @@ def make_vec_env(
     use_subproc = vec_cls == "subproc" and n_envs > 1
     if use_subproc:
         # "spawn" is the safe start method cross-platform (required on Windows).
-        venv = SubprocVecEnv(env_fns, start_method="spawn")
+        venv: VecEnv = SubprocVecEnv(env_fns, start_method="spawn")
     else:
         venv = DummyVecEnv(env_fns)
 

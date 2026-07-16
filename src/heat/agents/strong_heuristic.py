@@ -33,6 +33,7 @@ seeded ``run_batch`` is reproducible. No global RNG is touched.
 from __future__ import annotations
 
 import random
+from collections.abc import Sequence
 
 from heat.models.cards import Card, CardType
 from heat.models.game_state import GameState
@@ -59,6 +60,7 @@ class StrongHeuristicAgent(BaseAgent):
         strength: int = 2,
         heat_price: float | None = None,
         seed: int | None = None,
+        avoid_certain_spins: bool = True,
     ) -> None:
         super().__init__(name=name)
         if not (0 <= strength <= 3):
@@ -68,6 +70,7 @@ class StrongHeuristicAgent(BaseAgent):
             ME.DEFAULT_HEAT_PRICE if heat_price is None else float(heat_price)
         )
         self._rng = random.Random(seed) if seed is not None else None
+        self._avoid_certain_spins = avoid_certain_spins
         # Cached plan for the current turn.
         self._plan_sig: _TurnSig | None = None
         self._plan_gear: tuple[int, int] | None = None
@@ -147,9 +150,9 @@ class StrongHeuristicAgent(BaseAgent):
         price, _ = self._risk_posture(state, player_id)
         return price
 
-    def _select_best(
-        self, scored: list[tuple[float, object]]
-    ) -> object | None:
+    def _select_best[T](
+        self, scored: Sequence[tuple[float, T]]
+    ) -> T | None:
         """Pick the highest-scoring option, breaking ties deterministically.
 
         Ties are broken by the optional local RNG when present (still
@@ -162,6 +165,62 @@ class StrongHeuristicAgent(BaseAgent):
         if len(winners) == 1 or self._rng is None:
             return winners[0]
         return winners[self._rng.randrange(len(winners))]
+
+    def _reject_avoidable_certain_spins[T](
+        self, scored: Sequence[tuple[ME.MoveEval, bool, T]]
+    ) -> list[tuple[ME.MoveEval, bool, T]]:
+        """Remove certain-spin plans when any legal non-certain plan exists.
+
+        H1 found tight-corner recovery loops where intended progress outweighed
+        the finite spin penalty. This is a safety invariant rather than another
+        weight: unavoidable spins and plans with only partial risk remain legal.
+        The strength-0 floor stays unchanged because it intentionally disables
+        the forward-solvency model that supplies ``p_spinout``.
+        """
+        candidates = list(scored)
+        if not self._avoid_certain_spins or not self._solvency or not any(
+            not guaranteed for _result, guaranteed, _candidate in candidates
+        ):
+            return candidates
+        return [
+            (result, guaranteed, candidate)
+            for result, guaranteed, candidate in candidates
+            if not guaranteed
+        ]
+
+    @staticmethod
+    def _play_guarantees_spin(
+        state: GameState,
+        player_id: int,
+        play: tuple[Card, ...],
+        heat_spent: int,
+    ) -> bool:
+        """Return whether even the play's lowest possible speed must spin.
+
+        Stress cards can flip below their expected value. H1's lock fixtures
+        rely on that escape route, so ``MoveEval.p_spinout``—which deliberately
+        scores the mean and high-flip case—is not a proof of certainty. The
+        invariant instead checks the lowest Basic card the player owns.
+        """
+        player = state.get_player(player_id)
+        basics = [
+            card.value
+            for card in (*tuple(player.deck), *player.hand)
+            if card.card_type == CardType.SPEED
+        ]
+        min_basic = min(basics) if basics else 1
+        stress_count = sum(
+            card.card_type == CardType.STRESS for card in play
+        )
+        min_speed = float(rules.calculate_speed(play) + stress_count * min_basic)
+        crossed = ME.corners_crossed_by_move(
+            state.track,
+            player.position,
+            player.lap,
+            int(min_speed),
+        )
+        corner_cost = ME.corner_cost_for_speed(crossed, min_speed)
+        return heat_spent + corner_cost > player.heat_available
 
     # ------------------------------------------------------------------
     # Joint planner (defects #1, #3, #4)
@@ -182,10 +241,9 @@ class StrongHeuristicAgent(BaseAgent):
         from_position = player.position
         from_lap = player.lap
 
-        best_gear: tuple[int, int] | None = None
-        best_cards: tuple[Card, ...] | None = None
-        best_value = float("-inf")
-        scored: list[tuple[float, tuple[tuple[int, int], tuple[Card, ...]]]] = []
+        scored: list[
+            tuple[ME.MoveEval, bool, tuple[tuple[int, int], tuple[Card, ...]]]
+        ] = []
 
         for gear, gear_heat in legal_gears:
             plays = rules.legal_card_plays(player.hand, gear)
@@ -212,15 +270,29 @@ class StrongHeuristicAgent(BaseAgent):
                     speed_variance=var,
                     spinout_loss=spin_loss,
                 )
-                scored.append((result.value, ((gear, gear_heat), play)))
+                scored.append(
+                    (
+                        result,
+                        self._play_guarantees_spin(
+                            state, player_id, play, gear_heat
+                        ),
+                        ((gear, gear_heat), play),
+                    )
+                )
 
-        chosen = self._select_best(scored)
+        eligible = self._reject_avoidable_certain_spins(scored)
+        chosen = self._select_best(
+            [
+                (result.value, candidate)
+                for result, _guaranteed, candidate in eligible
+            ]
+        )
         if chosen is None:
             # Degenerate fallback: stay at the cheapest legal gear with any play.
-            gear = legal_gears[0]
-            plays = rules.legal_card_plays(player.hand, gear[0])
-            return gear, plays[0]
-        return chosen  # type: ignore[return-value]
+            fallback_gear = legal_gears[0]
+            plays = rules.legal_card_plays(player.hand, fallback_gear[0])
+            return fallback_gear, plays[0]
+        return chosen
 
     def _myopic_gear(
         self,
@@ -269,7 +341,7 @@ class StrongHeuristicAgent(BaseAgent):
             )
             scored.append((result.value, (gear, gear_heat)))
         chosen = self._select_best(scored)
-        return chosen if chosen is not None else legal_gears[0]  # type: ignore[return-value]
+        return chosen if chosen is not None else legal_gears[0]
 
     def _ensure_plan(
         self,
@@ -341,7 +413,7 @@ class StrongHeuristicAgent(BaseAgent):
         heat_price, spin_loss = self._risk_posture(state, player_id)
         exp_stress = ME.expected_basic_value(player)
         max_basic = ME.max_basic_value(player)
-        scored: list[tuple[float, tuple[Card, ...]]] = []
+        scored: list[tuple[ME.MoveEval, bool, tuple[Card, ...]]] = []
         for play in legal_plays:
             exp_speed = ME.play_speed(play, exp_stress)
             var = (
@@ -365,9 +437,21 @@ class StrongHeuristicAgent(BaseAgent):
                 speed_variance=var,
                 spinout_loss=spin_loss,
             )
-            scored.append((result.value, play))
-        chosen = self._select_best(scored)
-        return chosen if chosen is not None else legal_plays[0]  # type: ignore[return-value]
+            scored.append(
+                (
+                    result,
+                    self._play_guarantees_spin(state, player_id, play, 0),
+                    play,
+                )
+            )
+        eligible = self._reject_avoidable_certain_spins(scored)
+        chosen = self._select_best(
+            [
+                (result.value, play)
+                for result, _guaranteed, play in eligible
+            ]
+        )
+        return chosen if chosen is not None else legal_plays[0]
 
     def choose_react(
         self,
