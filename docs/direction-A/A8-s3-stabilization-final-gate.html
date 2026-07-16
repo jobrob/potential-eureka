@@ -11,15 +11,15 @@
 <header class="hybrid-hero">
   <div class="hybrid-shell hybrid-hero-grid">
     <div>
-      <span class="status">Approved design · experiment pending</span>
+      <span class="status">Validation complete · G0004 not adopted · final pending</span>
       <h1>S3: make the final policy less dependent on one checkpoint.</h1>
       <p class="hero-copy">Average three late G0002 milestones with one rule for every seed, test the candidate on consumed validation data, then evaluate the frozen winner once on untouched tracks.</p>
       <p><strong>Direction A · A8 completion gate</strong><br><span class="muted">Designed 16 July 2026</span></p>
     </div>
     <aside class="status-board" aria-label="S3 decision rule">
-      <span class="board-label">Primary stabilization gate</span>
-      <strong>≥20% less seed variation.<br>≤0.030 skill loss.</strong>
-      <p>The untouched final band remains sealed until the validation decision and checkpoint rule are frozen.</p>
+      <span class="board-label">Frozen final selection</span>
+      <strong>Keep G0002.<br>G0004 ratio 0.813.</strong>
+      <p>Averaging improved broad skill but narrowly missed the predeclared 0.800 seed-variation gate.</p>
     </aside>
   </div>
 </header>
@@ -92,7 +92,7 @@
         <div class="config-panel" aria-label="Evaluation data roles">
           <div><span>Training</span><strong><code>80008</code> namespace</strong></div>
           <div><span>Development</span><strong><code>900000+</code> and <code>714000+</code><br>already consumed</strong></div>
-          <div><span>Final test</span><strong><code>1314000..1314039</code><br>sealed until selection</strong></div>
+          <div><span>Final test</span><strong><code>1314000..1314039</code><br>game seed <code>3131</code></strong></div>
         </div>
         <p>The final claim passes when the selected generation has positive median aggregate placement reward, at least two of three runs have positive aggregates, the worst run is above −0.050, and median placement reward against the weak ruler is positive at 2, 4, and 6 seats. Win rates and Wilson intervals remain supporting evidence rather than the primary multi-seat statistic.</p>
         <div class="decision-banner"><strong>Honest stop rule</strong>The final test is reported as observed. A miss does not reopen model or checkpoint selection on this band; it closes A8 with a failed or partial generalization verdict and hands the evidence to the next direction.</div>
@@ -112,8 +112,20 @@
 
       <section id="results">
         <span class="section-kicker">07 · Results</span>
-        <h2>Pending implementation and bounded measurement.</h2>
-        <p>This section will record the exact validation metrics, adoption decision, untouched final result, verification commands, and A8 completion verdict. It must be updated before the sprint is marked complete.</p>
+        <h2>Averaging improved skill but missed the stabilization gate.</h2>
+        <p>The matched validation matrix completed all 72 cells and 7,200 races in 1,172.6 seconds. G0004 improved every ruler median and raised the recipe-median aggregate substantially, but the primary variance reduction stopped just short of its predeclared threshold.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Metric</th><th>G0002</th><th>G0004</th><th>Gate</th><th>Result</th></tr></thead>
+            <tbody>
+              <tr><td>Median aggregate reward</td><td>+0.0768</td><td>+0.1852</td><td>Difference ≥ −0.030</td><td class="metric-good">+0.1083 · pass</td></tr>
+              <tr><td>Cross-seed population SD</td><td>0.01934</td><td>0.01573</td><td>Ratio ≤ 0.800</td><td class="metric-bad">0.813 · fail</td></tr>
+              <tr><td>Ruler median directions</td><td>Reference</td><td>4 / 4 improved</td><td>At least 3 non-negative</td><td class="metric-good">Pass</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="decision-banner"><strong>Frozen selection</strong>Do not adopt G0004 because the primary stabilization gate failed. Retain the averaged policies as a strong research lead, but send G0002-R00, G0002-R01, and G0002-R02 to the untouched final band. This decision was committed before final-test results were opened.</div>
+        <p>The untouched final test uses 40 generated tracks at seeds <code>1314000..1314039</code>, evaluation seed <code>3131</code>, the four frozen B2 rulers, 2/4/6 seats, and 200 races per cell. Results remain pending.</p>
       </section>
     </article>
   </div>

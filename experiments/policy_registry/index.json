@@ -32,7 +32,7 @@
       "display_name": "A8 late-checkpoint average",
       "created_date": "2026-07-16",
       "parent_generation_id": "G0002",
-      "status": "planned",
+      "status": "rejected_stabilization_skill_gain",
       "manifest": "experiments/policy_registry/g0004.json"
     }
   ]

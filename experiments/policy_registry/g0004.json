@@ -5,8 +5,8 @@
   "created_date": "2026-07-16",
   "parent_generation_id": "G0002",
   "experiment_alias": "S3 uniform late-checkpoint average",
-  "status": "planned",
-  "decision": "Pending the predeclared S3 validation comparison against G0002.",
+  "status": "rejected_stabilization_skill_gain",
+  "decision": "Not adopted because seed-variation ratio 0.813 missed the predeclared 0.800 gate. Retained as a skill-positive research result: median aggregate reward improved by 0.108 and all four ruler medians improved.",
   "design_document": "docs/direction-A/A8-s3-stabilization-final-gate.html",
   "recipe": {
     "derivation_script": "experiments/stabilize_a8_checkpoints.py",
@@ -36,8 +36,8 @@
       "selected_checkpoint_id": "G0004-R00@final",
       "selected_checkpoint": "runs/a8_s3_average/g0004_r00.pt",
       "source_checkpoint_ids": ["G0002-R00@500K", "G0002-R00@750K", "G0002-R00@1000K"],
-      "bytes": 0,
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      "bytes": 906089,
+      "sha256": "2cc7dd71deea2a6823ee2d32b569a67a676691aa0732bb450c48ac5945b1c18d"
     },
     {
       "agent_id": "G0004-R01",
@@ -45,8 +45,8 @@
       "selected_checkpoint_id": "G0004-R01@final",
       "selected_checkpoint": "runs/a8_s3_average/g0004_r01.pt",
       "source_checkpoint_ids": ["G0002-R01@500K", "G0002-R01@750K", "G0002-R01@1000K"],
-      "bytes": 0,
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      "bytes": 906089,
+      "sha256": "5c21cd37f04ecd8fd7384e780c3618455bcac05a9244dd30323b455dd912403a"
     },
     {
       "agent_id": "G0004-R02",
@@ -54,8 +54,8 @@
       "selected_checkpoint_id": "G0004-R02@final",
       "selected_checkpoint": "runs/a8_s3_average/g0004_r02.pt",
       "source_checkpoint_ids": ["G0002-R02@500K", "G0002-R02@750K", "G0002-R02@1000K"],
-      "bytes": 0,
-      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      "bytes": 906089,
+      "sha256": "34602f3a3fa1680331231d7cf8be90045b4c0223b5f47d9801b92227c1d41c0e"
     }
   ]
 }
