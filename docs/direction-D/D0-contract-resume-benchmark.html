@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Implementation design for Direction D0: semantic receipts, exact segmented resume, and the scalar benchmark.">
+  <title>Direction D0 — contract, resume, and benchmark</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Implemented · gates passed · 19 July 2026</span>
+      <h1>D0: freeze what “same training run” means.</h1>
+      <p class="hero-copy">D0 adds three receipts before any lane or tensor work: a canonical scalar-engine trace, an end-to-end A8 benchmark, and a full-state checkpoint that makes a planned stop indistinguishable from uninterrupted training.</p>
+      <p><strong>Direction D · implementation design</strong><br><span class="muted">Parent decision: <a href="D0-big-picture-design.html">affordable training substrate</a></span></p>
+    </div>
+    <aside class="status-board" aria-label="D0 boundary">
+      <span class="board-label">Boundary</span>
+      <strong>Safe PPO boundaries only.</strong>
+      <p>No partial game, rollout buffer, lane scheduler, policy change, or large learned-policy campaign is part of D0.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#decision">Decision</a>
+      <a href="#state">Resume state</a>
+      <a href="#contract">Semantic contract</a>
+      <a href="#protocol">D1 seam</a>
+      <a href="#files">File changes</a>
+      <a href="#experiments">Experiments</a>
+      <a href="#gates">Gates</a>
+      <a href="#status">Status</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="decision">
+        <span class="section-kicker">01 · Implementation decision</span>
+        <h2>Extend the scalar trainer; do not replace it.</h2>
+        <p class="lede">The A8 loop remains the one semantic and performance reference. Resume is an opt-in configuration around that loop. A resumed process rebuilds ordinary A8 objects, validates the checkpoint in isolation, restores every mutable component, restores RNG last, and continues at the next iteration.</p>
+        <div class="decision-banner">
+          <strong>Why this shape</strong>
+          It exercises the real adopted recipe without introducing a second trainer. D1 can later consume the same checkpoint metadata and environment protocol while the scalar implementation remains available for differential checks.
+        </div>
+        <p><strong>Deliberate constraint:</strong> D0 checkpoints are taken only after a PPO update, snapshot-pool maintenance, milestone callbacks, and iteration logging have completed. Mid-rollout recovery belongs to D1 only if an eight-hour rehearsal shows boundary checkpoints are operationally insufficient.</p>
+      </section>
+
+      <section id="state">
+        <span class="section-kicker">02 · Exact continuation state</span>
+        <h2>The checkpoint is a versioned training transaction, not an evaluation policy.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Component</th><th>Stored value</th><th>Reason</th></tr></thead>
+            <tbody>
+              <tr><td>Policy and optimizer</td><td>Named tensors, optimizer slots and parameter groups</td><td>Weights alone cannot reproduce the next PPO update.</td></tr>
+              <tr><td>Recipe contract</td><td>Resolved A8 config, track parameters, codec dimensions/version and SHA-256 fingerprint</td><td>Reject a subtly different run before loading state.</td></tr>
+              <tr><td>Campaign contract</td><td><code>dev-*</code> campaign ID, source identity and optional immutable anchor identity</td><td>Prevent a checkpoint being attached to the wrong experiment or code receipt.</td></tr>
+              <tr><td>Opponent context</td><td>Snapshot labels and policy tensors, pool capacity, opponent counters</td><td>Opponent sampling must continue from the same population.</td></tr>
+              <tr><td>Controllers</td><td>Entropy coefficient, engaged flag, minimum entropy and engagement history</td><td>Anti-collapse behavior is stateful.</td></tr>
+              <tr><td>Scheduling</td><td>Seat-count pending block, its RNG, current iteration, emitted milestones and next iteration</td><td>The next field size and callback identity must not repeat or skip.</td></tr>
+              <tr><td>Randomness</td><td>Private training and seat-schedule NumPy generators, Torch CPU and all CUDA RNG states</td><td>Every stream that can affect sampling or minibatch order must continue exactly; unrelated process globals stay untouched.</td></tr>
+              <tr><td>Progress</td><td>Recorded transitions/games, diagnostic rows and policy version</td><td>Operational ledgers and later checkpoint schedules remain monotonic.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 class="table-title">Atomic write and validation order</h3>
+        <ol class="step-line" aria-label="Checkpoint flow">
+          <li><strong>Capture</strong><br>safe post-update state</li>
+          <li><strong>Write + flush</strong><br>temporary file on same volume</li>
+          <li><strong>Replace</strong><br>atomic destination swap</li>
+          <li><strong>Receipt</strong><br>SHA-256 sidecar, also atomic</li>
+        </ol>
+        <p>Load first verifies the receipt bytes, schema, recipe, campaign, source, anchor, codec, required keys, and policy tensor shapes. Only then is a newly constructed training context populated. A truncated, corrupt, stale-schema, or incompatible checkpoint fails without exposing a partially restored trainer.</p>
+      </section>
+
+      <section id="contract">
+        <span class="section-kicker">03 · Scalar semantic receipt</span>
+        <h2>Canonical JSON traces become D2’s oracle corpus.</h2>
+        <p>Each trace row contains the game identity, seat count, round, current phase, yielded decision and legal payload, acting-seat observation, legal-action mask, complete public/private scalar state, deck order, local game RNG state, and a canonical SHA-256 digest. The corpus driver uses deterministic legal actions and generated tracks, so the same source receipt must reproduce byte-identical JSON.</p>
+        <p>The first corpus covers 2, 3, 4, 5 and 6 seats and every yielded decision kind. It also records engine event phases and terminal ordering. D2 will add tensor-side snapshots and demand zero differences; D0 does not implement a second engine.</p>
+      </section>
+
+      <section id="protocol">
+        <span class="section-kicker">04 · D1 seam</span>
+        <h2>Freeze capability and data shapes, not an implementation framework.</h2>
+        <pre><code>reset(game_ids, seeds, seat_counts) -> ready lane identities
+ready()                              -> bounded policy-decision rows
+observe(rows)                        -> observations + legal masks
+step(rows, actions, policy_version)  -> completed samples + ready rows
+drain(policy_version)                -> safe boundary + bootstraps
+snapshot()                           -> canonical comparable state</code></pre>
+        <p>The protocol requires stable game/seat identities, a declared policy version, bounded transition accounting, and semantic snapshots. It does not require Gymnasium, multiprocessing, PyTorch tensors, or CUDA; those remain replaceable implementation details.</p>
+      </section>
+
+      <section id="files">
+        <span class="section-kicker">05 · File-level implementation</span>
+        <h2>The production surface stays narrow.</h2>
+        <div class="file-grid">
+          <div class="file-card"><code>src/heat/ml/selfplay/training_state.py</code>Schema, recipe fingerprint, atomic save, receipt verification, state validation and canonical equivalence digest.</div>
+          <div class="file-card"><code>src/heat/ml/selfplay/phase1.py</code>Opt-in resume settings, restore-before-loop, safe-boundary saves and bounded per-process stopping.</div>
+          <div class="file-card"><code>src/heat/ml/selfplay/snapshots.py</code>Explicit export/restore of the recent-opponent pool.</div>
+          <div class="file-card"><code>src/heat/ml/selfplay/semantic_contract.py</code>Canonical game, decision, observation, mask and trace encoding.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/protocol.py</code>Typed D1-facing environment and trajectory boundary contracts.</div>
+          <div class="file-card"><code>experiments/benchmark_direction_d.py</code>D0-B fixed workload, resource/software receipt, 48-hour projection, corpus generation and D0-R fresh-process controls.</div>
+          <div class="file-card"><code>tests/test_direction_d0.py</code>Focused atomicity, incompatibility, schedule/pool restoration, semantic determinism and resume-equivalence tests.</div>
+        </div>
+      </section>
+
+      <section id="experiments">
+        <span class="section-kicker">06 · Bounded experiment plan</span>
+        <h2>Two experiments answer two questions.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Run</th><th>Hypothesis</th><th>Scope and timeout</th><th>Output</th></tr></thead>
+            <tbody>
+              <tr><td><strong>D0-R</strong></td><td>Uninterrupted, one-stop and two-stop fresh-process controls have the same canonical complete-state digest. Confidence 85%.</td><td>Six small deterministic PPO iterations per arm; corrupt and incompatible load probes; hard cap 10 minutes.</td><td><code>runs/direction_d/d0_resume.json</code></td></tr>
+              <tr><td><strong>D0-B</strong></td><td>The scalar A8 path reproduces 1,750–1,850 rollout transitions/s and three repeats vary by at most 5%. Confidence 90%.</td><td>Three 100k-transition CPU repeats; scalar collector, adopted five epochs, profile telemetry; hard cap 15 minutes.</td><td><code>runs/direction_d/d0_baseline.json</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>D0-B reports rollout and trained transition rates separately, timing mix, actual overshoot, peak process/CUDA memory when available, Python/Torch/platform receipt, median and spread, and a practical 48-hour projection with a 10% operational reserve. These are disposable <code>dev-d0-*</code> runs and do not allocate a learned-policy generation.</p>
+      </section>
+
+      <section id="gates">
+        <span class="section-kicker">07 · Exit gates</span>
+        <h2>D1 stays blocked until correctness and baseline stability are both evidenced.</h2>
+        <ul class="open-list">
+          <li><strong>Resume equality.</strong><br>Policy, optimizer, controller, pool, counters, diagnostics, RNGs and next scheduled work match across all three D0-R arms.</li>
+          <li><strong>Invalid-state rejection.</strong><br>Truncated, corrupt, hash-mismatched and recipe/source/campaign-incompatible checkpoints fail before continuation.</li>
+          <li><strong>Corpus coverage.</strong><br>2–6 seats, all five decision kinds, engine phase/event coverage and terminal order are present with deterministic digests.</li>
+          <li><strong>Baseline repeatability.</strong><br>Three scalar rollout rates have at most 5% relative spread; a median more than 10% outside the prior band is investigated before D1.</li>
+          <li><strong>Engineering gates.</strong><br>Focused tests, strict mypy and targeted Ruff pass; the legacy non-resume call remains behaviorally unchanged.</li>
+        </ul>
+      </section>
+
+      <section id="status">
+        <span class="section-kicker">08 · Live status</span>
+        <h2>D0 worked: one training run can now be safely split into blocks.</h2>
+        <div class="result-note">
+          <strong>The result in one sentence.</strong> We can stop training at a safe point, close the program, and continue in a new process without changing what the run learns next. The current training speed is also stable enough to use as the reference for D1.
+        </div>
+        <p>This stage was mainly about trust, not speed. D0 does not make training faster by itself. It gives the future faster implementation a reliable “answer sheet” and proves that a long run can be divided into practical blocks without quietly becoming a different run.</p>
+        <div class="hybrid-stats" aria-label="D0 results">
+          <div class="hybrid-stat"><span>Safe restart</span><strong>Exact</strong><small>same final state after zero, one or two restarts</small></div>
+          <div class="hybrid-stat"><span>Game simulation</span><strong>1,730/s</strong><small>recorded decisions produced per second</small></div>
+          <div class="hybrid-stat"><span>Run-to-run variation</span><strong>0.31%</strong><small>comfortably inside the 5% limit</small></div>
+          <div class="hybrid-stat"><span>48 h capacity</span><strong>~233M</strong><small>training samples at 90% useful running time</small></div>
+        </div>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Question</th><th>Plain-English result</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr><td>Can training be paused safely?</td><td>Yes. We ran the same small training job in one piece, with one restart, and with two restarts. Every piece of learning state was identical at the end, including the model, optimizer, random-number streams, opponent history, counters, and the next scheduled work.</td><td class="metric-good">YES</td></tr>
+              <tr><td>Will a damaged or wrong save be noticed?</td><td>Yes. A cut-off file, an incorrect file fingerprint, and a checkpoint from different source code were all rejected before training continued.</td><td class="metric-good">YES</td></tr>
+              <tr><td>Do we have a reference for the future fast engine?</td><td>Yes. We saved representative states and digital fingerprints covering 2–6 players, every kind of player decision, and every game phase. A future engine can be checked against these known-correct answers.</td><td class="metric-good">YES</td></tr>
+              <tr><td>Is the current speed measurement dependable?</td><td>Yes. The same workload was run three times and varied by only 0.31%. The median simulation rate was 1,730 decisions per second—about 1.1% below the old expected range, which is much too small to trigger the 10% investigation rule.</td><td class="metric-good">YES</td></tr>
+              <tr><td>Did the focused engineering checks pass?</td><td>Yes. The D0 and A8 checks, linting, and strict type checking passed. The wider suite passed 1,124 tests; one older order-dependent test failed in the full run but passed when checked on its own.</td><td class="metric-good">YES (scoped)</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="muted"><strong>Technical receipt.</strong> The uninterrupted, one-restart, and two-restart runs all produced the same complete-state fingerprint: <code>833d3a765398…</code>. The semantic reference contains 25 replayable decision fixtures plus fingerprints for 4,448 decisions and 6,604 engine events.</p>
+        <div class="verification-panel">
+          <strong>Bottom line: D0 is complete, and D1 may begin.</strong><br>
+          D1 can now work on collecting several games together and making training faster. It must keep matching D0's saved answers and safe-restart behaviour. No D1 code or large training campaign was started as part of this result.
+        </div>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer">
+  Direction D0 · exact continuation · scalar oracle · bounded evidence
+</footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

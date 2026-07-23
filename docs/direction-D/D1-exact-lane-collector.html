@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Implementation design for Direction D1: exact legacy-engine lanes, bounded trajectory fragments, and batched policy inference.">
+  <title>Direction D1 - exact lane collector</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Implemented - correctness PASS - throughput STOP - 19 July 2026</span>
+      <h1>D1: batch independent exact games without changing what a transition means.</h1>
+      <p class="hero-copy">D0 proved that the scalar engine and safe-boundary restart are stable. D1 now places 8, 16, or 32 independent legacy-engine games behind that frozen environment seam, makes one policy call across their ready decisions, and cuts bounded per-seat trajectory fragments before each PPO update.</p>
+      <p><strong>Direction D - implementation design</strong><br><span class="muted">Inputs: <a href="D0-contract-resume-benchmark.html">D0 result</a> and <a href="D0-big-picture-design.html">Direction D plan</a></span></p>
+    </div>
+    <aside class="status-board" aria-label="D1 boundary">
+      <span class="board-label">Boundary</span>
+      <strong>Do not adopt lanes.</strong>
+      <p>The code and correctness seams are complete, but the stable best arm reached only 1.118x end-to-end. Scalar remains the training default.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#evidence">D0 evidence</a>
+      <a href="#decision">Decision</a>
+      <a href="#invariants">Invariants</a>
+      <a href="#boundary">Bounded cut</a>
+      <a href="#implementation">Implementation</a>
+      <a href="#tests">Correctness gate</a>
+      <a href="#experiment">Experiment</a>
+      <a href="#status">Status</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="evidence">
+        <span class="section-kicker">01 - D0 evidence</span>
+        <h2>D1 is unblocked, but it must keep D0 as its oracle.</h2>
+        <p class="lede">The one-stop and two-stop D0 runs ended with the same complete training-state digest as the uninterrupted control. The semantic corpus covers 2-6 seats and every yielded decision phase. Three scalar baselines varied by only 0.31%, so performance movement in D1 can be attributed to the lane collector rather than an unstable reference.</p>
+        <div class="hybrid-stats">
+          <div class="hybrid-stat"><span>Resume arms</span><strong>Exact</strong><small>zero, one, and two stops</small></div>
+          <div class="hybrid-stat"><span>Scalar spread</span><strong>0.31%</strong><small>stable performance reference</small></div>
+          <div class="hybrid-stat"><span>D1 target</span><strong>&ge;1.5x</strong><small>end-to-end training throughput</small></div>
+        </div>
+      </section>
+
+      <section id="decision">
+        <span class="section-kicker">02 - Implementation decision</span>
+        <h2>Add an opt-in lane collector over the existing engine.</h2>
+        <p>The first D1 implementation is a <code>LegacyLaneEnvironment</code>. Each lane owns one ordinary <code>GameState</code> and <code>run_round_driver</code> generator. A scheduler exposes at most one live policy decision from each lane, orders rows by stable game identity, performs one policy inference call, and sends each decoded action back to its own generator.</p>
+        <div class="decision-banner">
+          <strong>Why this is the right first slice.</strong> It creates useful cross-game batches without a second rules implementation. The same collector can later consume the D2 tensor environment through the D0 protocol, so D1 is production architecture rather than a disposable benchmark hack.
+        </div>
+        <pre><code>legacy games (8/16/32)
+        | advance forced/scripted work
+        v
+stable ready rows -> one policy.act(batch) -> decoded actions
+        |                                  |
+        +------ rewarded seat spans &lt;------+
+                           |
+                    per-game/per-seat GAE
+                           |
+                         PPO update</code></pre>
+      </section>
+
+      <section id="invariants">
+        <span class="section-kicker">03 - Frozen invariants</span>
+        <h2>Scheduling may change; transition semantics may not.</h2>
+        <ul class="gate-grid">
+          <li><strong>Stable identity.</strong><br>Every live choice is identified by <code>(game_id, seat_id, decision_index)</code>. Ready rows are deterministic and an identity can be applied only once.</li>
+          <li><strong>One open span.</strong><br>A game-seat has at most one recorded action awaiting its next live decision or terminal state.</li>
+          <li><strong>Exact reward span.</strong><br>Reward is measured from the state in which the seat acted to that seat's next live choice, termination, or truncation, using the existing A8 reward functions.</li>
+          <li><strong>Simultaneous secrecy.</strong><br>Gear and card choices remain unapplied until the engine has received every seat's choice. Cross-game batching must not expose another seat's action.</li>
+          <li><strong>One policy version.</strong><br>All recorded and bridge actions used to close a rollout are sampled before the PPO update. A lane never carries an old-policy sample across an update.</li>
+          <li><strong>Per-stream GAE.</strong><br>GAE is computed independently for each game-seat fragment, with zero bootstrap on true termination and a value bootstrap at a nonterminal cut or time-limit truncation.</li>
+        </ul>
+      </section>
+
+      <section id="boundary">
+        <span class="section-kicker">04 - Bounded rollout cut</span>
+        <h2>Record exactly the target number of actions, then drain only those spans.</h2>
+        <p>Finishing every live game would multiply scalar overshoot by the lane count. D1 instead admits recorded actions in stable row order until exactly <code>n_steps</code> have been admitted. It then enters drain mode. The frozen policy may still choose short-lived <em>bridge actions</em> needed to advance the engine, but those bridge actions are not added to the PPO batch.</p>
+        <p>The collector stops as soon as every pre-cut recorded action has received its reward and successor observation. Any bridge spans still open belong to lane objects that are discarded before the update. This preserves one policy version, gives every retained sample a valid bootstrap boundary, and bounds overshoot independently of the number of lanes.</p>
+        <div class="decision-banner">
+          <strong>Resume boundary.</strong> D1 continues to checkpoint only after the collector has drained, PPO has updated, pool maintenance and callbacks have completed, and D0's atomic training-state write can run. Mid-rollout lane serialization remains out of scope.
+        </div>
+      </section>
+
+      <section id="implementation">
+        <span class="section-kicker">05 - Implementation slices</span>
+        <h2>Build through four explicit gates.</h2>
+        <div class="file-grid">
+          <div class="file-card"><code>Slice 1 - legacy environment</code><strong>Implemented.</strong> Multi-game reset, stable ready/observe/step, forced and scripted decisions, transition completion, semantic snapshots, and policy-version tripwires. Fixed-action scalar-oracle, mixed-lane, and version-crossing tests pass.</div>
+          <div class="file-card"><code>Slice 2 - lane collector</code><strong>Implemented.</strong> One batched policy call across lanes, recorded-versus-bridge ledger, per-game/per-seat fragments, batched endpoint values, zero retained overshoot, and batch/drain telemetry.</div>
+          <div class="file-card"><code>Slice 3 - A8 integration</code><strong>Implemented, opt-in only.</strong> <code>collector_mode="lanes"</code> and <code>lane_count</code> are part of the resolved recipe and resume tripwire. Scalar remains the default.</div>
+          <div class="file-card"><code>Slice 4 - bounded benchmark</code><strong>Completed.</strong> The trace smoke passed. The formal scalar/8/16/32-lane matrix completed inside the 45-minute cap and returned STOP.</div>
+        </div>
+        <h3 class="table-title">Planned file ownership</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>File</th><th>Responsibility</th></tr></thead>
+            <tbody>
+              <tr><td><code>src/heat/ml/vector_env/legacy.py</code></td><td>Exact adapter around independent legacy-engine games.</td></tr>
+              <tr><td><code>src/heat/ml/selfplay/vector_collector.py</code></td><td>Lane scheduling, rollout cut/drain, fragment GAE, and batch telemetry.</td></tr>
+              <tr><td><code>src/heat/ml/selfplay/phase1.py</code></td><td>Opt-in D1 selection and D0-compatible checkpoint receipts.</td></tr>
+              <tr><td><code>tests/test_direction_d1.py</code></td><td>Focused oracle parity, identity, reward, boundary, GAE, and resume tests.</td></tr>
+              <tr><td><code>experiments/benchmark_direction_d.py</code></td><td>Matched trace smoke and three-repeat lane-count benchmark.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="tests">
+        <span class="section-kicker">06 - Correctness gate</span>
+        <h2>No throughput benchmark runs before these checks pass.</h2>
+        <ul>
+          <li>Fixed-action single-lane traces match the scalar oracle at every live decision and at terminal state.</li>
+          <li>Mixed 2-6-seat lanes keep game, seat, and decision identities isolated and deterministic.</li>
+          <li>Every recorded action completes exactly once with the same reward, done flag, successor observation, and legal mask as scalar collection.</li>
+          <li>A cut inside a game produces the same per-stream advantages as an equivalent scalar fragment, including nonterminal and truncation bootstraps.</li>
+          <li>Policy-version mismatch, duplicate/stale identity, illegal action, incompatible resume recipe, and corrupt checkpoint all fail before unsafe continuation.</li>
+          <li>Focused D0, D1, A8, Ruff, and strict mypy checks pass.</li>
+        </ul>
+        <div class="decision-banner">
+          <strong>Implemented evidence.</strong> A complete one-lane game matches the scalar collector exactly across observations, actions, log-probabilities, values, rewards, legal masks, advantages, and returns. Mixed-lane identity, illegal/stale work, policy-version crossing, exact target count, finite fragment GAE, lane replacement, and safe-boundary resume are covered. The focused D0/D1/A8/multiseat suite passed 31 tests; targeted Ruff and strict <code>mypy src</code> passed.
+        </div>
+      </section>
+
+      <section id="experiment">
+        <span class="section-kicker">07 - D1-L experiment</span>
+        <h2>A bounded measurement decides whether lanes are worth keeping.</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Item</th><th>Frozen plan</th></tr></thead>
+            <tbody>
+              <tr><td>Hypothesis</td><td>Independent lanes average at least eight live rows per action call and improve end-to-end trained transitions per second by at least 1.5x versus D0 scalar. Confidence: 70%.</td></tr>
+              <tr><td>Code scope</td><td>Medium-large: approximately 800-1,400 production and focused-test lines across the four slices above.</td></tr>
+              <tr><td>Compute scope</td><td>Trace smoke, then matched 100k-transition scalar and 8/16/32-lane arms, three repeats each, CPU only, 45-minute total cap, flushed per-iteration telemetry.</td></tr>
+              <tr><td>Report</td><td>End-to-end, rollout, encoding, inference, update, preparation, memory, games, transitions, mean/p50/p95 batch size, drain actions, and overshoot.</td></tr>
+              <tr><td>Go</td><td>All correctness checks pass and the best stable lane count reaches at least 1.5x end-to-end.</td></tr>
+              <tr><td>Stop</td><td>Any semantic/trajectory mismatch, unstable memory, or best result below 1.3x. Between 1.3x and 1.5x, retain the interface but redesign scheduling before D2.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>No learned-policy generation is allocated for D1-L because this is a bounded substrate benchmark with unchanged weights as its subject. A learning campaign remains D5 work and requires separate permission.</p>
+        <h3 class="table-title">Formal result - 100k requested transitions, three repeats per arm</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Arm</th><th>Median rollout/s</th><th>Median trained/s</th><th>Speedup</th><th>Spread</th><th>Mean batch</th><th>Decision evidence</th></tr></thead>
+            <tbody>
+              <tr><td>Scalar</td><td>1,682.8</td><td>1,448.3</td><td>1.000x</td><td>3.41%</td><td>1.00</td><td>Stable reference; 22,058 retained overshoot per repeat.</td></tr>
+              <tr><td>8 lanes</td><td>1,590.3</td><td>1,395.0</td><td>0.963x</td><td>12.22%</td><td>7.23</td><td>Slower and unstable.</td></tr>
+              <tr><td>16 lanes</td><td>2,133.5</td><td>1,798.6</td><td>1.242x</td><td>15.77%</td><td>15.53</td><td>Fastest median, but below 1.3x and unstable.</td></tr>
+              <tr><td>32 lanes</td><td>1,891.9</td><td>1,619.5</td><td>1.118x</td><td>1.31%</td><td>29.81</td><td>Best stable arm; below the 1.3x stop threshold.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><strong>Why the speed gate failed:</strong> batching reduced policy-inference time, but safe fragment draining created substantial unretained work. Median drain rows per repeat were 90,898 at 8 lanes, 49,205 at 16 lanes, and 83,592 at 32 lanes, versus 99,328 retained rows. The bridge-action cost consumed most of the inference saving. Lanes retained exactly the requested per-iteration rows with zero retained overshoot, so the failure is not a transition-accounting bug.</p>
+        <p><strong>Provenance:</strong> <code>.venv\Scripts\python.exe experiments\benchmark_direction_d.py lanes --output runs\direction_d\d1_lane_benchmark.json --transitions 100000 --n-steps 1024 --repeats 3 --lane-counts 8 16 32 --timeout-seconds 2700</code>. CPU-only Windows run; Python 3.12.13, NumPy 2.5.1, PyTorch 2.13.0+cpu, 16 logical CPUs. Source-tree identity <code>663d0fbf1c5d1789ce9d20e6ad9b23539ebd1d45a9659613c87deb44f2b8c609</code>. Wall time: 829.8 seconds.</p>
+      </section>
+
+      <section id="status">
+        <span class="section-kicker">08 - Live status</span>
+        <h2>D1 implementation is complete, but the performance branch stops here.</h2>
+        <div class="decision-banner">
+          <strong>Final go/no-go: STOP.</strong> Correctness, batch size, bounded runtime, and zero retained overshoot passed. End-to-end throughput did not: the best stable arm was 1.118x, below the frozen 1.3x stop threshold and well below 1.5x adoption. Keep the lane code as an opt-in diagnostic and as a tested environment/trajectory seam; do not make it the default, do not tune again on this inspected workload, and do not begin D2 automatically from this result. The <a href="D1-next-step-options.html">next-step design</a> compares a smaller synchronous CPU-worker route with the longer-term tensor-engine slice.
+        </div>
+      </section>
+    </article>
+  </div>
+</main>
+</body>
+</html>

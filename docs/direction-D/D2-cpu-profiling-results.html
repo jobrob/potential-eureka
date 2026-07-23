@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Measured CPU profile and external comparison for Direction D2's exact tensor slice.">
+  <title>Direction D2 - CPU profiling result</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Diagnostic complete - eager PyTorch design closed - 20 July 2026</span>
+      <h1>D2 profiling: batching never removed the per-game work.</h1>
+      <p class="hero-copy">The tensor state is exact, but the CPU kernel still performs hundreds of small tensor and Python operations for every game. Larger batches therefore multiply work instead of turning it into a few efficient compiled operations.</p>
+      <p><strong>Direction D - profiling report</strong><br><span class="muted">Input: <a href="D2-tensor-vertical-slice-design.html">D2 correctness and Chunk 6 benchmark</a></span></p>
+    </div>
+    <aside class="status-board" aria-label="Profiling conclusion">
+      <span class="board-label">Conclusion</span>
+      <strong>Do not tune the current eager kernel.</strong>
+      <p>A credible D2 retry must be compiled and numeric end to end, or replaced by a native CPU kernel.</p>
+    </aside>
+  </div>
+</header>
+
+<div class="hybrid-shell hybrid-layout">
+  <nav class="hybrid-nav" aria-label="Document sections">
+    <a href="#answer">Answer</a>
+    <a href="#experiment">Experiment</a>
+    <a href="#components">Components</a>
+    <a href="#dispatch">Dispatch</a>
+    <a href="#outside">Other systems</a>
+    <a href="#difference">Why D2 differs</a>
+    <a href="#decision">Decision</a>
+  </nav>
+
+  <main class="hybrid-content">
+    <section id="answer">
+      <span class="section-kicker">01 - Plain answer</span>
+      <h2>The slowdown is structural, not one bad helper.</h2>
+      <p class="lede">State copying, validation, observations, and masks are not the main problem. Almost all elapsed time is inside the rule kernel, where Python loops, event strings, individual tensor indexing, and tensor-to-Python reads still happen once per game.</p>
+      <div class="hybrid-stats">
+        <div class="hybrid-stat"><span>Batch 256</span><strong>0.079x</strong><small>matched profile versus scalar</small></div>
+        <div class="hybrid-stat"><span>Needed for gate</span><strong>38.0x</strong><small>additional improvement to reach 3x</small></div>
+        <div class="hybrid-stat"><span>Tensor scalar reads</span><strong>~148/game</strong><small>constant at batches 64 and 256</small></div>
+      </div>
+      <div class="decision-banner">
+        <strong>Meaning:</strong> deleting every measured clone, validation, observation, and mask cost would still leave the kernel far below scalar. A retry must change how the rules execute, not merely reduce a few allocations.
+      </div>
+    </section>
+
+    <section id="experiment">
+      <span class="section-kicker">02 - Bounded experiment</span>
+      <h2>Profile the exact slice without changing its behaviour.</h2>
+      <div class="table-wrap">
+        <table>
+          <tbody>
+            <tr><th>Hypothesis</th><td>Fine-grained eager PyTorch dispatch, tensor-to-Python boundaries, state copying/validation, and Python event materialisation dominate the exact D2 CPU slice.</td></tr>
+            <tr><th>Confidence before run</th><td>85%, based on the visible loops, <code>.item()</code>, dynamic lists, event objects, and full-state copy.</td></tr>
+            <tr><th>Curve</th><td>Batches 1, 8, 32, 64, 128, and 256; two warmups and ten measured repeats.</td></tr>
+            <tr><th>Deep profiles</th><td>Python call profile and PyTorch CPU operator profile at batches 64 and 256, five exact slices each.</td></tr>
+            <tr><th>Components</th><td>Full slice, rule kernel, observation plus legal mask, state clone, state validation, and legacy-to-tensor conversion.</td></tr>
+            <tr><th>Reference</th><td>The scalar engine is rebuilt and timed on the exact same prepared games before every tensor component curve.</td></tr>
+            <tr><th>Limit</th><td>900-second cap. Final matched diagnostic wall time: 143.2 seconds.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>Command:</strong> <code>.venv\Scripts\python.exe experiments\profile_direction_d2.py --batch-sizes 1 8 32 64 128 256 --deep-batch-sizes 64 256 --warmups 2 --repeats 10 --profile-repeats 5 --top 40 --timeout-seconds 900 --correctness-artifact runs\direction_d\d2_chunk5_differential.json --benchmark-artifact runs\direction_d\d2_chunk6_benchmark.json --output runs\direction_d\d2_cpu_profile.json</code>.</p>
+      <p>The profiling script changes the experiments-tree hash but does not alter the production kernel. The input correctness receipt still identifies the exact code used for the 100,349-transition gate and Chunk 6 benchmark.</p>
+    </section>
+
+    <section id="components">
+      <span class="section-kicker">03 - Scaling curve</span>
+      <h2>The rule kernel grows almost directly with the number of games.</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Batch</th><th>Scalar</th><th>Full slice</th><th>Rules only</th><th>Observation + mask</th><th>Clone</th><th>Validate</th><th>Speed vs scalar</th><th>Extra gain needed for 3x</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>0.059 ms</td><td>5.538 ms</td><td>3.769 ms</td><td>1.628 ms</td><td>0.876 ms</td><td>0.129 ms</td><td>0.011x</td><td>282.1x</td></tr>
+            <tr><td>8</td><td>0.685 ms</td><td>16.500 ms</td><td>14.450 ms</td><td>2.337 ms</td><td>0.974 ms</td><td>0.145 ms</td><td>0.042x</td><td>72.2x</td></tr>
+            <tr><td>32</td><td>2.786 ms</td><td>35.060 ms</td><td>37.573 ms</td><td>2.495 ms</td><td>1.523 ms</td><td>0.205 ms</td><td>0.079x</td><td>37.7x</td></tr>
+            <tr><td>64</td><td>4.807 ms</td><td>66.666 ms</td><td>62.315 ms</td><td>2.511 ms</td><td>1.566 ms</td><td>0.150 ms</td><td>0.072x</td><td>41.6x</td></tr>
+            <tr><td>128</td><td>8.924 ms</td><td>111.000 ms</td><td>109.293 ms</td><td>3.019 ms</td><td>1.352 ms</td><td>0.179 ms</td><td>0.080x</td><td>37.3x</td></tr>
+            <tr><td>256</td><td>17.258 ms</td><td>218.822 ms</td><td>214.351 ms</td><td>3.849 ms</td><td>2.155 ms</td><td>0.213 ms</td><td>0.079x</td><td>38.0x</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Observation and mask work rises from 1.6 ms at batch 1 to only 3.8 ms at batch 256. That is successful vectorisation. The rule kernel rises from 3.8 ms to 214.4 ms, which is close to adding more individual game work. At batch 256 the kernel is 98.0% of the full-slice time, while clone and validation are about 1.0% and 0.1% respectively. Isolated component timings can overlap and contain normal measurement noise; they identify scale, not an additive decomposition.</p>
+      <p>Conversion takes 463.8 ms at batch 256, but it is not the root adoption blocker. A permanent tensor engine could avoid repeated conversion; it cannot avoid the slow rule kernel.</p>
+    </section>
+
+    <section id="dispatch">
+      <span class="section-kicker">04 - Deep profile</span>
+      <h2>The operator count proves that lanes are still handled individually.</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Five profiled slices</th><th>Batch 64</th><th>Per game/slice</th><th>Batch 256</th><th>Per game/slice</th></tr></thead>
+          <tbody>
+            <tr><td><code>aten::select</code></td><td>117,415 calls</td><td>367</td><td>467,560 calls</td><td>365</td></tr>
+            <tr><td><code>aten::item</code></td><td>48,860 calls</td><td>153</td><td>189,965 calls</td><td>148</td></tr>
+            <tr><td><code>aten::_index_put_impl_</code></td><td>4,270 calls</td><td>13.3</td><td>14,735 calls</td><td>11.5</td></tr>
+            <tr><td>Zone display construction</td><td>3,190 calls</td><td>10.0</td><td>12,790 calls</td><td>10.0</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The per-game figures barely change when the batch grows fourfold. This is the opposite of successful vectorisation: the implementation stores state in tensors, but repeatedly selects one scalar from those tensors and returns to Python.</p>
+      <p>In the instrumented batch-256 Python profile, zone-to-string display construction alone used 31.2% of self time. Replenishment used 11.6%, card appends 7.3%, raw tensor <code>.item()</code> calls 6.5%, turn-start event construction 7.1%, play-card event construction 5.6%, and creating small tensors 2.8%. These are directional profiler shares; profiler overhead means they should not be treated as production wall-clock measurements.</p>
+      <p>A bounded <code>torch.compile(fullgraph=True)</code> probe failed at the first data-dependent validation expression, <code>bool(torch.all(valid))</code>. Even after removing that check, the kernel contains many more data-dependent Python branches, lists, strings, random-state objects, and scalar reads. Compilation is therefore a redesign, not a decorator change. PyTorch's own guidance explains that data-dependent control flow and Python built-ins create graph breaks and lose optimisation opportunities.</p>
+    </section>
+
+    <section id="outside">
+      <span class="section-kicker">05 - External evidence</span>
+      <h2>Successful systems batch much larger—but only after removing Python from the step.</h2>
+      <p>The figures below are not directly comparable benchmarks: environments, hardware, rules, and measured boundaries differ. They show normal configuration ranges and the implementation pattern required for scaling.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>System</th><th>Typical configuration in its published tests</th><th>Reported result</th><th>Important design difference</th></tr></thead>
+          <tbody>
+            <tr><td><strong>EnvPool</strong></td><td>CPU examples use 12 environments/batch 12, async 36/batch 12, or NUMA 100/batch 32.</td><td>Single-environment gains were 1.27-1.87x. On a 12-core laptop, async Atari rose to 49,439 FPS versus 15,658 for subprocesses and about 4,830 for a serial loop.</td><td>C++ environments run concurrently in a native thread pool; Python receives completed batches instead of issuing tensor operations for each game.</td></tr>
+            <tr><td><strong>JaxMARL</strong></td><td>Published environment table compares 1, 100, and 10,000 environments.</td><td>Hanabi was slower at one JAX environment: 1.4k steps/s versus the 2.1k original. It reached 110k at 100 environments and 5.0M at 10,000.</td><td>The complete environment step is a pure compiled JAX function. Large batches reverse the poor single-environment result.</td></tr>
+            <tr><td><strong>Pgx board games</strong></td><td>1,024 environments on one A100 and 8,192 on eight A100s.</td><td>At sufficiently large batch, at least 10x over Python libraries on one A100 and about 100x on eight; average multi-GPU scaling was 7.4x.</td><td><code>jax.jit(jax.vmap(step))</code> compiles one numeric step for chess, Go, stochastic games, and imperfect-information games. The API avoids dynamic agent counts.</td></tr>
+            <tr><td><strong>Isaac Gym</strong></td><td>Common successful runs use 4,096 environments; harder tasks also use 8,192 or 16,384.</td><td>Ant reached 540k environment steps/s at 4,096; Humanoid about 200k at 4,096; Shadow Hand 150k at 16,384. The paper reports 2-3 orders of magnitude training gains over conventional CPU-simulation pipelines.</td><td>Physics, observations, rewards, policy, and training remain on one GPU with direct tensor buffers and no CPU round trip.</td></tr>
+            <tr><td><strong>PufferLib</strong></td><td>Generic CPU guidance uses configurations such as 128 environments, 16 workers, and batch 64.</td><td>The paper reports at least 30% for most environments and roughly 50%-3x with pooling.</td><td>For deeply branching games it uses native/process parallelism and shared buffers, not masked eager tensor rules.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>Primary sources:</strong> <a href="https://envpool.readthedocs.io/en/stable/content/benchmark.html">EnvPool benchmark</a>; <a href="https://papers.neurips.cc/paper_files/paper/2024/file/5aee125f052c90e326dcf6f380df94f6-Paper-Datasets_and_Benchmarks_Track.pdf">JaxMARL paper</a>; <a href="https://papers.nips.cc/paper_files/paper/2023/file/8f153093758af93861a74a1305dfdc18-Paper-Datasets_and_Benchmarks.pdf">Pgx paper</a>; <a href="https://arxiv.org/abs/2108.10470">Isaac Gym paper</a>; <a href="https://arxiv.org/abs/2406.12905">PufferLib paper</a> and <a href="https://pufferai-pufferlib.mintlify.app/advanced/performance-tuning">official tuning guide</a>; and <a href="https://docs.pytorch.org/docs/main/user_guide/torch_compiler/torch.compiler_troubleshooting.html">PyTorch compiler troubleshooting</a>.</p>
+    </section>
+
+    <section id="difference">
+      <span class="section-kicker">06 - Why Heat differs</span>
+      <h2>The data type is not enough; the execution boundary matters.</h2>
+      <div class="file-grid">
+        <div class="file-card"><strong>Small scalar reference</strong>The legacy card-to-REACT slice is already extremely cheap. Tensor setup and dispatch have very little arithmetic to amortise.</div>
+        <div class="file-card"><strong>Branch-heavy exact rules</strong>Stress, shuffles, replenishment, traffic, corners, finish order, and variable card identities produce data-dependent paths.</div>
+        <div class="file-card"><strong>Python receipts inside the kernel</strong>Exact events contain strings, dictionaries, card displays, and Python tuples. Successful compiled systems keep the hot step numeric.</div>
+        <div class="file-card"><strong>Python-owned randomness</strong>Exact reshuffles restore and update individual Python RNG states, taking lanes out of one compiled numeric graph.</div>
+        <div class="file-card"><strong>Eager CPU operations</strong>Each select, scalar read, small tensor creation, and indexed write is dispatched separately. There is no JIT fusion.</div>
+        <div class="file-card"><strong>A narrow slice</strong>Only one short phase-to-decision path is processed per call, so state and dispatch overhead are paid frequently.</div>
+      </div>
+      <p>Batch 256 was enough to expose this shape: throughput had already flattened around 1,150 games/s. Trying batch 1,024 with the same near-linear operator counts would mainly consume more memory and time. The published 1,024-16,384 configurations become useful only after the complete step is compiled or native.</p>
+    </section>
+
+    <section id="decision">
+      <span class="section-kicker">07 - Decision</span>
+      <h2>Close eager D2; retain the oracle for a fundamentally different kernel.</h2>
+      <ol>
+        <li><strong>Do not spend time tuning clone, validation, observation, or mask code.</strong> Together they are far too small to bridge the gap.</li>
+        <li><strong>Do not try larger eager batches or move this kernel unchanged to CUDA.</strong> The per-game host work and graph breaks remain.</li>
+        <li><strong>A compiled D2 retry must first prove one pure numeric step.</strong> No Python events, strings, lists, <code>.item()</code>, <code>.tolist()</code>, or Python RNG inside the compiled boundary.</li>
+        <li><strong>Use compact numeric event and RNG receipts.</strong> Materialise readable events only outside the hot path when diagnostics require them.</li>
+        <li><strong>Make the compiled unit coarser.</strong> Process a complete forced sequence or round so validation and dispatch are amortised.</li>
+        <li><strong>Gate before restoring full semantics.</strong> A stripped compiled/native prototype at batches 64 and 256 must first exceed scalar and show a credible route to 3x. Then reapply the D2 differential oracle.</li>
+      </ol>
+      <div class="decision-banner">
+        <strong>Recommended implementation order:</strong> run the lower-risk three-worker complete-game prototype next. In parallel planning, compare a native data-oriented CPU kernel—Numba/Cython/Rust/C++—with a pure JAX or fully compilable PyTorch spike. The current exactness suite is the common acceptance gate for either kernel.
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

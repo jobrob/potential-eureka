@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="L0 consolidation of the existing G0002, G0003, and G0004 learned-policy evidence.">
+  <title>L0 - learned-policy strength map</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">L0 implemented - existing evidence complete</span>
+      <h1>The current policies do not form a stable total order.</h1>
+      <p class="hero-copy">L0 consolidates 28,800 existing multi-ruler races and 24 milestone reports without running a new game. Seed and checkpoint effects are large enough that the next comparison must preserve multiple seeds, milestones, rulers, and seat counts.</p>
+      <p><a href="learned-agent-investigation-plan.html">Learned-agent plan</a><br><span class="muted">Completed 23 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="L0 decision">
+      <span class="board-label">Decision</span>
+      <strong>Design the 32K<br>learning-quality gate next.</strong>
+      <p>Freeze the native runtime recipe, use the V2 static population, and record per-race track and starting-seat fields that the old artifacts lack.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#design">Frozen scope</a>
+      <a href="#sources">Evidence sources</a>
+      <a href="#results">Strength map</a>
+      <a href="#milestones">Milestones</a>
+      <a href="#coverage">Coverage limits</a>
+      <a href="#benchmark">Minimum benchmark</a>
+      <a href="#next">Next gate</a>
+      <a href="#reproduce">Reproduction</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="design">
+        <span class="section-kicker">L01 - Frozen evidence scope</span>
+        <h2>Consolidate first; do not create new policy evidence.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <tbody>
+              <tr><td>Question</td><td>Do G0002, G0003, and G0004 show stable strength differences by seed, milestone, ruler, and seat count?</td></tr>
+              <tr><td>Hypothesis</td><td>Policy differences form repeatable matchup clusters rather than one total ordering.</td></tr>
+              <tr><td>Prior confidence</td><td>High, approximately 80%, because earlier reports showed coherent ruler gains alongside seed and checkpoint reversals.</td></tr>
+              <tr><td>Code scope</td><td>One standard-library analyzer, one machine-readable receipt, three focused tests, and this report.</td></tr>
+              <tr><td>Compute</td><td>Existing artifacts only. No games, training, CUDA work, generation allocation, or final-band reuse.</td></tr>
+              <tr><td>Stop rule</td><td>Do not invent track-family or starting-position results when the historical cell schema cannot recover them.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="sources">
+        <span class="section-kicker">L02 - Evidence roles</span>
+        <h2>Three matrices answer different questions and remain separate.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Artifact</th><th>Policies</th><th>Races</th><th>Role</th></tr></thead>
+            <tbody>
+              <tr><td><code>a8_b2_multi_ruler.json</code></td><td>G0002 versus G0003</td><td>14,400</td><td>Consumed development comparison.</td></tr>
+              <tr><td><code>a8_s3_validation.json</code></td><td>G0002 versus G0004</td><td>7,200</td><td>Consumed checkpoint-combination development comparison.</td></tr>
+              <tr><td><code>a8_final_test.json</code></td><td>G0002 only</td><td>7,200</td><td>Historical untouched result. It is reported, never tuned against.</td></tr>
+              <tr><td>24 checkpoint reports</td><td>G0002 and G0003 at 300K/500K/750K/1M</td><td>50 per ruler-seat cell</td><td>Lower-confidence milestone diagnostic.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Every source path and SHA-256 is stored in <code>runs/l0_learned_strength_map.json</code>. The analyzer also checks completion markers, cell counts, unique keys, expected generations, and games per cell before using a matrix.</p>
+      </section>
+
+      <section id="results">
+        <span class="section-kicker">L03 - Selected-policy map</span>
+        <h2>The recipe result depends on the run, but not in a one-ruler way.</h2>
+        <div class="hybrid-stats" aria-label="L0 headline evidence">
+          <div class="hybrid-stat"><span>Evidence reused</span><strong>28,800</strong><small>existing multi-ruler races</small></div>
+          <div class="hybrid-stat"><span>G0003 vs G0002</span><strong>2 / 3</strong><small>matched seeds improved</small></div>
+          <div class="hybrid-stat"><span>G0004 vs G0002</span><strong>3 / 3</strong><small>matched seeds improved</small></div>
+          <div class="hybrid-stat"><span>New races</span><strong>0</strong><small>L0 is evidence-only</small></div>
+        </div>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Comparison</th><th>Baseline median</th><th>Candidate median</th><th>Matched-seed reading</th></tr></thead>
+            <tbody>
+              <tr><td>B2: G0003 fixed anchor versus G0002</td><td>+0.0967</td><td>+0.1585</td><td>Seeds 0 and 2 improved by about +0.069; seed 1 regressed by -0.061.</td></tr>
+              <tr><td>S3: G0004 averaging versus G0002</td><td>+0.0768</td><td>+0.1852</td><td>All three aggregates improved, but the predeclared variance-reduction gate still missed.</td></tr>
+              <tr><td>A8 final: G0002</td><td colspan="2">+0.1390</td><td>All three runs positive on the historical untouched band.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="decision-banner">
+          <strong>Most important pattern</strong>
+          In B2, every one of the four rulers moved in the same direction within each matched seed. Seeds 0 and 2 improved across all four; seed 1 regressed across all four. This is evidence of run-level training sensitivity, not a candidate that merely farms one opponent.
+        </div>
+      </section>
+
+      <section id="milestones">
+        <span class="section-kicker">L04 - Checkpoint path</span>
+        <h2>Late skill improves overall, but the route is oscillatory.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Generation</th><th>300K median</th><th>500K</th><th>750K</th><th>1M</th><th>Monotonic runs</th></tr></thead>
+            <tbody>
+              <tr><td>G0002</td><td>-0.0845</td><td>+0.1235</td><td>+0.0635</td><td>+0.2593</td><td>0 / 3</td></tr>
+              <tr><td>G0003</td><td>-0.1787</td><td>-0.1127</td><td>+0.1023</td><td>+0.0706</td><td>1 / 3</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The absolute G0002 and G0003 milestone levels are not directly comparable because their legacy ruler grids differ. The safe conclusion is within each generation: checkpoint progress is not monotonic, and one endpoint cannot describe the training path. The 32K comparison therefore needs frozen milestone evaluation rather than final-checkpoint-only selection.</p>
+      </section>
+
+      <section id="coverage">
+        <span class="section-kicker">L05 - Honest boundary</span>
+        <h2>Track and starting-seat localization cannot be reconstructed.</h2>
+        <p>The historical multi-ruler schema stores one aggregate for each contender, ruler, and seat-count cell. It records the track band and game seed, but not individual race outcomes. L0 can therefore map generation, seed, selected checkpoint, legacy milestone, ruler, seat count, and track band.</p>
+        <div class="verification-panel">
+          <strong>Missing from historical evidence.</strong><br>
+          Per-race starting position, per-track result, and track-family result are not recoverable. The next live benchmark must persist <code>track_seed</code>, <code>track_family</code>, <code>game_seed</code>, <code>focal_starting_seat</code>, finish position, and placement reward for every race.
+        </div>
+      </section>
+
+      <section id="benchmark">
+        <span class="section-kicker">L06 - Minimum live benchmark</span>
+        <h2>Use a small routine screen and retain the full promotion gate.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Level</th><th>Rulers</th><th>Seats</th><th>Races per cell</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td>Milestone screen</td><td>Weak V2, StaticSearchV2, historical G0002</td><td>2 / 4 / 6</td><td>100</td><td>Detect collapse, learned-style regression, and the difficult static matchup cheaply.</td></tr>
+              <tr><td>Promotion gate</td><td>Add repaired heuristic V2</td><td>2 / 4 / 6</td><td>200</td><td>Preserve the four-style breadth contract for recipe or substrate adoption.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <ul class="open-list">
+          <li><strong>Weak V2</strong><br>Retains the basic competence floor.</li>
+          <li><strong>StaticSearchV2</strong><br>Supplies the most informative fixed challenge and replaces the repaired V1 search defects.</li>
+          <li><strong>Historical G0002-R00@1000K</strong><br>Detects regression against a learned playing style.</li>
+          <li><strong>Repaired heuristic V2</strong><br>Remains in promotion because the static matchup graph is non-transitive.</li>
+        </ul>
+      </section>
+
+      <section id="next">
+        <span class="section-kicker">L07 - Decision unlocked</span>
+        <h2>Freeze the evaluation contract, then design the registered 32K comparison.</h2>
+        <div class="config-panel" aria-label="Runtime recipe to compare">
+          <div><span>Collector</span><strong>native</strong></div>
+          <div><span>Slots / ready</span><strong>48 / 288</strong></div>
+          <div><span>Rollout</span><strong>32,768</strong></div>
+          <div><span>Reserve</span><strong>1.30</strong></div>
+          <div><span>Torch</span><strong>8 / 2</strong></div>
+        </div>
+        <p>The comparison design should use multiple matched seeds and frozen milestone evaluations. It must judge aggregate skill, per-ruler breadth, every seat count, entropy/collapse behavior, and the newly recorded track-family and starting-seat slices. A fresh development track band is required; the A8 final band stays historical.</p>
+        <div class="decision-banner">
+          <strong>Not authorized by L0</strong>
+          No G0005 allocation, training run, Option C/CUDA change, eight-hour rehearsal, or untouched-final evaluation has started.
+        </div>
+      </section>
+
+      <section id="reproduce">
+        <span class="section-kicker">L08 - Reproduction</span>
+        <h2>One deterministic command rebuilds the receipt.</h2>
+        <pre><code>.venv\Scripts\python.exe experiments\analyze_learned_strength_map.py</code></pre>
+        <div class="verification-panel">
+          <strong>Verification.</strong><br>
+          Three focused tests pass. Targeted Ruff and strict mypy pass. Output:
+          <code>runs/l0_learned_strength_map.json</code>, SHA-256
+          <code>82adcbf24032afb197bd79d0c92debb6145758a3777d79428ba085d2a5262bbb</code>.
+        </div>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer">Learned-agent strength - L0 evidence consolidation</footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

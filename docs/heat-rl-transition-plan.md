@@ -1,10 +1,17 @@
 # Heat RL — transition plan toward multiplayer, imperfect-information, any-track in <48 h GPU
 
-> **Status:** strategic planning (2026-06-23). High-level direction-setting, not an
-> implementation spec. Synthesizes the C6 feasibility findings, the C7–C11 throughput
-> work, and a survey of how hard games have actually been trained on consumer hardware
-> (KataGo, Big 2, Stochastic MuZero, PIMC card-game agents). Each direction below ends
-> with the high-level steps it requires; the final section sequences them.
+> **Status:** updated 2026-07-23. Direction A / Phases 0 and 1 are complete.
+> Direction D A0-A10 is implemented, and its exact native CPU path has passed the
+> one-hour operational gate at 5,875.53 trained transitions/s. The adopted operations
+> configuration is 48 native slots, ready capacity 288, `n_steps=32,768`, refill
+> reserve 1.30, and Torch CPU threads 8/2. The next gate is the separate learning-quality
+> comparison before a registered campaign; the eight-hour rehearsal remains separately
+> authorized work. The detailed decision and receipts are in
+> [`direction-D/D3-A10-soak-results.html`](direction-D/D3-A10-soak-results.html).
+> A separate evidence-first
+> [`agent-strength/S0-investigation-plan.html`](agent-strength/S0-investigation-plan.html)
+> runs in parallel without changing Direction D's performance attribution.
+> The original strategic rationale below is retained as the parent plan.
 
 ## 0. The target (definition of done)
 
@@ -123,7 +130,7 @@ needed* — the axis that matters most for a 48 h budget.
 
 Shared by A and B; cheap to add; high expected leverage.
 
-### Direction D (shared enabler) — a cheaper environment substrate
+### Direction D (shared enabler) — a cheaper environment substrate — **A0-A10 operational gate complete**
 
 **Bet:** after C11 we are engine/plumbing-bound; 48 h at the required game counts needs
 the transition itself to be orders cheaper. Two routes, decide by a spike:
@@ -140,6 +147,16 @@ the transition itself to be orders cheaper. Two routes, decide by a spike:
 **Pros:** the only thing that makes a real-scale run affordable. **Cons:** the largest
 build; a rewrite, not a sprint — sequence it after Direction A proves the *method* works
 at small scale.
+
+**Current decision (2026-07-23):** Direction A proved the method at small scale, and
+Direction D's staged exact-first work has now completed A0-A10. Tensor-engine attempts
+were exact but missed the performance gate; the adopted route is the exact native CPU
+collector described in the
+[`D3 detailed design`](direction-D/D3-options-A-C-detailed-design.html). Its 48-slot,
+capacity-288, 32K, reserve-1.30, Torch-8/2 configuration trained 21,182,927 transitions
+in 3,605.28 seconds, passed 98.84% minimum-to-median stability, and passed checkpoint,
+memory, CPU-performance, and no-stall gates. CUDA and learned dynamics remain separately
+gated future options rather than requirements for the next learning-quality comparison.
 
 ## 4. Cross-cutting requirements (true regardless of direction)
 
@@ -158,17 +175,18 @@ at small scale.
 The C6 "shrink the problem first" lever still governs: prove the *method* learns at a
 feasible scale before paying for scale.
 
-- **Phase 0 — Tiny-Heat proving ground (days, not GPU-weeks).** A deliberately small Heat
+- **Phase 0 — Tiny-Heat proving ground — complete.** A deliberately small Heat
   variant (short track, small deck, 2–3 seats, imperfect info). Stand up **Direction A**
   (PPO self-play + Big 2 action head + entropy) **with one Direction-C dense target**.
   *Gate:* does the loop *learn* (beats weak heuristic, climbs vs prev-self) at small
   scale? If not, fix the method here where iteration is cheap.
-- **Phase 1 — Full-rules, small-scale.** Full Heat rules, full track distribution, 2–6
+- **Phase 1 — Full-rules, small-scale — complete.** Full Heat rules, full track distribution, 2–6
   seats, imperfect info, still modest net/games. Add remaining Direction-C targets.
   *Gate:* generalizes across held-out tracks and seat counts at small scale.
-- **Phase 2 — Make it affordable (Direction D).** Only now, if Phase 1's projected
-  full-scale run exceeds 48 h, build the cheaper substrate (vectorized engine or learned
-  dynamics). *Gate:* measured games/sec implies the target run fits the budget.
+- **Phase 2 — Make it affordable (Direction D) — operational gate complete.** The
+  exact native CPU collector sustains 5,875.53 trained transitions/s with stable one-hour
+  operation using 48 slots, capacity 288, 32K rollouts, reserve 1.30, and Torch 8/2.
+  *Remaining gate:* confirm learning quality for this exact recipe before campaign use.
 - **Phase 3 — The 48 h run + optional Direction B.** Launch the budgeted run; optionally
   add KataGo-cheap MCTS as **test-time search** / distillation to push final strength.
   *Gate:* the definition-of-done skill bar on held-out tracks within 48 h GPU.
@@ -187,8 +205,10 @@ phase has proven the method.
 - **Search vs no-search for final strength** — whether Direction A alone clears the skill
   bar, or whether Direction B's test-time search is required, is an empirical question to
   settle at Phase 1/3, not now.
-- **Substrate choice (vectorized engine vs learned dynamics)** — decided by the Phase-2
-  spike, not pre-committed.
+- **Learning quality at the adopted throughput recipe** — the 32K rollout changes PPO
+  update cadence, so the exact 48/288, reserve-1.30, Torch-8/2 recipe needs a registered,
+  bounded comparison before a long campaign. CUDA or learned dynamics can be revisited
+  only if later evidence shows the native CPU route is insufficient.
 
 ## Sources / prior art
 - [Big 2: Self-Play RL under Imperfect Information](https://arxiv.org/html/2605.28863) — the recommended recipe (PPO, legal-action scoring, entropy, current-policy self-play).

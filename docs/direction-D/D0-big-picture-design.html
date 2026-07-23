@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Big-picture architecture and staged decision plan for Direction D, Heat's affordable training substrate.">
+  <title>Direction D — Affordable training substrate</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Direction D - D0 complete - D1 throughput STOP</span>
+      <h1>Direction D: make full-scale learning affordable.</h1>
+      <p class="hero-copy">Replace the current batch-of-one, sequential Python rollout path with an exact, batched substrate that can use the whole machine. Keep learned dynamics as a measured fallback or search accelerator, not the first production environment.</p>
+      <p><strong>Phase 2 · performance architecture · decision document</strong><br><span class="muted">Designed 16 July · updated 17 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="Recommendation">
+      <span class="board-label">Recommendation</span>
+      <strong>Exact first.<br>Tensor-ready by stages.</strong>
+      <p>Build the trajectory and batching seams first, then a phase-bucketed exact simulator. Admit learned dynamics only through a separate fidelity gate.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#decision">Decision</a>
+      <a href="#evidence">Starting evidence</a>
+      <a href="#requirements">Requirements</a>
+      <a href="#options">Approach landscape</a>
+      <a href="#details">Option details</a>
+      <a href="#architecture">Recommended architecture</a>
+      <a href="#delivery">Delivery stages</a>
+      <a href="#experiments">Experiment ladder</a>
+      <a href="#scale">48-hour scale</a>
+      <a href="#risks">Risks and stop rules</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="decision">
+        <span class="section-kicker">01 · Executive decision</span>
+        <h2>Direction D is the next project phase; pursue an exact batched substrate.</h2>
+        <p class="lede">Direction A proved that the PPO method learns and generalizes under full rules. Direction D should now increase the amount of trustworthy experience one policy can consume in 48 hours. The recommended route is deliberately incremental: first make multiple games and partial trajectories a supported contract, then replace the object-heavy engine with phase-bucketed tensor state, then turn on CUDA. Every stage must earn continuation with exactness and end-to-end throughput.</p>
+
+        <div class="decision-banner">
+          <strong>Primary recommendation</strong>
+          Implement an exact, phase-bucketed PyTorch tensor simulator behind a narrow environment interface. Reach it through a reusable cross-game collector rather than a one-shot engine rewrite. Keep the legacy engine as the semantic oracle and evaluation implementation throughout Direction D.
+        </div>
+
+        <div class="hybrid-stats" aria-label="Key targets">
+          <div class="hybrid-stat"><span>Current practical capacity</span><strong>~200M</strong><small>nominal transitions per policy in 48 h</small></div>
+          <div class="hybrid-stat"><span>Direction D target</span><strong>≥3×</strong><small>end-to-end training throughput</small></div>
+          <div class="hybrid-stat"><span>Useful 48 h capacity</span><strong>≥600M</strong><small>nominal transitions per policy</small></div>
+          <div class="hybrid-stat"><span>Stretch outcome</span><strong>4–8×</strong><small>with GPU inference and PPO updates</small></div>
+        </div>
+
+        <p><strong>Not recommended as the first move:</strong> a monolithic GPU rewrite, a new distributed framework, or a learned model replacing exact rules. Each adds several uncertainties at once and makes correctness, speed, and learning effects difficult to attribute.</p>
+        <p><strong>Parallel work:</strong> bot quality is tracked separately in the <a href="../agent-strength/S0-investigation-plan.html">agent-strength investigation plan</a>. Direction D does not assume that more transitions alone will make the current policy stronger.</p>
+      </section>
+
+      <section id="evidence">
+        <span class="section-kicker">02 · What A8 established</span>
+        <h2>The method works; collection is the measured bottleneck.</h2>
+        <p>The <a href="../direction-A/A8-full-rules-phase1.html">A8 completion report</a> is the baseline for every Direction D comparison. A selected G0002 policy passed the untouched multi-ruler final gate across generated tracks and 2/4/6 seats. The performance evidence is equally clear:</p>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Measured fact</th><th>Result</th><th>Design consequence</th></tr></thead>
+            <tbody>
+              <tr><td>One 1M-transition A8 seed</td><td>12.2 minutes under the adopted five-epoch recipe</td><td>About 235M nominal transitions is the uninterrupted 48 h ceiling; plan around 200M after operational reserve.</td></tr>
+              <tr><td>Rollout collection</td><td>75.7% of profiled wall time</td><td>Environment and live policy calls are the correct target.</td></tr>
+              <tr><td>Single-decision inference</td><td>44.9% of wall time</td><td>Large cross-game batches can remove repeated small calls and make a GPU useful.</td></tr>
+              <tr><td>Rules simulation</td><td>24.4% of wall time</td><td>Collector batching alone leaves a substantial serial Python floor.</td></tr>
+              <tr><td>PPO optimization</td><td>23.6% of wall time</td><td>An environment-only speed-up has an end-to-end ceiling of roughly 4.1× unless PPO also accelerates.</td></tr>
+              <tr><td>T2 phase-only batching</td><td>1.066× median rollout gain</td><td>Within-game batches were too small; Direction D must batch across independent games.</td></tr>
+              <tr><td>T1 independent workers</td><td>2.703× for three seeds</td><td>Keep this for experiment throughput, but it does not create one policy trained on the aggregate data.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="result-note"><strong>Honest scale reading.</strong> We can already run a large amount of training. We have not shown that the current PPO recipe improves monotonically beyond 1M transitions: A8 saw seed variation and late-checkpoint regression. Direction D expands the affordable evidence budget; it does not by itself solve learning stability.</div>
+      </section>
+
+      <section id="requirements">
+        <span class="section-kicker">03 · Contract</span>
+        <h2>Speed is necessary, but exactness and learning safety are hard requirements.</h2>
+        <ul class="open-list">
+          <li><strong>Exact rules.</strong><br>The production PPO path must match the legacy engine for legal actions, stochastic outcomes, rewards, terminal order, and public/private observations.</li>
+          <li><strong>2–6 seats.</strong><br>No fast path may specialize to two players or assume zero-sum play.</li>
+          <li><strong>Any generated track.</strong><br>Padded track tensors must preserve all generator output, not a curated fixed track set.</li>
+          <li><strong>Imperfect information.</strong><br>Each policy observation exposes only the acting seat’s permitted information.</li>
+          <li><strong>Deterministic identity.</strong><br>Game, track, policy-sampling, and stochastic-rule RNG streams remain independently reproducible.</li>
+          <li><strong>Segmented full-state resume.</strong><br>Six planned 8-hour blocks must behave as one 48-hour run when stopped and resumed at safe PPO boundaries.</li>
+          <li><strong>Bounded rollouts.</strong><br>The collector must stop without multiplying each PPO iteration by the number of live lanes.</li>
+          <li><strong>Legacy oracle.</strong><br>The existing Python engine remains the source of truth for differential tests and final evaluation.</li>
+          <li><strong>End-to-end measurement.</strong><br>Adoption is based on trained transitions per second, not an isolated kernel benchmark.</li>
+        </ul>
+
+        <h3 class="table-title">Explicit non-goals</h3>
+        <p>Direction D does not change the reward, policy architecture, opponent mixture, checkpoint selection rule, or final skill gate. Those changes may be researched later, but mixing them into the substrate comparison would destroy attribution. It also does not authorize the final 48-hour campaign; that remains a separately reviewed experiment after the readiness gate.</p>
+      </section>
+
+      <section id="options">
+        <span class="section-kicker">04 · Complete approach landscape</span>
+        <h2>There are eight credible routes, but they solve different parts of the problem.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Approach</th><th>Likely value</th><th>Engineering size</th><th>Main limitation</th><th>Decision</th></tr></thead>
+            <tbody>
+              <tr><td><strong>0. Current engine + parallel seeds</strong></td><td>2.7× aggregate research throughput</td><td>Already implemented</td><td>Does not increase experience for one policy.</td><td>Keep as orchestration.</td></tr>
+              <tr><td><strong>1. Python micro-optimization / incremental advance</strong></td><td>Approximately 1.1–1.4× overall</td><td>Small–medium</td><td>Inference remains batch-of-one; diminishing returns.</td><td>Use only when profiling identifies a contained hotspot.</td></tr>
+              <tr><td><strong>2. Cross-game scheduler over the existing engine</strong></td><td>Approximately 1.4–1.8× overall</td><td>Medium</td><td>Rules still execute serially in Python.</td><td class="metric-good">Build first as a reusable seam.</td></tr>
+              <tr><td><strong>3. Multiprocess actors + central learner/inference</strong></td><td>Approximately 2–4× depending on cores</td><td>Medium–large</td><td>Serialization, stale-policy, ordering, and Windows process overhead.</td><td>Fallback if in-process lanes cannot feed batches.</td></tr>
+              <tr><td><strong>4. Compile the object engine</strong><br>Cython, native extensions, Rust/C++ port</td><td>Faster rules, plausibly 2–5× for simulation</td><td>Large</td><td>Python objects and callbacks cross the boundary; inference batching still needed.</td><td>Reserve as a CPU-oriented fallback.</td></tr>
+              <tr><td><strong>5. Data-oriented CPU array engine</strong><br>NumPy/Numba-style state</td><td>Good transition step toward vectorization</td><td>Large</td><td>Branch divergence and masked array work can erase gains at small batches.</td><td>Useful implementation stage, not the final architecture.</td></tr>
+              <tr><td><strong>6. Exact phase-bucketed tensor engine</strong><br>PyTorch first; JAX is an alternative implementation</td><td>Best route to batched rules, inference, and GPU updates</td><td>Very large</td><td>Highest exact-engine rewrite and parity burden.</td><td class="metric-good"><strong>Recommended production route.</strong></td></tr>
+              <tr><td><strong>7. Learned stochastic dynamics</strong><br>World model / Stochastic MuZero</td><td>Potentially very cheap imagined rollouts and search</td><td>Very large research program</td><td>Model bias, hidden information, chance calibration, and legality errors.</td><td>Separate fallback or search branch after exact data exists.</td></tr>
+              <tr><td><strong>8. Hybrid exact + learned</strong></td><td>Exact real games plus learned search rollouts or synthetic augmentation</td><td>Largest combined scope</td><td>Two substrates and a difficult data-mixture question.</td><td>Long-term ceiling, not the Direction D entry point.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Framework choices such as Ray, TorchRL, Gymnasium vector environments, or a custom process pool are orchestration details inside approaches 2 and 3. They do not remove the need for a correct state representation, a trajectory boundary contract, or a fast transition kernel.</p>
+      </section>
+
+      <section id="details">
+        <span class="section-kicker">05 · Trade-offs</span>
+        <h2>Why the exact tensor route wins—and where the alternatives still fit.</h2>
+
+        <h3 class="table-title">Cross-game scheduling: necessary plumbing, not the destination</h3>
+        <p>Run a bounded pool of independent exact games. Advance each lane until it needs a policy action, group ready observations, perform one batched policy call, and replay the actions through their lanes. Unlike T2, the batch comes from independent games, so it can reliably be 8–64 rather than 1–2.</p>
+        <p>The current collector computes GAE only after complete games. Direction D should replace that convenience with an explicit safe-boundary contract: freeze the rollout policy, stop admitting new work at the target transition count, advance each lane only until every pending seat action has received its reward and successor observation, then bootstrap nonterminal seat streams. This bounds overshoot without mixing pre-update and post-update policy data.</p>
+
+        <h3 class="table-title">Multiprocess actors: strong CPU fallback, weaker primary architecture</h3>
+        <p>Actors can run the unmodified engine in separate processes and send observation batches to a learner. This exploits CPU cores quickly, but policy versioning, queue backpressure, state serialization, and deterministic game identities become permanent complexity. It is attractive if the tensor kernel fails, or if CPU simulation remains the best measured route; it should not be introduced merely because distributed RL is familiar.</p>
+
+        <h3 class="table-title">Compiled object engine: faster serial work, incomplete batching story</h3>
+        <p>A Rust/C++ rewrite could make exact rules much faster and parallelize games with native threads. Cython or selective native kernels could target hotspots with less disruption. However, the current engine is roughly two thousand lines of branch-heavy rule logic backed by Python domain objects. Crossing the language boundary for every decision can preserve much of the plumbing cost. A native engine is credible, but it still needs the same lane scheduler and batched policy interface.</p>
+
+        <h3 class="table-title">Exact tensor engine: one representation for rules, observations, and policy batches</h3>
+        <p>Represent a batch of games with fixed-shape tensors: up to six seats, padded tracks, card-count arrays, per-seat phase state, RNG state, and validity masks. Group lanes by phase so gear selection, card play, movement, corner resolution, slipstream, and replenishment each run as a coherent masked kernel. Start on CPU for debugging, then move the unchanged tensor contract to CUDA.</p>
+        <p>PyTorch is recommended because the policy and PPO implementation already use it. This avoids a second tensor runtime and makes device-resident observations and policy calls possible. JAX remains a plausible alternative if a small spike demonstrates materially better compiled control flow without complicating the project’s normal Windows workflow.</p>
+
+        <h3 class="table-title">Learned dynamics: high ceiling, weak first foundation</h3>
+        <p>A stochastic latent model can predict rewards, terminal values, legal-action distributions, and a next latent state. It becomes especially valuable for cheap search. But Heat combines private hands, deck uncertainty, traffic interactions, and stochastic card draw: one-step accuracy can look good while multi-step policy-relevant errors compound. Learned transitions must therefore be treated as approximate computation and validated only against exact-engine play.</p>
+        <p>If this branch is opened, exact legality should remain authoritative, chance should be modeled probabilistically, and adoption should require exact-environment skill—not merely low prediction loss. It must never silently replace the final evaluation engine.</p>
+      </section>
+
+      <section id="architecture">
+        <span class="section-kicker">06 · Recommended architecture</span>
+        <h2>A narrow interface lets the collector survive whichever exact kernel wins.</h2>
+
+        <ol class="step-line" aria-label="Recommended execution flow">
+          <li><strong>Lane pool</strong><br>bounded independent games</li>
+          <li><strong>Phase buckets</strong><br>group ready rule work</li>
+          <li><strong>Policy batch</strong><br>one device-resident inference</li>
+          <li><strong>Trajectory store</strong><br>per-seat GAE with bootstrap</li>
+        </ol>
+
+        <pre><code>Generated tracks + seed schedule
+             |
+             v
+     BatchedGameState [B, ...]  &lt;----&gt;  legacy GameState oracle
+             |
+      phase-ready masks
+       /           \
+      v             v
+ exact rule kernels  observation + legal-action tensors
+      |                         |
+      +-----------+-------------+
+                  v
+           batched policy call
+                  |
+            sampled actions
+                  v
+     per-seat trajectory streams
+                  |
+       safe boundary + bootstrap
+                  v
+              PPO update</code></pre>
+
+        <div class="file-grid">
+          <div class="file-card"><code>src/heat/ml/selfplay/vector_collector.py</code>Lane scheduling, policy-version freeze, safe draining, per-seat bootstrap, and batch telemetry.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/state.py</code>Fixed-shape batched game, player, hand, track, phase, and RNG tensors.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/kernels.py</code>Exact phase kernels using masks rather than Python object dispatch.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/bridge.py</code>Legacy-to-tensor conversion and comparable semantic snapshots for differential tests.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/observe.py</code>Device-resident partial observations and legal-action masks matching the existing codec.</div>
+          <div class="file-card"><code>src/heat/ml/selfplay/training_state.py</code>Versioned, atomic full-state checkpoints for exact continuation across planned blocks or machine restarts.</div>
+          <div class="file-card"><code>experiments/benchmark_direction_d.py</code>One fixed benchmark that reports kernel, rollout, inference, update, memory, batch size, and end-to-end rates.</div>
+        </div>
+
+        <p>The exact module names are provisional. The stable design boundary is more important: collectors consume a batched environment protocol rather than importing phase internals, while the differential bridge is test-only and never sits in the hot path.</p>
+
+        <h3 class="table-title">A training checkpoint must resume the session, not merely reload its policy</h3>
+        <p>The current Direction-A checkpoint stores evaluable policy weights and architecture metadata only. Direction D adds a separate versioned training-state artifact. At a safe boundary after a PPO update it records:</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>State group</th><th>Required contents</th><th>Why it matters</th></tr></thead>
+            <tbody>
+              <tr><td>Learning state</td><td>Policy and optimizer state, entropy-controller state, current hyperparameters, and policy version.</td><td>Resetting Adam moments or the controller creates a warm start, not a continuation.</td></tr>
+              <tr><td>Campaign progress</td><td>Nominal/actual transitions, games, PPO iteration, elapsed training time, milestone/checkpoint ledger, and block number.</td><td>Prevents repeated work, skipped gates, and ambiguous 48-hour accounting.</td></tr>
+              <tr><td>Randomness</td><td>NumPy generator state; PyTorch CPU and CUDA RNG state; track, seat-schedule, policy-sampling, and stochastic-rule stream state.</td><td>The next game and update must have the same identity after restart.</td></tr>
+              <tr><td>Self-play context</td><td>Recent-opponent snapshot pool, anchor identity, opponent counters, and any curriculum/controller state.</td><td>Resetting the opponent distribution can materially change training.</td></tr>
+              <tr><td>Compatibility receipt</td><td>Schema version, resolved recipe, source revision/patch provenance, codec and engine versions, device/runtime metadata, and policy generation/run ID.</td><td>Resume must fail fast rather than combine incompatible code or recipes.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Planned block endings stop after the next completed PPO update, drain the collector to its declared safe boundary, write to a temporary file, flush, atomically replace the destination, and store a SHA-256 receipt. Mid-iteration lane and rollout serialization is deliberately out of scope unless later operational evidence shows boundary-only checkpoints are insufficient.</p>
+      </section>
+
+      <section id="delivery">
+        <span class="section-kicker">07 · Staged delivery</span>
+        <h2>Build one reversible layer at a time and keep the scalar path runnable.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Stage</th><th>Deliverable</th><th>Estimated implementation</th><th>Exit condition</th></tr></thead>
+            <tbody>
+              <tr><td><strong><a href="D0-contract-resume-benchmark.html">D0 · Contract, resume, and benchmark</a></strong><br><span class="metric-good">Implemented 19 July 2026</span></td><td>Canonical semantic snapshots, fixed workload, resource telemetry, 48 h projection, batched-env protocol, and a versioned atomic full-training-state checkpoint.</td><td>Implemented within the planned medium slice.</td><td class="metric-good">PASS: 0.31% scalar spread; 2–6-seat/all-phase corpus; exact zero/one/two-stop complete state.</td></tr>
+              <tr><td><strong><a href="D1-exact-lane-collector.html">D1 · Exact lane collector</a></strong><br><span class="metric-warn">Implemented; throughput STOP 19 July 2026</span></td><td>8/16/32-game scheduler over the existing engine, batched policy calls, safe partial trajectories, bootstrapped per-seat GAE, and safe-boundary block stopping.</td><td>Implementation and correctness complete. Scalar remains default; lanes remain opt-in diagnostic code.</td><td class="metric-warn">FAIL: best stable arm 1.118x; 16-lane median 1.242x was unstable. Drain work erased most batching gain.</td></tr>
+              <tr><td><strong><a href="D2-tensor-vertical-slice-design.html">D2 · Tensor vertical slice</a></strong><br><span class="metric-warn">D2-R stopped at R2 on 20 July 2026</span></td><td>The original exact slice remains the oracle. D2-R0-R2 add fixed numeric receipts and one full-graph non-reshuffle cards-to-REACT implementation; exact compiled RNG was deliberately not started.</td><td>R0 and R1 passed. R2 matched 10,240 transitions with zero differences and zero graph breaks, but complete deterministic rules fell below the scalar-speed continuation floor.</td><td class="metric-warn">STOP: R1 reached 2.765x scalar, but full R2 reached only 0.839x scalar. Keep scalar default; require a new native-CPU design decision before more engine work.</td></tr>
+              <tr><td><strong>D3 · Full exact tensor engine</strong></td><td>Every full-rules phase, 2–6 seats, generated tracks, stochastic draws, terminal/reward handling.</td><td>Very large: 2,500–4,500 cumulative engine lines; 2–4 additional weeks.</td><td>Zero mismatches across the frozen corpus and randomized differential campaigns; at least 2.5× end-to-end CPU training.</td></tr>
+              <tr><td><strong>D4 · CUDA training path</strong></td><td>Device-resident state, observations, inference, rollout tensors, and PPO update with bounded host synchronization.</td><td>Medium–large: 800–1,500 lines; 1–2 weeks.</td><td>At least 4× scalar end-to-end or a measured ≥600M-transition 48 h projection.</td></tr>
+              <tr><td><strong>D5 · Learning safety and readiness</strong></td><td>Matched registered training campaign, frozen A8 validation, determinism receipt, memory/thermal soak, forced-restart recovery, and an 8-hour block rehearsal.</td><td>Small production change; 2–4 days plus bounded compute.</td><td>No material skill/seat regression; sustained rate, memory, and resume receipts prove the segmented 48 h plan.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><strong>Total estimate:</strong> roughly 4–8 weeks and 4,500–8,000 production/test lines for the recommended exact route, depending on how much of the legacy phase structure maps cleanly to fixed-shape kernels. These are planning estimates, not promises. If D1 or D2 reveals a larger semantic rewrite, stop and redesign before expanding the patch.</p>
+      </section>
+
+      <section id="experiments">
+        <span class="section-kicker">08 · Predeclared experiment ladder</span>
+        <h2>Each spike answers one question and has a hard stop.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Experiment</th><th>Hypothesis and confidence</th><th>Compute scope</th><th>Decision rule</th></tr></thead>
+            <tbody>
+              <tr><td><strong>D0-B · Baseline refresh</strong></td><td>The committed A8 scalar path reproduces 1,750–1,850 rollout transitions/s and the prior timing mix. High confidence, 90%.</td><td>Three 100k CPU repeats; 15-minute cap; flushed iteration telemetry.</td><td>Freeze median rates and hardware/software receipt. Investigate before continuing if rate drifts by more than 10%.</td></tr>
+              <tr><td><strong>D0-R · Exact resume</strong></td><td>A run stopped after a safe PPO boundary and resumed in a fresh process reaches the same complete state as an uninterrupted control. High confidence, 85%.</td><td>Short deterministic control versus one-stop and two-stop variants; compare after the same iterations. Also test truncated, corrupt, and incompatible checkpoints. Ten-minute cap.</td><td>Require equal policy and optimizer tensors, counters, diagnostics, controller/pool contents, RNG states, and next scheduled work. Every invalid checkpoint must fail before mutation.</td></tr>
+              <tr><td><strong>D1-L · Lane scheduler</strong></td><td>Cross-game batches average at least 8 live decisions and deliver ≥1.5× end-to-end training without trajectory violations. Medium-high confidence, 70%.</td><td>Trace smoke, then three matched 100k repeats at lane counts 8/16/32; 45-minute total cap.</td><td>Continue if correctness passes and best stable lane count is ≥1.5×. Stop the scheduler branch below 1.3×.</td></tr>
+              <tr><td><strong>D2-K · Tensor kernel slice</strong></td><td>A phase-bucketed tensor representation preserves exact semantics and runs one representative rules slice ≥5× faster at batch 256. Medium confidence, 60%.</td><td>Frozen fixtures plus at least 100k randomized state transitions; one-hour benchmark cap on CPU and available CUDA.</td><td>Continue only with zero semantic mismatches and ≥3× measured kernel gain; redesign representation otherwise.</td></tr>
+              <tr><td><strong>D3-E · Full exact engine</strong></td><td>The full tensor engine yields ≥2.5× end-to-end CPU training before CUDA. Medium confidence, 60%.</td><td>Randomized full-race differential suite, then three 100k matched workloads; two-hour cap.</td><td>Keep only if all semantic gates pass. If speed is &lt;2×, compare native multiprocess/compiled fallback before CUDA investment.</td></tr>
+              <tr><td><strong>D4-G · GPU stack</strong></td><td>Large device-resident batches produce ≥4× end-to-end speed and project ≥600M nominal transitions in 48 h. Medium-low confidence, 55%.</td><td>100k tuning screens followed by one 1M sustained benchmark; two-hour cap with temperature, memory, utilization, and heartbeat logs.</td><td>Direction D performance PASS at ≥3× and ≥600M/48 h. Treat 4–8× as the expected successful range, not a required promise.</td></tr>
+              <tr><td><strong>D5-S · Learning safety</strong></td><td>The accepted substrate retains A8 learning quality despite different batching and rollout boundaries. Medium-high confidence, 75%.</td><td>After registry allocation: at least two matched 3M seeds, milestone validation, and a separate soak; ask permission before the larger campaign.</td><td>No material aggregate or seat-count regression; no entropy/collapse regression; deterministic artifacts and hashes complete.</td></tr>
+              <tr><td><strong>D5-R · Block recovery rehearsal</strong></td><td>Planned shutdowns and one forced process interruption do not lose or repeat completed PPO work, and the resumed rate remains within 5% of uninterrupted operation. High confidence, 85%.</td><td>Short forced-restart soak first; then the first permission-gated 8-hour block writes periodic recovery points and a final handoff checkpoint with flushed progress logs.</td><td>Proceed to later blocks only if the ledger, hashes, counters, next-work identity, and evaluation checkpoint all reconcile. Restore only the last atomic checkpoint after forced interruption.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Every non-smoke learned-policy campaign must follow the <a href="../policy-generation-registry.html">policy generation registry</a>. D0–D4 performance spikes should use <code>dev-*</code> identities when they do not make comparison-worthy policy claims. D5 allocates a generation before compute because rollout ordering and policy updates can change learned weights.</p>
+      </section>
+
+      <section id="scale">
+        <span class="section-kicker">09 · Expected scale</span>
+        <h2>A successful Direction D should move one policy from hundreds of millions toward a billion transitions.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>State</th><th>End-to-end speed</th><th>Practical single-policy 48 h budget</th><th>Interpretation</th></tr></thead>
+            <tbody>
+              <tr><td>Current scalar</td><td>1.0×</td><td>190–210M nominal</td><td>Already about 200 A8-scale budgets, but unsupported by a learning curve beyond 1M.</td></tr>
+              <tr><td>D1 lanes only</td><td>1.4–1.8× expected</td><td>270–375M</td><td>Useful iteration win and required architectural seam; insufficient as the final D result.</td></tr>
+              <tr><td>Good exact engine</td><td>2.5–4× expected</td><td>500–800M</td><td>Direction D becomes worthwhile and the 48 h campaign has meaningful scale.</td></tr>
+              <tr><td>Exact engine + full GPU stack</td><td>4–8× stretch range</td><td>0.8–1.6B</td><td>Requires inference, rules, transfer, and PPO optimization all to scale together.</td></tr>
+              <tr><td>Learned/hybrid model</td><td>Unknown effective gain</td><td>Do not budget before fidelity evidence</td><td>Raw imagined steps are not equivalent to exact environment transitions.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>These are throughput projections, not skill forecasts. Direction D should expose learning curves at 3M, 10M, 30M, 100M, and later milestones. A flat or collapsing curve is a learning decision, not a reason to consume the remainder of the 48-hour allowance.</p>
+      </section>
+
+      <section id="risks">
+        <span class="section-kicker">10 · Risks, controls, and final recommendation</span>
+        <h2>The largest risk is building a fast simulator that is subtly not Heat.</h2>
+        <div class="gate-panel">
+          <h3>Non-negotiable controls</h3>
+          <table>
+            <thead><tr><th>Risk</th><th>Control</th><th>Stop condition</th></tr></thead>
+            <tbody>
+              <tr><td>Rule drift under masks or phase grouping</td><td>Legacy-engine differential snapshots at every phase and randomized full races.</td><td>Any unexplained mismatch blocks performance work.</td></tr>
+              <tr><td>RNG changes alter stochastic distributions</td><td>Counter-based per-game/per-seat streams and distribution tests in addition to matched-seed traces.</td><td>Identity collision or statistically significant distribution drift.</td></tr>
+              <tr><td>Partial trajectories corrupt credit</td><td>Safe boundary, successor observation, explicit bootstrap, and per-seat manual GAE fixtures.</td><td>Any sample spans a PPO policy-version change or loses a pending reward.</td></tr>
+              <tr><td>Restart silently changes the run</td><td>Full-state checkpoints, fresh-process equivalence tests, atomic replace, hashes, schema/recipe tripwires, and a progress ledger.</td><td>Any state component resets, completed work repeats, or incompatible state loads.</td></tr>
+              <tr><td>Fast kernel, slow training</td><td>Report kernel and end-to-end rates together, including transfers and PPO updates.</td><td>Full path remains below the stage gate even when microbenchmarks pass.</td></tr>
+              <tr><td>GPU memory grows with lanes/tracks</td><td>Fixed capacity accounting, p95 memory telemetry, and bounded adaptive batch sizes.</td><td>Unbounded growth, OOM recovery failure, or less than 15% operating headroom.</td></tr>
+              <tr><td>More samples amplify PPO collapse</td><td>Frozen milestone evaluation, entropy/controller telemetry, best-checkpoint preservation.</td><td>Two consecutive milestones materially regress across the multi-ruler suite.</td></tr>
+              <tr><td>Learned dynamics exploits model errors</td><td>Exact legality, exact held-out evaluation, multi-step calibration, and real/synthetic ablations.</td><td>Improvement exists only inside the learned model.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="decision-banner">
+          <strong>Committed route</strong>
+          Start Direction D with D0, then D1. Use those stages to freeze the batched-environment and trajectory interfaces before committing the full tensor engine. If D2 proves exact phase kernels are a poor match for Heat, compare a native multiprocess/compiled engine against the same interface. Do not begin learned dynamics unless the exact route misses its measured affordability gate or Direction B makes cheap search the primary requirement.
+        </div>
+
+        <div class="verification-panel">
+          <strong>Document status: D0 implemented; D1 throughput rejected; original D2 rejected on speed; D2-R stopped at R2.</strong><br>
+          The next architecture choices, scale model, work estimates, and sources are expanded in <a href="D3-post-d2-architecture-options.html">Direction D3 - architecture options after D2-R</a>.
+          D0's <a href="D0-contract-resume-benchmark.html">implementation and evidence report</a> freezes the semantic contract, full-state resume, benchmark protocol, bounded commands, and D1-facing environment interface. The <a href="D1-exact-lane-collector.html">D1 result</a> proves the implementation and trajectory contracts but rejects adoption: the best stable lane arm reached only 1.118x end-to-end, below the 1.3x stop threshold. Scalar remains default. The original <a href="D2-tensor-vertical-slice-design.html">D2 tensor slice</a> is exact across 100,349 transitions, but its best useful CPU arm reached only 0.112x scalar kernel speed. D2-R proved the compiled shape with a 2.765x-scalar common core, then the complete non-reshuffle R2 graph matched 10,240 transitions exactly but dropped to 0.839x scalar. R3 exact RNG and later stages were not started. The current recommendation is the native exact CPU pool described in the D3 options document, gated first on the hard branches that defeated D2-R2.
+        </div>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer">
+  Direction D · exact first · measure end-to-end · preserve the scalar oracle
+</footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

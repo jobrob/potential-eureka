@@ -209,6 +209,47 @@ def static_search_agent_factory(name: str | None = None) -> AgentFactory:
     return functools.partial(_make_static_search, name=name)
 
 
+def _make_static_v2(
+    player_id: int,
+    seed: int | None,
+    name: str | None,
+    style: str,
+) -> Agent:
+    """Top-level constructor for one adopted T2a V2 static style."""
+    from heat.agents.static_v2 import (
+        HeuristicV2Agent,
+        RepairedHeuristicV2Agent,
+        StaticSearchV2Agent,
+    )
+
+    del seed  # All V2 static agents are deterministic from public game state.
+    classes = {
+        "weak": (HeuristicV2Agent, "HeuristicWeakV2"),
+        "repaired": (RepairedHeuristicV2Agent, "HeuristicRepairedV2"),
+        "search": (StaticSearchV2Agent, "StaticSearchV2"),
+    }
+    agent_class, version = classes[style]
+    agent_name = name if name is not None else f"{version}-{player_id}"
+    return agent_class(name=agent_name)
+
+
+def heuristic_v2_agent_factory(name: str | None = None) -> AgentFactory:
+    """Return a picklable factory for the adopted weak heuristic V2."""
+    return functools.partial(_make_static_v2, name=name, style="weak")
+
+
+def repaired_heuristic_v2_agent_factory(
+    name: str | None = None,
+) -> AgentFactory:
+    """Return a picklable factory for the adopted repaired heuristic V2."""
+    return functools.partial(_make_static_v2, name=name, style="repaired")
+
+
+def static_search_v2_agent_factory(name: str | None = None) -> AgentFactory:
+    """Return a picklable factory for the adopted StaticSearchV2."""
+    return functools.partial(_make_static_v2, name=name, style="search")
+
+
 def _make_lookahead(
     player_id: int,
     seed: int | None,

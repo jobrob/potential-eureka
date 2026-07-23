@@ -39,12 +39,6 @@ from heat.ml.selfplay.eval_harness import (
     held_out_tracks,
 )
 from heat.ml.selfplay.multiseat import MultiSeatCollector, train_multiseat
-from heat.ml.selfplay.phase1 import (
-    A8Config,
-    SeatCountSchedule,
-    train_selfplay_a8,
-    training_track_source,
-)
 from heat.ml.selfplay.policy import (
     DotProductPolicy,
     HeatPolicy,
@@ -89,3 +83,12 @@ __all__ = [
     "train_selfplay_a8",
     "training_track_source",
 ]
+
+
+def __getattr__(name: str) -> object:
+    """Load A8 orchestration lazily so lower-level bridges stay importable."""
+    if name in {"A8Config", "SeatCountSchedule", "train_selfplay_a8", "training_track_source"}:
+        from heat.ml.selfplay import phase1
+
+        return getattr(phase1, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Direction D3 A6-A8 native component results</title>
+  <style>
+    :root { color-scheme: light; --ink:#17212b; --muted:#526170; --line:#d7dee5; --panel:#f6f8fa; --good:#0b6b3a; --warn:#8a5a00; }
+    body { margin:0; font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:980px; margin:auto; padding:40px 24px 64px; }
+    h1 { font-size:clamp(2rem,5vw,3.4rem); line-height:1.05; margin:.25rem 0 1rem; }
+    h2 { margin-top:2.3rem; font-size:1.45rem; }
+    .status { color:var(--good); font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
+    .lede { font-size:1.15rem; max-width:760px; }
+    .banner,.card { border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin:18px 0; background:var(--panel); }
+    .banner { border-left:5px solid var(--good); }
+    .warning { border-left:5px solid var(--warn); }
+    table { width:100%; border-collapse:collapse; margin:14px 0; }
+    th,td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:10px 8px; }
+    th { font-size:.85rem; text-transform:uppercase; color:var(--muted); }
+    code { font-family:ui-monospace,"Cascadia Code",monospace; }
+    .muted { color:var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="status">A6, A7, and A8 implemented - component gates pass - 22 July 2026</p>
+  <h1>The parallel collector pieces are built; trainer integration is next.</h1>
+  <p class="lede">A6 adds the bounded native worker scheduler, A7 adds deterministic batched CPU policy evaluation, and A8 adds compact native trajectory storage and exact per-seat GAE. The focused correctness gates pass. The honest limitation is that A9 must connect these pieces before we can measure real ready-batch sizes or trained transitions per second.</p>
+
+  <div class="banner"><strong>Decision: continue to A9 when authorized.</strong> No semantic stop condition fired. Do not use these component checks as the 4,000/5,000 transitions-per-second adoption result.</div>
+
+  <h2>A6 - bounded worker pool</h2>
+  <div class="card">
+    <p>The opaque <code>NativePool</code> now owns a fixed number of workers and slots. Admission is atomic, queue and slot overflow fail instead of truncating work, waiting releases the Python GIL, completion frees slots, and one worker fault stops the whole pool. Long test work is cooperatively interrupted so <code>close()</code> can join every owned thread within the checked bound.</p>
+    <table>
+      <thead><tr><th>Gate</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td>Worker counts</td><td>1, 2, 4, 8, and 12 workers produced the same canonical digest for every real compact native state.</td></tr>
+        <tr><td>Timing perturbation</td><td>Reversed admission and different bounded work durations did not change any game digest.</td></tr>
+        <tr><td>Failure behavior</td><td>Capacity overflow was atomic; injected worker faults propagated; cooperative stop/join passed.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>A7 - CPU policy coordinator</h2>
+  <div class="card">
+    <p>Ready rows have strict real shapes: 104 observation values, 516 legal-action flags, contiguous decision groups, logical identities, policy IDs, policy versions, and value-only markers. Rows are partitioned by policy identity, so current, snapshot, and anchor models each receive one batch call rather than one Python call per row.</p>
+    <ul>
+      <li><code>keyed_categorical_v1</code> uses fixed unsigned SplitMix64 operations and frozen receipt words.</li>
+      <li>Reordering whole decision groups preserves actions, log-probabilities, values, and sampling words by immutable decision identity.</li>
+      <li>Bootstrap rows receive values without sampling actions; policy-version drift is rejected.</li>
+      <li>Telemetry records dispatches, inference calls, rows per policy, observed batch-size counts, and inference time.</li>
+    </ul>
+  </div>
+
+  <h2>A8 - compact trajectory arena</h2>
+  <div class="card">
+    <p>The native arena preallocates reusable blocks. Observations remain <code>float32[104]</code>; long-lived masks use nine 64-bit words instead of 516 bytes; scalar fields use compact fixed types. Finalization sorts by game, seat, and decision sequence, omits snapshot/anchor rows from PPO, expands masks in bulk, and returns one contiguous batch.</p>
+    <p>Terminal rewards and margins close the last row. Truncation folds <code>gamma * V(next)</code> into that row and marks it done, matching the existing collector. The native reverse GAE pass matches <code>RolloutBuffer.compute_gae</code> exactly.</p>
+  </div>
+
+  <div class="banner warning"><strong>Issue found and fixed.</strong> The first native GAE pass used wider intermediate arithmetic and differed from the NumPy oracle by one <code>float32</code> bit in one value. The reference actually keeps the recurrence in <code>float32</code>. Matching that operation precision removed the mismatch; the test now requires byte-identical advantages and returns.</div>
+
+  <h2>Verification receipt</h2>
+  <table>
+    <thead><tr><th>Check</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr><td>Native A0-A8 focused suite</td><td>49 tests passed in the final rerun.</td></tr>
+      <tr><td>Scoped Ruff</td><td><code>src/heat/ml/native_env</code> and <code>tests/native</code> clean.</td></tr>
+      <tr><td>Strict typing</td><td><code>mypy src</code> passed across 83 source files.</td></tr>
+      <tr><td>Native build</td><td>Release editable MSVC extension rebuilt successfully after each native change.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>What remains</h2>
+  <p>A9 must make admitted native games advance to ready policy groups, feed those groups through the A7 coordinator, submit results back to the pool, and append live-policy transitions to the A8 arena under one frozen policy-version barrier. That integration produces the first honest ready-batch histogram and end-to-end trained-throughput measurement. A10 then owns exact fresh-process resume, repeated benchmarks, and the one-hour soak.</p>
+  <p class="muted">No CUDA environment change, learned-policy generation, training campaign, long soak, or final run was started.</p>
+</main>
+</body>
+</html>

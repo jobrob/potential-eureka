@@ -14,7 +14,11 @@ from heat.ml.selfplay.phase1 import (
 from heat.ml.selfplay.eval_harness import held_out_tracks
 from heat.ml.selfplay.policy import build_policy
 from heat.ml.selfplay.snapshots import SnapshotAgent
-from scripts.train_selfplay_a8 import _evaluation_opponents, _parse_args
+from scripts.train_selfplay_a8 import (
+    _evaluation_opponents,
+    _parse_args,
+    _resolve_torch_threads,
+)
 
 
 def _fingerprint(track: object) -> tuple:
@@ -44,11 +48,35 @@ def test_a8_anchor_cli_is_opt_in() -> None:
     assert args.anchor_share == pytest.approx(0.4)
 
 
-def test_a8_collector_cli_keeps_scalar_reference_and_allows_phase() -> None:
-    """T2 is opt-in until its throughput gate adopts a new default."""
+def test_a8_collector_cli_keeps_scalar_reference_and_allows_opt_in_modes() -> None:
+    """Phase and D1 lanes remain opt-in until their throughput gates pass."""
     assert A8Config().collector_mode == "scalar"
+    assert A8Config().lane_count == 8
+    assert A8Config().native_workers == 48
+    assert A8Config().native_ready_capacity == 288
     assert _parse_args([]).collector == "scalar"
     assert _parse_args(["--collector", "phase"]).collector == "phase"
+    lane_args = _parse_args(["--collector", "lanes", "--lane-count", "16"])
+    assert lane_args.collector == "lanes"
+    assert lane_args.lane_count == 16
+    native_args = _parse_args(
+        ["--collector", "native", "--native-workers", "4"]
+    )
+    assert native_args.collector == "native"
+    assert native_args.native_workers == 4
+    assert native_args.native_ready_capacity == 288
+    assert native_args.native_refill_reserve_factor == 1.3
+    assert native_args.torch_threads is None
+    assert native_args.torch_interop_threads is None
+    assert _resolve_torch_threads(native_args) == (8, 2)
+    selected_args = _parse_args(
+        ["--torch-threads", "2", "--torch-interop-threads", "2"]
+    )
+    assert selected_args.torch_threads == 2
+    assert selected_args.torch_interop_threads == 2
+    assert _resolve_torch_threads(selected_args) == (2, 2)
+    with pytest.raises(SystemExit):
+        _parse_args(["--torch-threads", "0"])
 
 
 def test_a8_evaluation_suite_keeps_failed_search_candidate_opt_in() -> None:
@@ -76,6 +104,16 @@ def test_a8_config_rejects_invalid_domains() -> None:
         A8Config(track_base_seed=0)
     with pytest.raises(ValueError, match="anchor_share"):
         A8Config(anchor_share=1.1)
+    with pytest.raises(ValueError, match="lane_count"):
+        A8Config(lane_count=0)
+    with pytest.raises(ValueError, match="native_workers"):
+        A8Config(native_workers=0)
+    with pytest.raises(ValueError, match="native_ready_capacity"):
+        A8Config(native_workers=4, native_ready_capacity=8)
+    with pytest.raises(ValueError, match="native_manifest_version=2"):
+        A8Config(native_manifest_version=1)
+    with pytest.raises(ValueError, match="native_refill_reserve_factor"):
+        A8Config(native_refill_reserve_factor=0.9)
 
 
 def test_balanced_schedule_covers_every_seat_once_per_block() -> None:

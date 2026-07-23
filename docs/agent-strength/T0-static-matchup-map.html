@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="T0 design and results for the frozen static-agent matchup map.">
+  <title>T0 — frozen static matchup map</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">T0 complete · 1,728 races</span>
+      <h1>The matchup graph is a map, not a ladder.</h1>
+      <p class="hero-copy">The complete directed screen rejects both a universal static ordering and the simpler “one stable cycle” explanation. Tight-corner geometry strongly helps StaticSearchV1 against the weak style, while some six-seat default results depend on which style occupies the field majority.</p>
+      <p><a href="static-bot-investigation-plan.html">Back to the static-bot plan</a><br><span class="muted">Design and results completed 17 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="T0 current state">
+      <span class="board-label">Current state</span>
+      <strong>Regimes confirmed.<br>Stable cycle rejected.</strong>
+      <p>Keep weak, repaired, and search styles in the population; target geometry and field-composition contrasts in T1/T2.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#decision">Question</a>
+      <a href="#design">Frozen design</a>
+      <a href="#population">Population</a>
+      <a href="#matrix">Matrix</a>
+      <a href="#execution">Execution</a>
+      <a href="#results">Results</a>
+      <a href="#limits">Limits</a>
+      <a href="#verification">Verification</a>
+    </nav>
+    <article class="hybrid-content">
+      <section id="decision">
+        <span class="section-kicker">T0 · Investigation question</span>
+        <h2>Are the apparent static-agent reversals stable regimes or small-sample accidents?</h2>
+        <p class="lede">B1 showed StaticSearchV1 beating repaired fields while losing placement value to weak fields. H1 showed the repaired heuristic near or below the weak style depending on seat count. T0 measures the complete directed graph on one matched grid so later replay work can target real regimes rather than labels.</p>
+        <div class="decision-banner"><strong>Boundary</strong>No heuristic weights, rules, search depth, candidate width, leaf value, or determinization setting changes in T0. RandomAgent remains a legality floor; configurable LookaheadAgent and MCTSAgent remain outside the population because they have no frozen promoted configuration.</div>
+        <div class="hybrid-stats" aria-label="T0 headline evidence">
+          <div class="hybrid-stat"><span>Completed</span><strong>36 / 36</strong><small>directed family × seat cells</small></div>
+          <div class="hybrid-stat"><span>Races</span><strong>1,728</strong><small>every track crossed with every focal seat</small></div>
+          <div class="hybrid-stat"><span>Wall time</span><strong>411 s</strong><small>6.9 minutes · cap was 30</small></div>
+          <div class="hybrid-stat"><span>Hypothesis</span><strong>Partial</strong><small>regimes yes · stable cycle no</small></div>
+        </div>
+      </section>
+
+      <section id="design">
+        <span class="section-kicker">01 · Predeclared full-run design</span>
+        <h2>The screen is broad enough to reveal regimes and small enough to finish today.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Item</th><th>Frozen specification</th></tr></thead>
+            <tbody>
+              <tr><td>Hypothesis</td><td>The static matchup graph changes with field size and tight-corner geometry, producing a small number of repeatable style reversals rather than one universal ordering.</td></tr>
+              <tr><td>Prior confidence</td><td>High, about 85%, because B1 and H1 already show opponent- and seat-sensitive ordering. Confidence is lower that a strict three-way cycle will appear in every regime.</td></tr>
+              <tr><td>Primary metric</td><td>Mean placement reward for the focal agent. First-place rate and 95% Wilson interval are retained; starting-seat slices must remain visible.</td></tr>
+              <tr><td>Agents</td><td>Three explicit frozen identities: <code>heuristic_weak_v1</code>, <code>heuristic_repaired_v1</code>, and <code>static_search_v1</code>.</td></tr>
+              <tr><td>Track families</td><td>12 default generated tracks at <code>715000–715011</code> and 12 tight generated tracks at <code>915000–915011</code>, with four to seven corners and limit choices weighted toward 1.</td></tr>
+              <tr><td>Randomization</td><td>Base game seed <code>151</code>. The game seed depends only on family, track, field size, starting seat, and repeat—not on the agent pairing—so directed cells use matched randomness.</td></tr>
+              <tr><td>Matrix</td><td>6 directed pairings × 2 families × 3 field sizes. Each track is crossed once with every focal starting seat: 24, 48, and 72 races per 2/4/6-seat cell, <strong>1,728 races total</strong>.</td></tr>
+              <tr><td>Engineering estimate</td><td>About 450–550 lines across one resumable experiment harness and five focused contract tests. No production-agent change.</td></tr>
+              <tr><td>Compute estimate</td><td>One-track smoke: 34.5 seconds. Expected full wall time about seven minutes; hard stop before the next cell at 1,800 seconds.</td></tr>
+              <tr><td>Stop and logging</td><td>Flush a line after every cell, atomically persist raw races and summaries after every cell, and resume only when the complete resolved recipe matches.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="population">
+        <span class="section-kicker">02 · Frozen population</span>
+        <h2>Names encode behavior, not an unearned strength claim.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Identity</th><th>Resolved configuration</th><th>Role</th></tr></thead>
+            <tbody>
+              <tr><td><code>heuristic_weak_v1</code></td><td><code>HeuristicAgent</code>, deterministic default behavior.</td><td>Fast local-rule style and current competence floor.</td></tr>
+              <tr><td><code>heuristic_repaired_v1</code></td><td><code>StrongHeuristicAgent(strength=2, avoid_certain_spins=True)</code>.</td><td>Opponent-aware economy planner with the H1 safety repair.</td></tr>
+              <tr><td><code>static_search_v1</code></td><td>One round, two determinizations, top six candidates, progress leaf.</td><td>Frozen exact-simulation style retained after B1 rejection.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="matrix">
+        <span class="section-kicker">03 · Evidence flow</span>
+        <h2>Raw coordinates remain available below every aggregate.</h2>
+        <div class="config-panel" aria-label="T0 evidence flow">
+          <div><span>1 · Freeze</span><strong>three versioned factories<br>no tuning switches</strong></div>
+          <div><span>2 · Cross</span><strong>track × focal seat<br>matched game seed</strong></div>
+          <div><span>3 · Race</span><strong>one focal style<br>homogeneous opposing field</strong></div>
+          <div><span>4 · Retain</span><strong>place, reward, rounds<br>seat slice and search latency</strong></div>
+        </div>
+        <p>Both directions are necessary at four and six seats. “One search agent in a weak field” and “one weak agent in a search field” are different population games, even when the same two styles are involved.</p>
+      </section>
+
+      <section id="execution">
+        <span class="section-kicker">04 · Calibrated execution</span>
+        <h2>The smoke exercised the complete shape before consuming the full bands.</h2>
+        <p>The one-track smoke ran all 36 cells and 144 races in 34.5 seconds. It verified agent construction, both generator families, matched starting seats, raw timing capture, atomic writes, and final completion. Smoke results are deliberately not used as strength evidence.</p>
+        <div class="verification-panel"><strong>Full command</strong><br><code>PYTHONPATH=src .venv/Scripts/python.exe experiments/eval_static_matchup_map.py --tracks 12 --repeats 1 --max-seconds 1800 --out runs/t0_static_matchup_map.json</code><br>Add <code>--resume</code> only after an interrupted run with the same recipe.</div>
+      </section>
+
+      <section id="results">
+        <span class="section-kicker">05 · Full results</span>
+        <h2>Geometry creates the clearest reversal; field composition blocks a simple ordering.</h2>
+        <p>Each table entry is <strong>mean focal placement reward / first-place rate</strong>. “Focal → field” means one focal agent against a homogeneous field of the other style. Near-zero values remain uncertain; they are not promoted into directional edges.</p>
+        <h3 class="table-title">Default generated family · seeds 715000–715011</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Focal → field</th><th>2 seats</th><th>4 seats</th><th>6 seats</th></tr></thead>
+            <tbody>
+              <tr><td>Weak → repaired</td><td>+0.000 / 50.0%</td><td>−0.208 / 16.7%</td><td>+0.006 / 22.2%</td></tr>
+              <tr><td>Repaired → weak</td><td>−0.167 / 41.7%</td><td>+0.083 / 33.3%</td><td>−0.111 / 19.4%</td></tr>
+              <tr><td>Weak → search</td><td>+0.083 / 54.2%</td><td>−0.417 / 14.6%</td><td>−0.222 / 12.5%</td></tr>
+              <tr><td>Search → weak</td><td>−0.083 / 45.8%</td><td>+0.083 / 35.4%</td><td>−0.033 / 25.0%</td></tr>
+              <tr><td>Repaired → search</td><td>−0.333 / 33.3%</td><td>−0.153 / 18.8%</td><td>−0.361 / 5.6%</td></tr>
+              <tr><td>Search → repaired</td><td>−0.083 / 45.8%</td><td>+0.153 / 25.0%</td><td>+0.350 / 38.9%</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <h3 class="table-title">Tight generated family · seeds 915000–915011</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Focal → field</th><th>2 seats</th><th>4 seats</th><th>6 seats</th></tr></thead>
+            <tbody>
+              <tr><td>Weak → repaired</td><td>+0.083 / 54.2%</td><td>+0.056 / 37.5%</td><td>+0.111 / 29.2%</td></tr>
+              <tr><td>Repaired → weak</td><td>+0.083 / 54.2%</td><td>−0.028 / 27.1%</td><td>−0.094 / 18.1%</td></tr>
+              <tr><td>Weak → search</td><td>−0.250 / 37.5%</td><td>−0.167 / 18.8%</td><td>−0.272 / 9.7%</td></tr>
+              <tr><td>Search → weak</td><td>+0.500 / 75.0%</td><td>+0.111 / 29.2%</td><td>+0.328 / 40.3%</td></tr>
+              <tr><td>Repaired → search</td><td>−0.500 / 25.0%</td><td>−0.417 / 8.3%</td><td>−0.344 / 4.2%</td></tr>
+              <tr><td>Search → repaired</td><td>+0.000 / 50.0%</td><td>+0.250 / 45.8%</td><td>+0.467 / 59.7%</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="result-note"><strong>Hypothesis verdict: partially supported.</strong> Stable regime reversals exist, but they do not reduce to one repeatable three-way cycle. The clearest contrast is Search → Weak at six seats: <strong>−0.033</strong> on default tracks versus <strong>+0.328</strong> on tight tracks. Search → Repaired is strong at six seats in both families (+0.350 and +0.467), while Repaired → Search is negative in every family/seat cell. Default six-seat Search → Weak and Weak → Search are both negative, showing a field-majority effect rather than a pairwise strength edge.</div>
+
+        <h3 class="table-title">Search latency stayed inside the existing practical envelope</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Family</th><th>2-seat median (range)</th><th>4-seat median (range)</th><th>6-seat median (range)</th></tr></thead>
+            <tbody>
+              <tr><td>Default generated</td><td>1.81 ms (1.78–1.88)</td><td>3.84 ms (3.77–4.03)</td><td>6.11 ms (5.79–6.34)</td></tr>
+              <tr><td>Tight generated</td><td>1.74 ms (1.67–1.97)</td><td>3.65 ms (3.47–4.20)</td><td>5.79 ms (5.13–6.33)</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="table-title">Decision unlocked</h3>
+        <ul class="open-list">
+          <li><strong>Static population.</strong><br>Retain all three identities. Weak play is not merely a floor, repaired play contributes a distinct economy style, and search contributes a geometry-sensitive simulation style.</li>
+          <li><strong>T1 heuristic replay.</strong><br>Contrast repaired-agent losses to weak fields on tight six-seat tracks (mean −0.094) with its positive default four-seat cell (+0.083). This is more informative than replaying one pooled heuristic sample.</li>
+          <li><strong>T2 search replay.</strong><br>Use the six-seat Search → Weak default/tight contrast (−0.033 versus +0.328), alongside Search → Repaired (+0.350/+0.467), to isolate geometry and opponent-policy effects.</li>
+          <li><strong>Starting position remains a stratifier.</strong><br>Some 12-game seat slices span more than 0.5 reward, including tight six-seat Search → Weak (+0.067 to +0.667). Those slices locate replays but are too small for seat-specific tuning claims.</li>
+        </ul>
+      </section>
+
+      <section id="limits">
+        <span class="section-kicker">06 · Reliability and limits</span>
+        <h2>The map selects diagnostics; it does not promote a champion.</h2>
+        <ul class="open-list">
+          <li><strong>One race per track × focal seat.</strong><br>Cells contain 24, 48, or 72 races, but each exact coordinate has one game seed. Near-zero effects require replay or a powered confirmation before becoming strength claims.</li>
+          <li><strong>First-place uncertainty is retained.</strong><br>Many Wilson intervals cross the chance line. Placement reward is the primary map signal; T0 does not convert its sign into a formal pass/fail gate.</li>
+          <li><strong>Homogeneous fields are intentional.</strong><br>They expose style interactions cleanly but do not estimate performance in a mixed tournament population.</li>
+          <li><strong>Consumed development bands.</strong><br><code>715000+</code> and <code>915000+</code> are now static-benchmark development data, not untouched final-test tracks.</li>
+          <li><strong>No learned-policy conclusion.</strong><br>T0 contains no learned contender and does not modify the policy-generation registry.</li>
+        </ul>
+      </section>
+
+      <section id="verification">
+        <span class="section-kicker">07 · Verification</span>
+        <h2>The new surface is narrow and independently checked.</h2>
+        <div class="file-grid">
+          <div class="file-card"><a href="../../experiments/eval_static_matchup_map.py"><code>experiments/eval_static_matchup_map.py</code></a>Frozen factories, complete directed grid, raw races, summaries, timings, persistence, and resume.</div>
+          <div class="file-card"><a href="../../tests/test_static_matchup_map.py"><code>tests/test_static_matchup_map.py</code></a>Population identity, bounded defaults, coordinate coverage, matched seeds, aggregation, and empty-cell protection.</div>
+          <div class="file-card"><code>runs/t0_static_matchup_map.json</code>Ignored machine-readable evidence with all 1,728 raw races and 36 summaries.</div>
+        </div>
+        <div class="verification-panel"><strong>Observed and verified</strong><br>All 36 full cells completed in 411.0 seconds, below the 1,800-second cap. Eight focused T0 and StaticSearchV1 tests pass. Targeted Ruff is clean. Strict <code>mypy src</code> is clean. The separate one-track smoke also completed all 36 cells before the full run.</div>
+      </section>
+    </article>
+  </div>
+</main>
+<footer class="hybrid-footer"><strong>Static-agent strength · T0 matchup map</strong></footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

@@ -66,7 +66,16 @@ def card_token(card: Card) -> str:
 
 
 #: The fixed token alphabet (sorted for a stable enumeration order).
-_TOKEN_ALPHABET: tuple[str, ...] = ("H", "S1", "S2", "S3", "S4", "ST", "U0", "U5")
+CARD_TOKEN_ALPHABET: tuple[str, ...] = (
+    "H",
+    "S1",
+    "S2",
+    "S3",
+    "S4",
+    "ST",
+    "U0",
+    "U5",
+)
 
 
 def _enumerate_card_multisets() -> list[tuple[str, ...]]:
@@ -80,7 +89,7 @@ def _enumerate_card_multisets() -> list[tuple[str, ...]]:
     seen: set[tuple[str, ...]] = set()
     ordered: list[tuple[str, ...]] = []
     for g in range(1, rules.MAX_GEAR + 1):
-        for combo in itertools.combinations_with_replacement(_TOKEN_ALPHABET, g):
+        for combo in itertools.combinations_with_replacement(CARD_TOKEN_ALPHABET, g):
             key = tuple(sorted(combo))
             if key not in seen:
                 seen.add(key)
@@ -90,14 +99,18 @@ def _enumerate_card_multisets() -> list[tuple[str, ...]]:
 
 #: Canonical ordered list of card value-multisets; index in this list + the
 #: CARDS offset is the flat action index.
-_CARD_MULTISETS: list[tuple[str, ...]] = _enumerate_card_multisets()
+CARD_MULTISETS: tuple[tuple[str, ...], ...] = tuple(_enumerate_card_multisets())
+# Backward-compatible aliases for the existing action-feature table. New tensor
+# code uses the public names above; removing these is a separate codec cleanup.
+_TOKEN_ALPHABET = CARD_TOKEN_ALPHABET
+_CARD_MULTISETS = CARD_MULTISETS
 _CARD_MULTISET_INDEX: dict[tuple[str, ...], int] = {
-    ms: i for i, ms in enumerate(_CARD_MULTISETS)
+    ms: i for i, ms in enumerate(CARD_MULTISETS)
 }
 
 # Self-check the frozen contract: enumeration must match spaces.CARDS_SIZE.
-assert len(_CARD_MULTISETS) == spaces.CARDS_SIZE, (
-    f"CARDS enumeration produced {len(_CARD_MULTISETS)} multisets but "
+assert len(CARD_MULTISETS) == spaces.CARDS_SIZE, (
+    f"CARDS enumeration produced {len(CARD_MULTISETS)} multisets but "
     f"spaces.CARDS_SIZE == {spaces.CARDS_SIZE}"
 )
 
@@ -146,7 +159,7 @@ def _realize_multiset(
 # A behavior-covering, fixed table. Slots whose preconditions are not met for a
 # given ReactOptions are masked off.
 
-_REACT_TABLE: tuple[tuple[int, bool, bool, bool], ...] = (
+REACT_TABLE: tuple[tuple[int, bool, bool, bool], ...] = (
     (0, False, False, False),  # 0: do nothing
     (1, False, False, False),  # 1: cool 1
     (2, False, False, False),  # 2: cool 2
@@ -156,7 +169,8 @@ _REACT_TABLE: tuple[tuple[int, bool, bool, bool], ...] = (
     (3, False, False, True),   # 6: max cool + adrenaline cooldown (up to 4)
     (0, True, True, False),    # 7: boost + adrenaline speed
 )
-assert len(_REACT_TABLE) == REACT_SIZE
+_REACT_TABLE = REACT_TABLE
+assert len(REACT_TABLE) == REACT_SIZE
 
 
 def _react_slot_legal(
@@ -306,7 +320,7 @@ def decode_action(
         raise ValueError(f"Gear index {flat_index} not in legal set")
 
     if kind == DecisionKind.CARDS:
-        multiset = _CARD_MULTISETS[flat_index - CARDS_OFFSET]
+        multiset = CARD_MULTISETS[flat_index - CARDS_OFFSET]
         # Return the matching tuple straight from ``decision.legal`` so the
         # result is directly sendable to ``run_round_driver`` -- the driver's
         # guard checks ``chosen in legal_plays``, and ``rules.legal_card_plays``

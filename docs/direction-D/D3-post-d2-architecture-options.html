@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Expanded architecture options for reaching Direction D's 48-hour training scale after the D2-R tensor stop.">
+  <title>Direction D3 - architecture options after D2-R</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Architecture selected - detailed A+C design written - 21 July 2026</span>
+      <h1>Choose an architecture that can reach a useful 48-hour scale.</h1>
+      <p class="hero-copy">D2 taught us that HEAT's common rules can compile very quickly, but forcing every irregular game through one fixed masked schedule is slower than the scalar engine. The next step should be chosen by the scale we want, not by the size of the next convenient patch.</p>
+      <p><strong>Direction D - post-D2 architecture decision</strong><br><span class="muted">Detailed follow-up: <a href="D3-options-A-C-detailed-design.html">options A and C implementation design</a> · Evidence: <a href="D2-tensor-vertical-slice-design.html">D2 exact slice and compiled redesign</a></span></p>
+    </div>
+    <aside class="status-board" aria-label="Recommendation">
+      <span class="board-label">Recommended route</span>
+      <strong>Native exact CPU pool, then GPU.</strong>
+      <p>Port exact game execution to compact C++ state, run independent games on native threads, and batch only at the PyTorch policy boundary. Add GPU inference and updates if the CPU pool can supply them.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#decision">Decision in one page</a>
+      <a href="#lessons">What D0-D2 taught us</a>
+      <a href="#scale">48-hour target</a>
+      <a href="#comparison">Options compared</a>
+      <a href="#native">A - Native CPU pool</a>
+      <a href="#processes">B - PPO actor pool</a>
+      <a href="#gpu">C - Native plus GPU</a>
+      <a href="#device">D - Device rewrite</a>
+      <a href="#algorithm">E - New RL architecture</a>
+      <a href="#model">F - Learned simulator</a>
+      <a href="#hardware">Hardware choices</a>
+      <a href="#roadmap">Recommended roadmap</a>
+      <a href="#sources">Sources</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="decision">
+        <span class="section-kicker">01 - Decision in one page</span>
+        <h2>The best balance is a native exact environment pool with a batched PyTorch boundary.</h2>
+        <p class="lede">The current measured baseline produces about 233 million practical transitions in 48 hours. The old 600 million target requires 2.58x current trained throughput; a safer 800 million engineering target requires 3.44x. Inference batching alone cannot reach either target. We need to make exact rules substantially faster as well, and likely accelerate PPO updates if we want a credible route toward one billion transitions.</p>
+
+        <div class="decision-banner">
+          <strong>Primary direction</strong>
+          Build each game as an independent, compact native state machine in C++. Execute only the branches that game actually needs. Run many games on a native thread pool. Return ready observations and legal masks in batches for the existing PyTorch policy. Keep Python events and rich objects outside the hot path. Preserve the current exact RNG contract at first.
+        </div>
+
+        <div class="hybrid-stats" aria-label="Decision summary">
+          <div class="hybrid-stat"><span>Recommended target</span><strong>800M</strong><small>practical transitions in 48 h</small></div>
+          <div class="hybrid-stat"><span>Required rate</span><strong>5,144/s</strong><small>trained transitions at 90% uptime</small></div>
+          <div class="hybrid-stat"><span>Required gain</span><strong>3.44x</strong><small>over measured D0 trained rate</small></div>
+          <div class="hybrid-stat"><span>Primary scope</span><strong>9-11 chunks</strong><small>roughly 5-9 working weeks</small></div>
+        </div>
+
+        <p><strong>Why this changed:</strong> the original tensor direction assumed that doing more rules as one tensor program would remove Python overhead. D2-R1 proved that for the uniform common core. D2-R2 then proved the harder point: fixed masked work for clutter, finish, stress, and replenishment can cost more than exact scalar branching. Native independent state machines keep the fast data-oriented representation without forcing finished or simple games to execute other games' branches.</p>
+        <p><strong>Fallback:</strong> a synchronous multi-process PPO actor pool is the cheapest serious bridge and may just reach 600 million. It has too little margin to be the preferred 800 million design.</p>
+        <p><strong>Escalation:</strong> if the native CPU pool cannot sustain at least 4,000 trained transitions/s, add GPU inference and PPO updates. If that combination still cannot sustain 5,000 transitions/s, consider the full device-resident rewrite. Change the learning algorithm only as a separate research decision.</p>
+      </section>
+
+      <section id="lessons">
+        <span class="section-kicker">02 - Measured lessons</span>
+        <h2>We learned where the time goes and which kinds of batching are real.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Measured result</th><th>What it means</th><th>Consequence</th></tr></thead>
+            <tbody>
+              <tr><td>D0 trained throughput: <strong>1,496 transitions/s</strong></td><td>About 232.7M practical transitions in 48 hours at 90% uptime.</td><td>600M needs 2.58x; 800M needs 3.44x; 1B needs 4.30x.</td></tr>
+              <tr><td>D0 median iteration: <strong>81.11 s</strong></td><td>70.16 s rollout, 10.24 s PPO update, and 0.70 s preparation.</td><td>Rules, inference, and learning all matter at the new target.</td></tr>
+              <tr><td>Policy inference: <strong>39.64 s</strong></td><td>Almost half the iteration is repeated single-row neural-network calls.</td><td>Cross-game batching remains essential.</td></tr>
+              <tr><td>Non-inference rollout: <strong>30.51 s</strong></td><td>Even free rule execution would only improve the serial loop by about 1.60x.</td><td>No environment-only micro-optimization can reach the target.</td></tr>
+              <tr><td>D1, 16 lanes: inference fell to <strong>about 6.5 s</strong></td><td>Useful policy batches exist and inference can be made much cheaper.</td><td>Keep the batching idea; replace the costly Python lane execution and drain.</td></tr>
+              <tr><td>D1 best stable end-to-end gain: <strong>1.118x</strong></td><td>Drain and extra game work consumed most of the inference saving.</td><td>Do not retune 8/16/32 Python lanes.</td></tr>
+              <tr><td>D2-R1 common core: <strong>2.765x scalar</strong></td><td>Compact numeric state and one compiled graph work well on uniform paths.</td><td>Reuse the state, receipts, observation logic, and parity corpus.</td></tr>
+              <tr><td>D2-R2 full deterministic slice: <strong>0.839x scalar</strong></td><td>Fixed six-turn masked execution performed unnecessary work for irregular games.</td><td>Prefer independent exact branches and native parallelism over a larger masked graph.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="result-note"><strong>The core design constraint.</strong> We need both kinds of efficiency: each game must execute only the work it needs, while neural-network calls must see many games at once. A native ready-queue gives us both. It allows games to diverge in native code, then gathers only decision-ready rows for batched inference.</div>
+      </section>
+
+      <section id="scale">
+        <span class="section-kicker">03 - Scale model</span>
+        <h2>Target 800 million so a small regression does not sink the 48-hour run.</h2>
+        <p>The old 600M line is still the minimum useful Direction D result. It leaves almost no safety margin if throughput falls during a long run, game mix changes, checkpoints take time, or resume blocks start cold. An engineering target near 800M gives a practical reserve while remaining below the one-billion stretch goal.</p>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>48-hour result</th><th>Required trained rate</th><th>Gain over D0</th><th>How to use it</th></tr></thead>
+            <tbody>
+              <tr><td>600M</td><td>3,858 transitions/s</td><td>2.58x</td><td>Minimum continuation target; too little operational margin.</td></tr>
+              <tr><td>750M</td><td>4,823 transitions/s</td><td>3.22x</td><td>Credible intermediate result.</td></tr>
+              <tr><td><strong>800M</strong></td><td><strong>5,144 transitions/s</strong></td><td><strong>3.44x</strong></td><td>Recommended engineering target.</td></tr>
+              <tr><td>1B</td><td>6,430 transitions/s</td><td>4.30x</td><td>Stretch target that probably needs faster updates as well as faster collection.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="table-title">Optimistic component model, not a benchmark</h3>
+        <p>This model applies measured D1 inference time and hypothetical rule/update speedups to the D0 median iteration. It shows which combinations are worth building; it does not predict the final result precisely.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Change</th><th>Modeled gain</th><th>Modeled 48-hour capacity</th><th>Reading</th></tr></thead>
+            <tbody>
+              <tr><td>Inference batching only</td><td>1.69x</td><td>393M</td><td>Clearly insufficient.</td></tr>
+              <tr><td>3x faster non-inference rules only</td><td>1.33x</td><td>311M</td><td>Clearly insufficient.</td></tr>
+              <tr><td>Batched inference + 3x rules</td><td>2.93x</td><td>683M</td><td>Passes 600M, misses the safer target.</td></tr>
+              <tr><td>Batched inference + 5x rules</td><td>3.44x</td><td>801M</td><td>Matches the recommended target.</td></tr>
+              <tr><td>Previous row + 2x PPO update</td><td>4.40x</td><td>1.02B</td><td>Credible one-billion route.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The current receipt reports 16 logical CPU cores, PyTorch 2.13 CPU-only, and no CUDA device available to that PyTorch install. This does <em>not</em> prove that the machine has no suitable GPU; hardware inventory and CUDA compatibility must be a separate read-only receipt before planning GPU work.</p>
+      </section>
+
+      <section id="comparison">
+        <span class="section-kicker">04 - Option comparison</span>
+        <h2>There are five serious engineering directions and one separate research direction.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Direction</th><th>Work chunks</th><th>Estimated code</th><th>Calendar estimate</th><th>Likely ceiling on this machine</th><th>Recommendation</th></tr></thead>
+            <tbody>
+              <tr><td><strong>A. Native exact CPU pool</strong></td><td>9-11</td><td>2,500-5,000 lines</td><td>5-9 weeks</td><td>3-5x if it achieves both native rule speed and batched inference</td><td class="metric-good">Primary direction</td></tr>
+              <tr><td><strong>B. Synchronous PPO actor pool</strong></td><td>5-7</td><td>1,000-2,000 lines</td><td>2-4 weeks</td><td>About 2.2-3.0x; possibly 510-700M</td><td>Bridge or fallback</td></tr>
+              <tr><td><strong>C. Native CPU + GPU inference/update</strong></td><td>6-8 after A</td><td>800-1,800 lines</td><td>2-5 weeks after A</td><td>About 3.5-5x total; 800M-1B is plausible</td><td class="metric-good">Planned escalation</td></tr>
+              <tr><td><strong>D. Full device-resident rewrite</strong></td><td>10-14</td><td>5,000-10,000 lines</td><td>10-18 weeks</td><td>Highest single-machine ceiling, but least certain</td><td>Strategic fallback if A+C miss</td></tr>
+              <tr><td><strong>E. IMPALA/V-trace or asynchronous PPO</strong></td><td>9-12</td><td>2,500-5,000 lines</td><td>6-12 weeks</td><td>High scale-out ceiling; limited by current environment on one machine</td><td>Separate learning-method decision</td></tr>
+              <tr><td><strong>F. Learned simulator</strong></td><td>10-15</td><td>5,000-10,000+ lines</td><td>12-24+ weeks</td><td>Very high imagined-step rate, not exact transition capacity</td><td>Separate research programme</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>These estimates include production integration, focused tests, differential checks, bounded benchmarks, resume work, and documentation. They are planning ranges, not promises. The native and device options may grow if exact reshuffling or event compatibility reveals hidden state.</p>
+      </section>
+
+      <section id="native">
+        <span class="section-kicker">05 - Direction A</span>
+        <h2>Native exact CPU environment pool: independent games, shared inference batches.</h2>
+        <p><strong>Simple idea:</strong> translate the hot game state and rules into C++. Every game owns compact state and exact RNG. Native worker threads advance games independently until they need a policy decision. A ready queue gathers observations into a PyTorch batch. Python receives trajectory blocks and optional debug events, not one callback per rule action.</p>
+
+        <pre><code>native game 1 --\
+native game 2 ----> ready queue --> PyTorch policy batch --> actions
+native game 3 --/          ^                                  |
+      |                     +----------------------------------+
+      +--> compact trajectory buffers --> Python PPO learner</code></pre>
+
+        <h3 class="table-title">Estimated 10 chunks</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Chunk</th><th>Deliverable</th><th>Gate</th></tr></thead>
+            <tbody>
+              <tr><td>A0</td><td>Freeze the native ABI, state capacities, error model, build route, and exactness receipt format.</td><td>A minimal extension builds on Windows and round-trips a numeric receipt.</td></tr>
+              <tr><td>A1</td><td>Compact native game/player/track/card state plus Python bridge.</td><td>Exact D0 semantic snapshots for generated 2-6 seat states.</td></tr>
+              <tr><td>A2</td><td>Representative hard slice: normal play, traffic, clutter, finish, replenishment, stress, reshuffle.</td><td>At least 100,000 zero-mismatch transitions and at least 3x scalar slice speed.</td></tr>
+              <tr><td>A3</td><td>Remaining gear, cards, react, movement, slipstream, corner, lap, and terminal rules.</td><td>Full-race lockstep equivalence on a bounded randomized corpus.</td></tr>
+              <tr><td>A4</td><td>Native observations, legal masks, rewards, and terminal rows.</td><td>Exact arrays and event/reward ordering against Python.</td></tr>
+              <tr><td>A5</td><td>Python-compatible MT19937 draw, shuffle, state save, and resume.</td><td>Exact draw sequence and next-state parity under lane reorder and resume.</td></tr>
+              <tr><td>A6</td><td>Native thread pool, per-game ownership, ready queues, backpressure, and bounded stop.</td><td>Repeatable output with 1, 2, 4, 8, and 12 workers; no lane-order dependence.</td></tr>
+              <tr><td>A7</td><td>Batched PyTorch inference boundary and compact trajectory transfer.</td><td>No Python call per game step; useful p50 batch; fixed policy version per PPO collection.</td></tr>
+              <tr><td>A8</td><td>End-to-end PPO integration, segmented resume, telemetry, and fault reporting.</td><td>Fresh-process resume matches uninterrupted training at safe boundaries.</td></tr>
+              <tr><td>A9</td><td>Matched benchmark, one-hour soak, and eight-hour rehearsal plan.</td><td>Continue at 4,000 trained tps; adopt at 5,000+ with less than 5% repeat spread.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Pros</h3>
+        <ul>
+          <li><strong>Matches HEAT's branchy rules.</strong> Each game executes its actual branch rather than all masked branches in a fixed schedule.</li>
+          <li><strong>Uses the current 16-core CPU.</strong> C++ threads can run exact games in parallel without Python's object and interpreter overhead.</li>
+          <li><strong>Preserves the existing learning method.</strong> PPO, rewards, policy architecture, and evaluation remain unchanged.</li>
+          <li><strong>Preserves useful D2 work.</strong> D2's fixed state, semantic snapshots, receipts, observation layout, legal masks, and randomized parity corpus become the specification.</li>
+          <li><strong>Creates the right GPU feed.</strong> A ready queue can make batches without D1's Python bridge drain.</li>
+          <li><strong>Supports exact segmented resume.</strong> Native state is explicit rather than hidden inside Python generators.</li>
+        </ul>
+
+        <h3>Cons</h3>
+        <ul>
+          <li><strong>Large duplicate-rules burden.</strong> Every production rule now exists in Python and C++; differential testing becomes permanent infrastructure.</li>
+          <li><strong>Native debugging is harder.</strong> Memory safety, build failures, crashes, and Windows ABI issues are more expensive than ordinary Python errors.</li>
+          <li><strong>Exact Python RNG may constrain the design.</strong> Matching MT19937 shuffle and consumption order is safer for replay but not the fastest theoretical RNG.</li>
+          <li><strong>The policy boundary can still bottleneck.</strong> Poor queue design or small ready batches could preserve too much Python/PyTorch overhead.</li>
+          <li><strong>Maintenance cost is real.</strong> New game rules must be implemented and parity-tested twice.</li>
+        </ul>
+
+        <div class="decision-banner">
+          <strong>First affordability gate</strong>
+          Do not port the easy path alone. A2 deliberately includes the branches that defeated D2-R2. Continue only if that representative slice is exact and at least 3x faster than scalar. This should take roughly 1,000-1,800 lines and 2-3 working weeks; the benchmark itself should take less than one CPU hour.
+        </div>
+        <p><strong>Supporting sources:</strong> <a href="https://github.com/sail-sg/envpool">EnvPool</a> uses a C++ batched environment pool with a thread pool and Python bindings, demonstrating the general architecture. The <a href="https://arxiv.org/abs/2206.10558">EnvPool paper</a> reports that native parallel environment execution can beat Python subprocess designs across hardware scales. PyTorch documents <a href="https://docs.pytorch.org/tutorials/advanced/cpp_custom_ops.html">custom C++ operators</a> and its <a href="https://docs.pytorch.org/docs/main/cpp_extension.html">C++ extension API</a> as supported integration routes. These sources support the pattern, not the HEAT performance estimate.</p>
+      </section>
+
+      <section id="processes">
+        <span class="section-kicker">06 - Direction B</span>
+        <h2>Synchronous multi-process PPO actors: cheapest route that might reach 600M.</h2>
+        <p><strong>Simple idea:</strong> keep the current exact Python engine. At each PPO iteration, freeze one policy version, send it to several worker processes, let them collect complete games independently, combine their trajectories, and perform one central PPO update. Workers do not continue under a new policy until the update is complete.</p>
+
+        <h3 class="table-title">Estimated 6 chunks</h3>
+        <ol>
+          <li>Freeze worker protocol, game identities, seed allocation, trajectory ordering, and failure rules.</li>
+          <li>Implement one deterministic spawned actor and shared/frozen policy loading.</li>
+          <li>Run three or four actors, aggregate trajectories, and reproduce scalar PPO inputs.</li>
+          <li>Add bounded collection, backpressure, process health, timeout, and clean shutdown.</li>
+          <li>Add exact segmented resume with worker-batch boundaries and deterministic result ordering.</li>
+          <li>Run matched 1/3/4-worker throughput and one-hour soak gates.</li>
+        </ol>
+
+        <h3>Pros</h3>
+        <ul>
+          <li><strong>Lowest semantic risk.</strong> The current Python game remains the only rules implementation.</li>
+          <li><strong>Reuses measured machine behaviour.</strong> Three independent training workers previously achieved 2.703x aggregate throughput with about 95% per-worker retention.</li>
+          <li><strong>Preserves synchronous PPO.</strong> All actors collect with one frozen policy, then the learner updates, matching PPO's collect-then-optimize structure.</li>
+          <li><strong>Faster first answer.</strong> A bounded prototype can be measured before a native port is complete.</li>
+        </ul>
+
+        <h3>Cons</h3>
+        <ul>
+          <li><strong>It may only scrape past 600M.</strong> A perfect 2.703x transfer would project about 629M; central coordination and trajectory transfer will reduce that.</li>
+          <li><strong>Inference remains duplicated.</strong> Each process normally runs scalar or small-batch policy calls unless a second central-inference design is added.</li>
+          <li><strong>Windows spawn and serialization are permanent costs.</strong> Large trajectory copies and repeated model distribution can consume the gain.</li>
+          <li><strong>CPU and PyTorch threads compete.</strong> Worker count, Torch thread count, and learner work require careful fixed resource allocation.</li>
+          <li><strong>Scaling beyond one machine adds infrastructure.</strong> Fault tolerance, networking, policy versioning, and observability become much larger concerns.</li>
+        </ul>
+
+        <div class="decision-banner">
+          <strong>Adoption gate</strong>
+          Prototype cost: about 500-900 lines and 3-5 working days. Production cost: about 1,000-2,000 lines and 2-4 weeks. Stop below 2.0x trained throughput. Treat 2.6x as a 600M bridge; require at least 3.2x before treating it as the long-term design.
+        </div>
+        <p><strong>Supporting sources:</strong> Ray's <a href="https://docs.ray.io/en/latest/rllib/scaling-guide.html">RLlib scaling guide</a> describes independent environment-runner actors, vector environments per actor, and separate learner actors. The <a href="https://arxiv.org/abs/1707.06347">PPO paper</a> describes alternating between data collection and multiple optimization epochs, which is the reason this option keeps a synchronized policy-version boundary. Ray is evidence for the pattern; adopting Ray itself is optional and may be unnecessary for a single Windows machine.</p>
+      </section>
+
+      <section id="gpu">
+        <span class="section-kicker">07 - Direction C</span>
+        <h2>Native CPU actors plus GPU inference and PPO: the strongest 800M-1B path.</h2>
+        <p><strong>Simple idea:</strong> use Direction A's native workers to keep the CPU busy and continuously fill large observation batches. Copy compact batches through pinned host buffers to one GPU. Run inference there while CPU workers continue rules work. Keep PPO minibatches on the GPU as well. Double-buffer the ready and result queues so CPU simulation, data transfer, inference, and learning overlap where safe.</p>
+
+        <h3 class="table-title">Estimated 7 additional chunks after Direction A</h3>
+        <ol>
+          <li>Record actual GPU model, memory, driver, CUDA compatibility, and CPU/GPU transfer bandwidth.</li>
+          <li>Install a compatible CUDA PyTorch environment and reproduce the CPU policy numerically.</li>
+          <li>Add reusable pinned observation/action/trajectory buffers and explicit ownership.</li>
+          <li>Benchmark GPU inference across collector-supplied batches, not synthetic large batches alone.</li>
+          <li>Move PPO update tensors and optimizer state to GPU; re-prove resume and checkpoint identity.</li>
+          <li>Overlap CPU simulation, non-blocking transfers, and inference with double buffering and backpressure.</li>
+          <li>Run end-to-end matched benchmarks, thermal soak, memory checks, and an eight-hour rehearsal.</li>
+        </ol>
+
+        <h3>Pros</h3>
+        <ul>
+          <li><strong>Attacks the remaining two large components.</strong> Native CPU speeds rules; GPU batches speed inference and potentially the 10.24-second PPO update.</li>
+          <li><strong>Has a credible one-billion model.</strong> Batched inference plus 5x rule speed and 2x update speed models about 1.02B practical transitions.</li>
+          <li><strong>Retains exact CPU rules.</strong> GPU numeric differences affect policy computation, not game legality or chance outcomes.</li>
+          <li><strong>Can be added after evidence.</strong> The native pool must first prove it can supply useful batches, avoiding premature CUDA work.</li>
+        </ul>
+
+        <h3>Cons</h3>
+        <ul>
+          <li><strong>Hardware is currently unknown.</strong> The installed PyTorch is CPU-only; a suitable GPU has not been confirmed.</li>
+          <li><strong>The policy may be too small for GPU efficiency.</strong> Small models and small batches can be dominated by transfer and launch overhead.</li>
+          <li><strong>Overlap adds concurrency complexity.</strong> Buffer lifetime, streams, synchronization, and policy-version boundaries must be explicit.</li>
+          <li><strong>CUDA changes the operational environment.</strong> Drivers, wheels, deterministic kernels, memory pressure, and checkpoint portability need new receipts.</li>
+          <li><strong>GPU inference can starve.</strong> Without enough native games, waiting for large batches reduces rather than improves throughput.</li>
+        </ul>
+
+        <div class="decision-banner">
+          <strong>Entry and adoption gates</strong>
+          Enter only after the native pool sustains useful ready batches and after an explicit hardware receipt. Continue if GPU inference improves the full collection loop by at least 1.25x. Adopt the combined design at 5,000+ trained transitions/s with under 5% repeat spread; target 6,500/s if one billion is the goal.
+        </div>
+        <p><strong>Supporting sources:</strong> PyTorch's <a href="https://docs.pytorch.org/docs/main/notes/cuda.html">CUDA semantics</a> documents asynchronous execution, pinned memory, and non-blocking copies that can overlap CPU and GPU work. Its <a href="https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html">performance tuning guide</a> explains inference and GPU optimization, including the cost of CPU launch and synchronization. The <a href="https://docs.pytorch.org/TensorRT/user_guide/performance_tuning.html">Torch-TensorRT guide</a> explicitly warns that very small models and batch size one can be slower because bridge and launch overhead dominate, which is why collector-supplied batch size is a hard gate.</p>
+      </section>
+
+      <section id="device">
+        <span class="section-kicker">08 - Direction D</span>
+        <h2>Full device-resident JAX or PyTorch rewrite: highest ceiling, highest rewrite risk.</h2>
+        <p><strong>Simple idea:</strong> replace the Python-compatible execution contract with an explicitly versioned array engine designed for accelerators. Keep all game state, random keys, rule control flow, observations, policy inference, trajectory storage, and possibly PPO updates on one device. Use structured conditionals and loops instead of a fixed six-turn masked schedule.</p>
+
+        <h3 class="table-title">Estimated 12 chunks</h3>
+        <ol>
+          <li>Decide whether this is a new engine semantic version with a new RNG contract.</li>
+          <li>Freeze bounded device state, capacities, overflow rules, and compact receipt schema.</li>
+          <li>Implement counter-based per-game RNG and deterministic key allocation.</li>
+          <li>Implement structured control flow for gear and cards.</li>
+          <li>Implement movement, traffic, corners, slipstream, finish, and terminal rules.</li>
+          <li>Implement replenishment, stress, reshuffle, and rare branches.</li>
+          <li>Implement device observations, legal masks, rewards, and trajectory rows.</li>
+          <li>Implement a device-resident scheduler and bounded rollout boundary.</li>
+          <li>Integrate policy inference without host round-trips.</li>
+          <li>Integrate PPO updates and checkpoint/resume.</li>
+          <li>Run exact semantic checks where contracts overlap, plus distributional equivalence for the new RNG.</li>
+          <li>Run scaling, memory, learning-equivalence, soak, and failure-recovery gates.</li>
+        </ol>
+
+        <h3>Pros</h3>
+        <ul>
+          <li><strong>Highest single-machine ceiling.</strong> It can remove most Python, host/device transfer, and small-kernel launch boundaries.</li>
+          <li><strong>Counter-based RNG fits parallel lanes.</strong> Game identity can determine random keys without shared consumption order.</li>
+          <li><strong>Structured device control flow can avoid D2-R2's fixed schedule.</strong> A compiled loop or conditional can execute one selected branch while preserving fixed state shapes.</li>
+          <li><strong>One representation serves the full loop.</strong> Rules, observations, inference, trajectories, and learning can remain on the accelerator.</li>
+          <li><strong>Best path to future multi-device scale.</strong> Explicit array state is easier to shard than Python objects.</li>
+        </ul>
+
+        <h3>Cons</h3>
+        <ul>
+          <li><strong>It may abandon bit-for-bit historical replay.</strong> A new counter-based RNG will not reproduce Python MT19937 shuffle sequences.</li>
+          <li><strong>Every uncertainty moves at once.</strong> Rules, RNG, control flow, device compiler, training loop, and hardware all change.</li>
+          <li><strong>Parity becomes more subtle.</strong> Exact rule semantics can match while stochastic trajectories differ; distributional tests and new policy generations are required.</li>
+          <li><strong>Windows support and compilation must be proven early.</strong> JAX or an alternative compiler may add installation and debugging friction.</li>
+          <li><strong>Learning changes may be hard to attribute.</strong> A speed win is not enough if new random streams or numerical choices change training behaviour.</li>
+          <li><strong>Large sunk-cost risk.</strong> This is likely 5,000-10,000 lines and 10-18 weeks before a production answer.</li>
+        </ul>
+
+        <div class="decision-banner">
+          <strong>When this becomes justified</strong>
+          Choose this if Direction A plus C cannot sustain 5,000 trained transitions/s, or if future requirements clearly exceed one billion transitions on one machine. The first spike should implement the hard D2-R2 branches with structured device control flow and the proposed new RNG. Stop if it cannot beat scalar by 3x without host callbacks.
+        </div>
+        <p><strong>Supporting sources:</strong> the <a href="https://docs.jax.dev/en/latest/jep/263-prng.html">JAX PRNG design</a> explains counter-based functional keys that are reproducible, vectorizable, parallel, and scalable. JAX's <a href="https://docs.jax.dev/en/latest/control-flow.html">structured control-flow documentation</a> and <a href="https://docs.jax.dev/en/latest/_autosummary/jax.lax.while_loop.html">while-loop primitive</a> show how dynamic rule control flow can be lowered to compiled operations while state keeps fixed shapes. These mechanisms are technically relevant, but only a HEAT spike can show whether the branch structure is fast enough.</p>
+      </section>
+
+      <section id="algorithm">
+        <span class="section-kicker">09 - Direction E</span>
+        <h2>IMPALA/V-trace or asynchronous PPO: remove the collect/update barrier.</h2>
+        <p><strong>Simple idea:</strong> let actors continue producing experience while the learner updates. Because actor policies can lag behind the learner, use an algorithm designed to correct off-policy experience, such as IMPALA's V-trace, or adopt a carefully specified asynchronous PPO variant. Scale actors and learners independently.</p>
+
+        <h3 class="table-title">Estimated 10 chunks</h3>
+        <ol>
+          <li>Write a separate learning-method design with exact policy-lag and correction semantics.</li>
+          <li>Add behaviour-policy logits, values, discounts, bootstrap rows, and policy versions to trajectories.</li>
+          <li>Implement actor queues, backpressure, batching, health, and restart behaviour.</li>
+          <li>Implement and reference-test V-trace or the selected asynchronous objective.</li>
+          <li>Implement learner batching and policy publication.</li>
+          <li>Define maximum policy lag, sample rejection, and stale-actor recovery.</li>
+          <li>Define deterministic run identity, checkpoint, queue, and resume semantics.</li>
+          <li>Run toy/reference correctness tests and short HEAT learning smokes.</li>
+          <li>Run matched sample-efficiency and skill comparisons against frozen PPO.</li>
+          <li>Only then run throughput scaling and a bounded stability pilot.</li>
+        </ol>
+
+        <h3>Pros</h3>
+        <ul>
+          <li><strong>Actors and learner no longer wait for each other.</strong> Collection and optimization can overlap continuously.</li>
+          <li><strong>Scales beyond one machine.</strong> More actor processes or hosts can be added without one global rollout barrier.</li>
+          <li><strong>Handles stragglers better.</strong> One slow game or worker need not stop the entire iteration.</li>
+          <li><strong>Pairs well with native actors.</strong> It can become a later scaling layer once environment execution is efficient.</li>
+        </ul>
+
+        <h3>Cons</h3>
+        <ul>
+          <li><strong>This is a new learning algorithm.</strong> Existing PPO evidence, hyperparameters, and policy-generation conclusions do not transfer automatically.</li>
+          <li><strong>More transitions may buy less learning.</strong> Off-policy correction and stale actors can reduce sample efficiency even while wall-clock throughput rises.</li>
+          <li><strong>It does not fix slow rules.</strong> The current Python environment still limits how much one 16-core machine can produce.</li>
+          <li><strong>Resume becomes much harder.</strong> In-flight queues, actor policy versions, rejected samples, and learner state must be defined.</li>
+          <li><strong>Evaluation needs a new generation.</strong> This cannot be treated as an implementation-only Direction D change.</li>
+        </ul>
+
+        <div class="decision-banner">
+          <strong>Use only for a different bottleneck</strong>
+          Open this direction if native collection becomes fast enough that the synchronized PPO barrier or multi-machine scaling is the measured limit. Require learning at least as strong per wall-clock hour as frozen PPO, not merely more transitions per second.
+        </div>
+        <p><strong>Supporting sources:</strong> the <a href="https://proceedings.mlr.press/v80/espeholt18a.html">IMPALA paper</a> introduced decoupled actors and learners with V-trace correction and demonstrated high-throughput distributed learning. Ray's <a href="https://docs.ray.io/en/latest/rllib/key-concepts.html">current architecture documentation</a> separates environment runners from learners, and its <a href="https://docs.ray.io/en/latest/rllib/scaling-guide.html">scaling guide</a> exposes both axes. This supports the scalability claim, not equivalence to HEAT's current PPO recipe.</p>
+      </section>
+
+      <section id="model">
+        <span class="section-kicker">10 - Direction F</span>
+        <h2>Learned simulator: valuable research, but not a substitute for exact transitions.</h2>
+        <p><strong>Simple idea:</strong> train a model to predict the next state or latent state, rewards, chance outcomes, terminal flags, and possibly legal actions. Use it for cheap imagined rollouts, policy pretraining, or search. Keep the exact engine authoritative for real training data and evaluation.</p>
+
+        <h3 class="table-title">Estimated 12 chunks</h3>
+        <ol>
+          <li>Define dataset, visibility, chance, and policy-generation provenance contracts.</li>
+          <li>Generate and validate exact transition sequences with adequate rare-branch coverage.</li>
+          <li>Choose observable-state or latent-state architecture and stochastic objective.</li>
+          <li>Build exact legality and chance interfaces around the learned component.</li>
+          <li>Train a one-step baseline and calibrate stochastic predictions.</li>
+          <li>Measure multi-step rollout error by phase, seat count, track, and rare branch.</li>
+          <li>Measure policy-value and action-ranking distortion, not prediction loss alone.</li>
+          <li>Build bounded imagined-trajectory generation with uncertainty cutoffs.</li>
+          <li>Choose search, pretraining, or data-augmentation integration; do not mix all three first.</li>
+          <li>Run exact-environment skill attribution against a fixed data budget.</li>
+          <li>Study exploitability and model-error feedback loops.</li>
+          <li>Only then consider production use behind an explicit approximate-data label.</li>
+        </ol>
+
+        <h3>Pros</h3>
+        <ul>
+          <li><strong>Imagined steps can be extremely cheap.</strong> A neural model can batch thousands of hypothetical continuations.</li>
+          <li><strong>Can support search.</strong> Cheap rollouts may improve action selection even if they never replace real training games.</li>
+          <li><strong>Can focus exact computation.</strong> Uncertainty can decide when to return to the real engine.</li>
+          <li><strong>Offers a path beyond hardware limits.</strong> It changes the cost of experience instead of only optimizing execution.</li>
+        </ul>
+
+        <h3>Cons</h3>
+        <ul>
+          <li><strong>Imagined transitions are not the 600M/800M exact target.</strong> They cannot be counted as equivalent evidence.</li>
+          <li><strong>HEAT is difficult to model.</strong> Private hands, deck uncertainty, simultaneous choices, traffic, and rare rule branches create multi-modal futures.</li>
+          <li><strong>Small errors compound.</strong> A model can have good one-step loss and still produce strategically false long rollouts.</li>
+          <li><strong>The policy can exploit model errors.</strong> Training may improve in the simulator while becoming worse in exact games.</li>
+          <li><strong>It is the largest research uncertainty.</strong> Data generation, model design, learning integration, and exact evaluation all need separate gates.</li>
+        </ul>
+
+        <div class="decision-banner">
+          <strong>Keep it separate</strong>
+          This direction is worthwhile only as a named research programme. Do not use it to declare the exact 48-hour substrate complete. The first useful question is whether a learned model improves exact-environment skill per wall-clock hour when used for one bounded purpose, such as search.
+        </div>
+        <p><strong>Supporting sources:</strong> <a href="https://www.nature.com/articles/s41586-020-03051-4">MuZero</a> demonstrates planning with a learned model across board games and Atari without being given the environment dynamics. <a href="https://www.nature.com/articles/s41586-025-08744-2">DreamerV3</a> demonstrates policy learning from imagined trajectories across many domains. They establish that learned models can support strong planning and control; neither is a close analogue for HEAT's private information, simultaneous choices, and exact stochastic replay. A separate learned-dynamics design should therefore perform a focused literature review before choosing an architecture.</p>
+      </section>
+
+      <section id="hardware">
+        <span class="section-kicker">11 - Hardware and scale-out</span>
+        <h2>Hardware is a multiplier, not a replacement for the right execution model.</h2>
+        <p>The current baseline came from a 16-logical-CPU Windows machine with a CPU-only PyTorch wheel. Three hardware changes are possible, but each needs the software architecture that can use it:</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Hardware move</th><th>Helps which direction</th><th>Benefit</th><th>Limit</th></tr></thead>
+            <tbody>
+              <tr><td>More CPU cores on one machine</td><td>Native pool or process actors</td><td>More exact games can advance in parallel with shared memory.</td><td>Memory bandwidth, inference, and PPO updates eventually dominate.</td></tr>
+              <tr><td>One suitable GPU</td><td>Native + GPU or device rewrite</td><td>Faster batched inference and updates; possible overlap with CPU rules.</td><td>Small policy/batches may not amortize transfer and launch cost.</td></tr>
+              <tr><td>Multiple machines</td><td>Actor/learner architecture</td><td>Highest actor scale and fault isolation.</td><td>Network, stale policies, orchestration, exact resume, and cost become first-class problems.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Buying or renting hardware before the first native slice is unlikely to answer the central question. The code must first show useful per-core efficiency and supplyable inference batches. Once those are measured, a short cost model can compare engineering time with a CPU upgrade, GPU upgrade, or rented multi-core host.</p>
+      </section>
+
+      <section id="roadmap">
+        <span class="section-kicker">12 - Recommended roadmap</span>
+        <h2>Take the large path, but keep every chunk able to stop safely.</h2>
+
+        <ol class="step-line" aria-label="Recommended architecture roadmap">
+          <li><strong>Native hard slice</strong><br>prove exact branch execution</li>
+          <li><strong>Complete native pool</strong><br>rules plus ready queue</li>
+          <li><strong>Reach 5,000/s</strong><br>add GPU if needed</li>
+          <li><strong>Soak and rehearse</strong><br>then authorize 48 h</li>
+        </ol>
+
+        <div class="gate-panel">
+          <h3>Decision gates</h3>
+          <table>
+            <thead><tr><th>Gate</th><th>Continue</th><th>Stop or redesign</th></tr></thead>
+            <tbody>
+              <tr><td>Native hard slice</td><td>100k zero mismatches and at least 3x scalar slice speed.</td><td>Unresolved semantic mismatch or below 2x after profiling.</td></tr>
+              <tr><td>Complete native rules</td><td>Full-race exactness and at least 3x non-inference rollout speed.</td><td>Rare paths erase the gain or RNG cannot remain exact.</td></tr>
+              <tr><td>Native pool + batched inference</td><td>At least 4,000 trained tps to continue; 5,000+ to adopt.</td><td>Below 4,000 tps or repeat spread above 5% after bounded tuning.</td></tr>
+              <tr><td>GPU escalation</td><td>At least 1.25x full-loop gain and combined 5,000+ tps.</td><td>Small batches, copies, or launch overhead erase the gain.</td></tr>
+              <tr><td>Operational readiness</td><td>Exact fresh-process resume, one-hour soak, then successful eight-hour rehearsal.</td><td>Digest drift, memory growth, stalls, thermal collapse, or checkpoint failure.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="table-title">Two decisions that materially change the work</h3>
+        <ul class="open-list">
+          <li><strong>RNG compatibility.</strong><br>Recommendation: preserve Python MT19937 bit-for-bit for the native CPU engine. Introduce a new counter-based RNG only with a separately versioned device engine and new learned-policy generations.</li>
+          <li><strong>Capacity target.</strong><br>Recommendation: engineer for 800M, not the bare 600M line. Use 5,000 trained transitions/s as the practical adoption gate and 6,500/s as the one-billion stretch gate.</li>
+        </ul>
+
+        <div class="decision-banner">
+          <strong>A0-A2 implemented and passed</strong>
+          The first bounded native slice is complete. Release/debug builds, compact state, exact CPython RNG, and the representative hard rules passed their gates: 100,157 zero-mismatch transitions and 5.84x scalar slice speed. A3-A10 and all option C work remain outstanding. See the <a href="D3-A0-A2-native-results.html">A0-A2 result</a> and the updated <a href="D3-options-A-C-detailed-design.html">implementation design</a>.
+        </div>
+      </section>
+
+      <section id="sources">
+        <span class="section-kicker">13 - Sources and limits</span>
+        <h2>External systems support the patterns; HEAT's receipts decide adoption.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Source</th><th>Supports</th><th>Does not prove</th></tr></thead>
+            <tbody>
+              <tr><td><a href="https://github.com/sail-sg/envpool">EnvPool repository</a> and <a href="https://arxiv.org/abs/2206.10558">paper</a></td><td>C++ environment pools, native thread parallelism, batching, and Python compatibility.</td><td>That HEAT's branch-heavy rules will obtain EnvPool's published gains.</td></tr>
+              <tr><td><a href="https://docs.pytorch.org/tutorials/advanced/cpp_custom_ops.html">PyTorch custom C++ operators</a> and <a href="https://docs.pytorch.org/docs/main/cpp_extension.html">extension API</a></td><td>A maintained route for native code to exchange tensors with PyTorch.</td><td>That a custom operator automatically removes scheduling or data-copy costs.</td></tr>
+              <tr><td><a href="https://docs.ray.io/en/latest/rllib/scaling-guide.html">RLlib scaling guide</a> and <a href="https://docs.ray.io/en/latest/rllib/key-concepts.html">architecture</a></td><td>Separate environment actors, vector environments, learners, and independent scaling axes.</td><td>That Ray is the best implementation for this single Windows machine or exact multi-seat environment.</td></tr>
+              <tr><td><a href="https://arxiv.org/abs/1707.06347">PPO paper</a></td><td>The collect-then-optimize structure preserved by the synchronous actor option.</td><td>That arbitrary stale or mixed-policy actor data is safe for the current recipe.</td></tr>
+              <tr><td><a href="https://docs.pytorch.org/docs/main/notes/cuda.html">PyTorch CUDA semantics</a> and <a href="https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html">tuning guide</a></td><td>Asynchronous GPU execution, pinned transfers, inference optimization, and measurement requirements.</td><td>That the current small HEAT policy will be faster on an unconfirmed GPU.</td></tr>
+              <tr><td><a href="https://docs.jax.dev/en/latest/jep/263-prng.html">JAX PRNG design</a> and <a href="https://docs.jax.dev/en/latest/control-flow.html">control flow</a></td><td>Parallel counter-based random keys and structured compiled loops/branches.</td><td>Bit-for-bit compatibility with Python MT19937 or sufficient HEAT performance.</td></tr>
+              <tr><td><a href="https://proceedings.mlr.press/v80/espeholt18a.html">IMPALA paper</a></td><td>Decoupled actor/learner scaling with explicit off-policy correction.</td><td>Equal sample efficiency or skill for HEAT, or compatibility with the existing PPO evidence.</td></tr>
+              <tr><td><a href="https://www.nature.com/articles/s41586-020-03051-4">MuZero</a> and <a href="https://www.nature.com/articles/s41586-025-08744-2">DreamerV3</a></td><td>Learned models used for planning or imagined-policy learning across demanding domains.</td><td>Exact replay, reliable rare-rule handling, or benefit for HEAT's partially observed multi-seat game.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><strong>Internal evidence remains primary:</strong> <code>runs/direction_d/d0_baseline.json</code>, <code>d1_lane_benchmark.json</code>, <code>d2r_r1_gate.json</code>, and <code>d2r_r2_gate.json</code>. Performance ranges in this document are hypotheses based on those receipts and Amdahl-style component models. Every direction keeps bounded exactness and end-to-end benchmarks before adoption. No GPU installation, large compute run, learned-policy campaign, or final 48-hour run is authorized by this design alone.</p>
+      </section>
+    </article>
+  </div>
+</main>
+</body>
+</html>

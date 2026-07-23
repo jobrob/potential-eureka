@@ -47,7 +47,7 @@ from heat.agents import _move_eval as ME
 
 # Turn signature: identifies the planning context so a cached plan is only
 # reused within the same turn for the same player.
-_TurnSig = tuple[int, int, int, int, int]
+_TurnSig = tuple[int, ...]
 
 
 class StrongHeuristicAgent(BaseAgent):

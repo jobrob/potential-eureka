@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="T1 design and results for repaired-heuristic loss replay and manual log review.">
+  <title>T1 — repaired-heuristic loss replay</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">T1 complete · repaired and rerun in T1a</span>
+      <h1>Read the losses, not just the counters.</h1>
+      <p class="hero-copy">T1 replays a fixed sample of repaired-heuristic losses, measures recurring decision patterns, and turns the same traces into concise race narratives for manual strategic review.</p>
+      <p><a href="static-bot-investigation-plan.html">Back to the static-bot plan</a><br><span class="muted">Design and result frozen 17 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="T1 current state">
+      <span class="board-label">Current state</span>
+      <strong>60 replays.<br>One repeated defect.</strong>
+      <p>All 60 losses contain final-straight decisions distorted by a corner that lies beyond the finish. Eighteen full narratives were read manually. No production heuristic was changed.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#question">Question</a>
+      <a href="#design">Frozen design</a>
+      <a href="#sample">Sample</a>
+      <a href="#trace">Trace format</a>
+      <a href="#manual">Manual review</a>
+      <a href="#results">Results</a>
+      <a href="#verification">Verification</a>
+    </nav>
+    <article class="hybrid-content">
+      <section id="question">
+        <span class="section-kicker">T1 · Investigation question</span>
+        <h2>After the spin repair, does the heuristic still make a small number of recognisably bad choices?</h2>
+        <p class="lede">H1 found one obvious recovery lock and repaired it. T0 now supplies a broader fixed loss population against both weak and search styles. T1 asks whether traffic, gear/card conservatism, slipstream, or finish timing explains a material share—and whether a human reader can point to concrete decisions that look wrong rather than merely different.</p>
+        <div class="decision-banner"><strong>Boundary</strong>T1 observes the current <code>heuristic_repaired_v1</code>. It does not change weights, safety rules, risk posture, discard logic, or opponent modelling. Proposed fixes remain designs until a later controlled experiment.</div>
+      </section>
+
+      <section id="design">
+        <span class="section-kicker">01 · Predeclared design</span>
+        <h2>Use arithmetic for frequency and manual reading for strategic plausibility.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Item</th><th>Frozen specification</th></tr></thead>
+            <tbody>
+              <tr><td>Primary hypothesis</td><td>At least one post-spin decision pattern appears in 20% or more of the 60 losses, spans both opponent styles and at least two field sizes, and includes manually convincing strange choices.</td></tr>
+              <tr><td>Prior confidence</td><td>Medium, about 65%. H1 showed overlapping labels can mislead, while T0 shows strong opponent- and geometry-dependence.</td></tr>
+              <tr><td>Source</td><td>The completed T0 raw artifact. Only races where the repaired focal agent did not finish first are eligible.</td></tr>
+              <tr><td>Sample</td><td>Five deterministic sampled losses from each of 12 strata: 2 opponent styles × 2 track families × 3 field sizes = <strong>60 replays</strong>.</td></tr>
+              <tr><td>Quantitative pass</td><td>All 60 replays: H1 signals plus gear/card divergence, straight and finish under-pushing, stress use, planner-score margins, stranded heat, traffic displacement, search-opponent splits, and a diagnostic no-future-corner counterfactual after the last real corner.</td></tr>
+              <tr><td>Manual pass</td><td>Read 18 complete turn narratives: one independently sampled loss from every stratum, then six additional highest anomaly scores not already selected.</td></tr>
+              <tr><td>Decision rule</td><td>Recommend detailed repair design only when a repeated signal has a coherent causal story in multiple logs. Do not turn a one-off odd move or an overlapping symptom into a code change.</td></tr>
+              <tr><td>Engineering estimate</td><td>About 450–650 lines in one T1 harness plus 5–7 focused tests. Reuse H1 tracing and T0 coordinates; no production-agent edit. Actual: 913 harness lines and 176 test lines with eight tests. The scope grew when the manual trace exposed a stale-cache condition and the finish-line cause needed a per-candidate evaluator counterfactual; production code still remained untouched.</td></tr>
+              <tr><td>Compute estimate</td><td>About 1–3 minutes for 60 deterministic replays, with progress every five races and a ten-minute shell cap. Manual reading is expected to take one working pass.</td></tr>
+              <tr><td>Data boundary</td><td><code>715000+</code> and <code>915000+</code> remain consumed static-development bands. No untouched or learned-policy final-test claim.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="sample">
+        <span class="section-kicker">02 · Sampling grid</span>
+        <h2>Every major T0 regime contributes equally.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Opponent field</th><th>Track family</th><th>2 seats</th><th>4 seats</th><th>6 seats</th><th>Total</th></tr></thead>
+            <tbody>
+              <tr><td>Weak heuristic</td><td>Default generated</td><td>5</td><td>5</td><td>5</td><td>15</td></tr>
+              <tr><td>Weak heuristic</td><td>Tight generated</td><td>5</td><td>5</td><td>5</td><td>15</td></tr>
+              <tr><td>StaticSearchV1</td><td>Default generated</td><td>5</td><td>5</td><td>5</td><td>15</td></tr>
+              <tr><td>StaticSearchV1</td><td>Tight generated</td><td>5</td><td>5</td><td>5</td><td>15</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="trace">
+        <span class="section-kicker">03 · Trace format</span>
+        <h2>Each turn should be understandable without reconstructing engine state by hand.</h2>
+        <div class="config-panel" aria-label="T1 trace contents">
+          <div><span>Context</span><strong>lap, position, rank<br>heat and next corners</strong></div>
+          <div><span>Choice</span><strong>gear and cards<br>weak-shadow contrast</strong></div>
+          <div><span>Planner math</span><strong>top candidate values<br>spin risk and heat cost</strong></div>
+          <div><span>Outcome</span><strong>real speed and landing<br>traffic, heat, slipstream, spin</strong></div>
+        </div>
+        <p>The narrative will highlight suspicious turns but retain the full sequence around them. This prevents a classifier label from replacing the actual race context.</p>
+      </section>
+
+      <section id="manual">
+        <span class="section-kicker">04 · Manual-review protocol</span>
+        <h2>Read ordinary and suspicious losses.</h2>
+        <ol class="step-line" aria-label="Manual review sequence">
+          <li><strong>12 baseline</strong><br>one sampled replay per stratum</li>
+          <li><strong>6 suspicious</strong><br>highest anomaly scores not already read</li>
+          <li><strong>Write notes</strong><br>name the exact turn and disagreement</li>
+          <li><strong>Cross-check</strong><br>look for the same mechanism elsewhere</li>
+        </ol>
+      </section>
+
+      <section id="results">
+        <span class="section-kicker">05 · Results</span>
+        <h2>The bot brakes for a corner after the finish line.</h2>
+        <div class="result-note"><strong>Primary hypothesis supported.</strong> The forward-solvency projection wraps from the final straight to the first corner of a nonexistent next lap. That projected heat bill makes fast gears look bad even though the race ends before the corner can matter.</div>
+        <div class="config-panel" aria-label="T1 primary result">
+          <div><span>Coverage</span><strong>60 / 60 losses<br>both opponent styles</strong></div>
+          <div><span>Affected turns</span><strong>408 decisions<br>2, 4, and 6 seats</strong></div>
+          <div><span>Counterfactual</span><strong>+4.0 median<br>expected speed</strong></div>
+          <div><span>Score regret</span><strong>3.58 median<br>planner-value units</strong></div>
+        </div>
+        <p>The 408 decisions split across default/tight tracks (160/248), weak/search opponents (222/186), and all three field sizes (134/148/126). Removing only future-corner solvency from those after-last-corner evaluations changed the preferred gear on every flagged turn: most often gear 1 became gear 2 or 3. This is diagnostic arithmetic, not an outcome claim for a repaired agent.</p>
+
+        <h3>What the manual read found</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Replay and turn</th><th>What looked wrong</th><th>Math cross-check</th></tr></thead>
+            <tbody>
+              <tr><td><code>tight-search-2p-t915005-g1511205010-s1</code><br>rounds 19–23</td><td>The car is leading or contesting the lead on a clear final straight but stays in gear 1 for five turns while the weak shadow repeatedly selects gear 2.</td><td>The next displayed corner is beyond the finish. Suppressing only that future solvency charge prefers a faster gear.</td></tr>
+              <tr><td><code>tight-search-6p-t915010-g1511610040-s4</code><br>rounds 24–33</td><td>The last-place car drives almost the entire final straight in gear 1, sometimes moving only one to four spaces despite having no remaining corner to protect.</td><td>The same post-finish projection is active on every one of these turns.</td></tr>
+              <tr><td><code>default-weak-4p-t715001-g1510401020-s2</code><br>rounds 30–41</td><td>After finally clearing the real corners, the fourth-place car still takes twelve low-gear turns to reach the line.</td><td>The no-future-corner table consistently prefers a faster plan; the current evaluator is pricing the wrapped corner at position 4.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>What did not survive interpretation</h3>
+        <p>Broad labels such as <code>large_speed_sacrifice</code> and <code>clear_straight_underpush</code> occurred in all 60 races, but many individual instances were reasonable responses to risk, heat, or card availability. Traffic displacement was context rather than a decision error. Repeated spins in several tight-track logs often occurred after the hand contained no non-spinning play, so those turns do not identify a new controllable repair.</p>
+        <p>A second implementation seam was observed: the plan-cache signature omits hand contents. It reused a stale plan on 37 turns in 23 races, but card revalidation recovered the current global best in every sampled case (zero measured planner regret). Treat this as a correctness hardening item, not the T1 strength repair.</p>
+        <div class="decision-banner"><strong>Implemented</strong><a href="T1a-finish-aware-solvency-repair.html">T1a</a> stops forward-solvency projection at the finish line and reruns T0/T1 on preserved post-fix artifacts. The defect falls from 60/60 to 0/60 fresh losses. Cache-key hardening remains separate.</div>
+      </section>
+
+      <section id="verification">
+        <span class="section-kicker">06 · Verification</span>
+        <h2>The replay and diagnostic contracts passed.</h2>
+        <div class="verification-panel"><strong>Complete and reproducible</strong><br>All 60 replays reproduced the T0 focal place and terminal round. The run completed in 13.16 seconds with progress every five races under a ten-minute cap. Eight focused tests cover sampling, trace/planner agreement, final-straight counterfactual math, stale-cache detection, classification, manual selection, and narrative output. Targeted Ruff passes. Raw evidence is in <code>runs/t1_heuristic_loss_replay.json</code>; the 18 selected logs and review index are in <code>runs/t1_heuristic_loss_logs/</code>.</div>
+      </section>
+    </article>
+  </div>
+</main>
+<footer class="hybrid-footer"><strong>Static-agent strength · T1 heuristic-loss replay</strong></footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

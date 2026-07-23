@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Index and shared evidence contract for the learned-agent and static-bot strength investigation streams.">
+  <title>Agent strength — two investigation streams</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Static T2a adopted · learned L0 complete</span>
+      <h1>Agent strength: separate learning from bot design.</h1>
+      <p class="hero-copy">The trained policies and the fixed heuristic/search bots are different research problems. They now have separate plans, investigations, and decision points, joined only by a shared evaluation contract.</p>
+      <p><strong>Strength-track index · evidence before implementation</strong><br><span class="muted">Split into two streams 17 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="Plan structure">
+      <span class="board-label">Plan structure</span>
+      <strong>Two streams.<br>One scoreboard.</strong>
+      <p>Improve learned agents through training evidence; improve static bots through deterministic strategy and search evidence.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#split">The split</a>
+      <a href="#learned">Learned agents</a>
+      <a href="#static">Static bots</a>
+      <a href="#shared">Shared evidence</a>
+      <a href="#sequence">Sequence</a>
+      <a href="#status">Status</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="split">
+        <span class="section-kicker">01 · Structure</span>
+        <h2>Training quality and static-bot quality should not share an intervention plan.</h2>
+        <p class="lede">A learned agent can be weak because of data scale, PPO instability, self-play cycling, representation, value learning, or checkpoint selection. A static bot can be weak because of a deterministic rule, evaluator, search horizon, hidden-information approximation, or latency constraint. Combining those questions encourages fixes that improve the ruler rather than the learner—or train the learner to exploit one ruler’s defects.</p>
+
+        <div class="decision-banner">
+          <strong>Decision</strong>
+          Maintain two independent investigation queues. Results may inform one another, but neither stream adopts an implementation change merely because it improves against the other stream’s current bot.
+        </div>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Difference</th><th>Learned-agent stream</th><th>Static-bot stream</th></tr></thead>
+            <tbody>
+              <tr><td>Objects under study</td><td>G0002, G0003, G0004, future registered policies and training milestones.</td><td>Weak heuristic, repaired heuristic, StaticSearchV1, Lookahead and MCTS configurations.</td></tr>
+              <tr><td>Main evidence</td><td>Learning curves, cross-seed stability, policy decisions, self-play dynamics and held-out skill.</td><td>Deterministic replays, rule/evaluator ablations, matchup graphs, search budgets and latency.</td></tr>
+              <tr><td>Likely interventions</td><td>Training recipe, opponent population, observation/action representation, targets, selection or scale.</td><td>Scripted strategy, evaluator terms, determinization, horizon, branching or search architecture.</td></tr>
+              <tr><td>Registry</td><td>Every comparison-worthy weight-changing campaign receives a <code>G####</code>.</td><td>Versioned bot/configuration identity; no learned-generation allocation unless training is introduced.</td></tr>
+              <tr><td>Primary danger</td><td>More compute amplifies instability or overfits the opponent population.</td><td>A supposedly stronger ruler is merely differently exploitable or too slow to use.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="learned">
+        <span class="section-kicker">02 · Stream L</span>
+        <h2>Learned-agent strength: is the training process producing broader skill?</h2>
+        <p>G0002 passed A8’s untouched final gate, but training is short, oscillatory, seed-sensitive, and not calibrated against humans. G0003 and G0004 contain promising skill signals without earning adoption.</p>
+        <div class="file-card">
+          <code><a href="learned-agent-investigation-plan.html">Learned-agent investigation plan</a></code>
+          Current evidence, unknowns, and investigations for scale, replay, self-play dynamics, representation, learning signals, and policy combination.
+        </div>
+      </section>
+
+      <section id="static">
+        <span class="section-kicker">03 · Stream T</span>
+        <h2>Static-bot strength: can fixed heuristic and search agents become reliable opponents?</h2>
+        <p>The repaired heuristic fixed a severe spin loop but is not universally stronger than the weak bot. StaticSearchV1 beats the repaired heuristic yet loses to weak fields. The static stream must understand that non-transitivity before changing weights, search depth, or labels.</p>
+        <div class="file-card">
+          <code><a href="static-bot-investigation-plan.html">Static-bot investigation plan</a></code>
+          Current bot inventory, deterministic failure evidence, and investigations for heuristics, search leaves, budgets, exploitability, track regimes, and latency.
+        </div>
+      </section>
+
+      <section id="shared">
+        <span class="section-kicker">04 · Shared evaluation contract</span>
+        <h2>The streams share measurements, not implementation decisions.</h2>
+        <ul class="open-list">
+          <li><strong>Multi-ruler results.</strong><br>No single bot becomes the definition of strength; aggregates retain every per-ruler result.</li>
+          <li><strong>Matched conditions.</strong><br>Track, race, starting-seat, and chance seeds match when contenders are compared.</li>
+          <li><strong>2–6-seat relevance.</strong><br>Headline claims retain at least the established 2/4/6-seat slices.</li>
+          <li><strong>Track-family slices.</strong><br>Generated-track geometry and congestion remain visible rather than disappearing into one average.</li>
+          <li><strong>Development versus final.</strong><br>The A8 final band remains historical. Investigations use new declared development data; frozen candidates later receive fresh untouched data.</li>
+          <li><strong>Human calibration later.</strong><br>A competent-human reference would inform both streams, but informal games cannot become a formal gate.</li>
+          <li><strong>Latency alongside strength.</strong><br>Static search reports decision cost; learned policies report inference cost under the same hardware receipt.</li>
+          <li><strong>Promotion requires breadth.</strong><br>A change that farms one opponent style while regressing another is recorded as a matchup change, not universal improvement.</li>
+        </ul>
+      </section>
+
+      <section id="sequence">
+        <span class="section-kicker">05 · Recommended order</span>
+        <h2>Calibrate the rulers, then diagnose the learner against the resulting population.</h2>
+        <ol class="step-line" aria-label="Strength stream sequence">
+          <li><strong>T0</strong><br>map static-bot matchups</li>
+          <li><strong>T1/T2</strong><br>diagnose heuristic and search failures</li>
+          <li><strong>L0/L1</strong><br>map and replay learned-policy losses</li>
+          <li><strong>Design</strong><br>one intervention in one stream</li>
+        </ol>
+        <p>This order does not require finishing every static-bot idea before studying G0002. It only establishes which fixed opponents are useful measurement instruments before their scores drive a learned-agent redesign. Direction D may proceed independently throughout.</p>
+      </section>
+
+      <section id="status">
+        <span class="section-kicker">06 · Status</span>
+        <h2>The first evidence stages are complete; interventions remain gated.</h2>
+        <div class="verification-panel">
+          <strong>Current status: T2a adopted and L0 consolidated.</strong><br>
+          The static stream now uses the V2 development population. L0 mapped existing learned-policy evidence and froze the minimum live benchmark; it did not change a training recipe or allocate a policy generation. The next learned artifact is the registered 32K learning-quality comparison design.
+        </div>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer">Agent strength · two streams · one shared evidence contract</footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

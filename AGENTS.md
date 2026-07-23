@@ -19,7 +19,8 @@ The first command creates an editable development install. The second runs the f
 
 Before starting, registering, or comparing a non-smoke learned-policy campaign, read `docs/policy-generation-registry.html` and `experiments/policy_registry/index.json`. Allocate the next immutable `G####` ID for any recipe change that can affect learned weights; use `G####-R##` for independent seeded runs and `@<checkpoint>` only when identifying a non-selected checkpoint. Repeated seeds of the same resolved recipe stay in the same generation. Smoke runs use `dev-*` and are not registered. Record the complete resolved recipe, source revision/patch provenance, parent and anchor policy IDs, run seeds, selected checkpoint paths, and SHA-256 hashes in the registry. Evaluation artifacts and reports must use registered policy IDs rather than inventing experiment-local agent names. Never reuse or renumber an allocated generation.
 
-
+# User communication
+    - Keep generated documents for users feedback in as simple language as possible. The user has coding experiance but no game training experiance.Technical language or concepts should be used but they should always be described in simple terms. Descriptions of what has been done or designed should include all relvant details but should also include enough explainations that they can be followed by someone without lots of context
 # Code Preferences
     - Focus on simple changes where possible
     - If a solution is more complicated then it seemed or a better approach is found consider feeding back and re designing
@@ -29,7 +30,7 @@ Before starting, registering, or comparing a non-smoke learned-policy campaign, 
     - Update design documents if used and mark them as implemented. If the document describes a large multi stage implementation mark the sections that have been completed and what is left outstanding.
 # Design
     - Where appropriate ask the user for design directions. If there are multiple possible approaches quickly create high level descriptions with pros and cons then ask the user for feedback of which direction to design in detail
-    - Create design HTML documents.
+    - Create design HTML documents. Keep the documents simple in language technical subjects should be readable by someone with a basic understanding of the project. 
     - Design documents should focus on being human readable including relevant code diagrams and short code snippets where there is a relevant idea
 # Experiments
     - Experiments will need to be run to evaluate the performance changes.

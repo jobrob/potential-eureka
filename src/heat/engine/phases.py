@@ -16,6 +16,7 @@ Per-player steps process one player at a time (called per player in turn order):
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from heat.models.cards import Card, CardType
@@ -23,6 +24,8 @@ from heat.models.game_state import GameEvent, GameState, Phase
 from heat.models.player_state import PlayerState
 from heat.engine import rules
 
+
+PhaseTraceCallback = Callable[[str, GameState], None]
 
 
 @dataclass
@@ -226,6 +229,8 @@ def phase_play_cards(
 def step_reveal_and_move(
     state: GameState,
     player: PlayerState,
+    *,
+    trace: PhaseTraceCallback | None = None,
 ) -> list[GameEvent]:
     """Reveal played cards and move the player.
 
@@ -249,6 +254,7 @@ def step_reveal_and_move(
     total_speed = rules.calculate_speed(tuple(player.cards_played))
 
     # Resolve stress cards
+    stress_index = 0
     for card in player.cards_played:
         if card.card_type == CardType.STRESS:
             value, flipped = rules.resolve_stress_card(player.deck)
@@ -275,8 +281,13 @@ def step_reveal_and_move(
                     "discarded": discarded,
                 },
             )
+            if trace is not None:
+                trace(f"stress_resolved:{stress_index}", state)
+            stress_index += 1
 
     player.speed_from_cards = total_speed
+    if trace is not None:
+        trace("speed_revealed", state)
 
     # Calculate new position
     pre_move_pos = player.position
@@ -292,6 +303,8 @@ def step_reveal_and_move(
     # Credit laps based on the requested move (handles a single move that
     # spans two or more laps) and check for finish.
     _credit_movement(state, player, pre_move_pos, total_speed)
+    if trace is not None:
+        trace("movement_resolved", state)
 
     state.log_event(
         "reveal_and_move",

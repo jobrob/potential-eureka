@@ -1,0 +1,689 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Detailed implementation design for Direction D options A and C: a native exact CPU environment pool followed by GPU inference and PPO updates.">
+  <title>Direction D3 - detailed design for options A and C</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">A0-A10 implemented - replacement operational soak passes - 23 July 2026</span>
+      <h1>Build exact native games first, then feed the RTX 4080 SUPER.</h1>
+      <p class="hero-copy">Option A removes Python and object overhead from the rules while preserving one independent state machine per game. Option C keeps those exact rules on the CPU and accelerates the two neural-network costs: batched policy inference and PPO updates.</p>
+      <p><strong>Direction D - options A and C implementation design</strong><br><span class="muted">Parent decision: <a href="D3-post-d2-architecture-options.html">post-D2 architecture options</a> · Evidence: <a href="D2-cpu-profiling-results.html">D2 CPU profile</a></span></p>
+    </div>
+    <aside class="status-board" aria-label="Design decision">
+      <span class="board-label">Design decision</span>
+      <strong>One native substrate, two execution tiers.</strong>
+      <p>A is the required base. C is an additive escalation, not a second environment implementation. Both keep synchronous PPO and a fixed policy version for each collection.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#decision">Decision and status</a>
+      <a href="#budget">Performance contract</a>
+      <a href="#architecture">Shared architecture</a>
+      <a href="#build">Native build boundary</a>
+      <a href="#state">Compact state</a>
+      <a href="#machine">State machine</a>
+      <a href="#scheduler">Pool and scheduler</a>
+      <a href="#policy">Policy boundary</a>
+      <a href="#trajectory">Trajectory storage</a>
+      <a href="#rng">Randomness</a>
+      <a href="#errors">Errors and telemetry</a>
+      <a href="#a-plan">Option A chunks</a>
+      <a href="#gpu">Option C architecture</a>
+      <a href="#ppo">GPU PPO updates</a>
+      <a href="#resume">Resume and provenance</a>
+      <a href="#verification">Correctness gates</a>
+      <a href="#experiments">Performance experiments</a>
+      <a href="#deferred">Deferred decisions</a>
+      <a href="#files">Planned files</a>
+      <a href="#sources">Sources and limits</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="decision">
+        <span class="section-kicker">01 - Decision and status</span>
+        <h2>Design for the 800 million target, with one billion as the stretch target.</h2>
+        <p class="lede">The implementation should favour throughput when a convenience choice and a performance choice conflict, but it must not trade away exact game rules, bounded failure, or safe resume. The native engine is a training-only second implementation; the Python engine remains the readable source of truth and the differential oracle.</p>
+
+        <div class="decision-banner">
+          <strong>Chosen design</strong>
+          Use compact C++ game slots, one owner at a time per game, and fixed-capacity native arenas. Workers advance only the branches their games need. They stop at real policy choices, where Python/PyTorch evaluates many ready rows together. Forced choices, rules, observations, masks, rewards, and game RNG stay in native code. Python sees batches, completed trajectories, compact receipts, and errors - never one callback per rule action.
+        </div>
+
+        <div class="hybrid-stats" aria-label="Design targets">
+          <div class="hybrid-stat"><span>Adoption target</span><strong>5,000+/s</strong><small>trained transitions end to end</small></div>
+          <div class="hybrid-stat"><span>Engineering target</span><strong>800M</strong><small>practical transitions in 48 h</small></div>
+          <div class="hybrid-stat"><span>Stretch target</span><strong>6,500/s</strong><small>credible route to one billion</small></div>
+          <div class="hybrid-stat"><span>Semantic tolerance</span><strong>Zero</strong><small>unexplained engine mismatches</small></div>
+        </div>
+
+        <h3>Decisions frozen by this document</h3>
+        <ul>
+          <li><strong>Option A comes first.</strong> Option C reuses A's pool, state, batching protocol, trajectories, exactness corpus, and operational controls.</li>
+          <li><strong>C++ is the native language.</strong> The production hot loop does not use Python objects, LibTorch, or a Python callback from a worker.</li>
+          <li><strong>The native package is separate.</strong> Normal <code>pip install -e ".[dev]"</code> remains available without a compiler. Native development installs an additional local package.</li>
+          <li><strong>Game RNG remains CPython-compatible MT19937.</strong> A game restored from the same Python RNG state must draw and shuffle identically.</li>
+          <li><strong>Policy sampling becomes identity-keyed.</strong> A logical decision receives the same categorical draw regardless of worker count, queue timing, or batch order. This is distribution-equivalent but training-affecting, so the first non-smoke campaign needs a new registered policy generation.</li>
+          <li><strong>Synchronous PPO remains unchanged.</strong> One policy version collects the whole iteration; the learner updates only after the native pool is drained.</li>
+          <li><strong>Production does not materialize Python events.</strong> Numeric receipts are available for differential testing; event materialization stays outside the hot path.</li>
+        </ul>
+
+        <div class="result-note"><strong>No user choice blocks design work.</strong> This document follows the parent recommendation to preserve Python game RNG and engineer for 800M rather than the bare 600M line. The policy-sampling change is called out because it must be accepted as part of the later implementation entry gate, not because a choice is needed to understand the architecture.</div>
+      </section>
+
+      <section id="budget">
+        <span class="section-kicker">02 - Performance contract</span>
+        <h2>The target leaves almost no room for a merely tidy native port.</h2>
+        <p>The D0 matched workload recorded 121,386 transitions in a median 81.11 seconds. At 5,000 transitions/s the same work must finish within 24.28 seconds; at the exact 800M rate of 5,144/s it must finish within 23.60 seconds. A should therefore be designed around the stronger 5x rules target, not only its 3x continuation gate.</p>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Component on the D0-sized workload</th><th>D0 median</th><th>A design budget</th><th>C stretch budget</th><th>Design consequence</th></tr></thead>
+            <tbody>
+              <tr><td>Rules + observations + masks + scheduling</td><td>30.51 s without inference</td><td>&le; 6.5 s</td><td>&le; 6.5 s</td><td>About 5x faster rule-side work is needed; avoid heap allocation and Python calls.</td></tr>
+              <tr><td>Policy inference</td><td>39.64 s</td><td>&le; 6.0 s</td><td>&le; 2.0 s including copies</td><td>Cross-game batching is mandatory; C must overlap transfers and CPU rules.</td></tr>
+              <tr><td>Preparation and trajectory transfer</td><td>0.70 s</td><td>&le; 1.0 s</td><td>&le; 1.0 s</td><td>Compact fixed layouts and bulk copies; no Python row loop.</td></tr>
+              <tr><td>PPO update</td><td>10.24 s</td><td>&le; 10.5 s</td><td>&le; 7.0 s initially; target 5.2 s</td><td>A can retain CPU learning. C must measure the small-minibatch launch problem.</td></tr>
+              <tr><td><strong>Total</strong></td><td><strong>81.11 s</strong></td><td><strong>&le; 24.3 s</strong></td><td><strong>&le; 18.7 s stretch</strong></td><td>A aims at 5,000/s; C aims at 6,500/s.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>These are allocation budgets, not independent acceptance tests. The measured full loop decides adoption. A component may exceed its line if another component creates enough real end-to-end margin.</p>
+
+        <h3>Performance rules for implementation</h3>
+        <ul>
+          <li>No allocation in the per-decision native hot path. Game slots, queue nodes, ready rows, action results, receipts, and trajectory blocks are reserved before collection.</li>
+          <li>No exported C++ STL container or raw state pointer. Python sees an opaque pool plus versioned numeric buffers.</li>
+          <li>No full-state clone per transition. Pending reward state stores only the previous fields the reward calculation actually reads.</li>
+          <li>No dense 516-byte legal mask in long-lived native trajectories. Store nine 64-bit words; expand only where inference or PPO needs a boolean mask.</li>
+          <li>No default debug logging in production. Counters and optional receipt hashes are cheap; full receipts are a verification mode.</li>
+          <li>No <code>fast-math</code>. Exact observation and reward arithmetic is more important than speculative floating-point compiler gains.</li>
+        </ul>
+      </section>
+
+      <section id="architecture">
+        <span class="section-kicker">03 - Shared architecture</span>
+        <h2>A hybrid layout fits the workload: game-local state for rules, row-major batches for the policy.</h2>
+
+        <pre><code>Python trainer (one fixed policy version per PPO iteration)
+        |
+        | create iteration manifest: game_id, seed, track, seat/policy map
+        v
++---------------------- native extension ----------------------+
+| GameSlot 0  GameSlot 1 ... GameSlot N                         |
+|    ^             ^                 ^                           |
+|    +------ native worker pool -----+   exact branch execution |
+|                         |                                      |
+|                   ReadyGroup queue                             |
+|                         v                                      |
+|              preallocated observation/mask rows                |
++-------------------------|--------------------------------------+
+                          v
+              policy coordinator (CPU in A, CUDA in C)
+                          |
+              action + old logp + value results
+                          v
+               native pending transitions
+                          |
+              compact completed trajectory arena
+                          v
+                 existing synchronous PPO update</code></pre>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Layer</th><th>Owns</th><th>May call</th><th>Must not do</th></tr></thead>
+            <tbody>
+              <tr><td>Native worker</td><td>One game slot while RUNNING</td><td>Pure C++ rules, RNG, observation, mask, reward, receipt writers</td><td>Call Python/PyTorch, allocate per step, or touch another running game</td></tr>
+              <tr><td>Native scheduler</td><td>Slot state and bounded queues</td><td>Admit manifests, wake workers, publish ready groups, stop/drain</td><td>Interpret policy logits or mutate trainer state</td></tr>
+              <tr><td>Policy coordinator</td><td>Ready-buffer leases and policy registry</td><td>Batch by policy ID, act, submit results</td><td>Update weights during collection or retain a native view after release</td></tr>
+              <tr><td>Trajectory finalizer</td><td>Completed native blocks</td><td>Canonicalize by logical identity, compute/validate GAE, bulk-transfer</td><td>Depend on worker completion order</td></tr>
+              <tr><td>PPO learner</td><td>Live policy, optimizer, schedules</td><td>Consume one finalized iteration</td><td>Start until every admitted game is complete and policy rows are closed</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="build">
+        <span class="section-kicker">04 - Native build and boundary</span>
+        <h2>Keep the rule engine independent of the installed PyTorch wheel.</h2>
+        <p>The proposed package is <code>native/</code>, installed separately as <code>heat-native</code>. It builds one pybind11 module named <code>heat_native._core</code>. The A implementation exchanges NumPy-compatible buffers and has no LibTorch link. This makes the same native engine usable from the current CPU-only environment and a later CUDA environment, provided Python and the extension ABI match.</p>
+
+        <div class="decision-banner">
+          <strong>Windows build route</strong>
+          Use the discovered Visual Studio MSVC toolchain and an ahead-of-time setuptools/pybind11 build. Release uses C++20, <code>/O2</code>, <code>/GL</code>, <code>/LTCG</code>, <code>/EHsc</code>, <code>/DNDEBUG</code>, and precise or strict floating point. Debug uses bounds/assertion checks and symbols. The first chunk proves both builds before rules are ported.
+        </div>
+
+        <h3>Boundary rules</h3>
+        <ul>
+          <li>The exported object is an opaque <code>NativePool</code>; C++ struct layouts are not an external ABI.</li>
+          <li><code>protocol_version</code>, <code>state_schema_hash</code>, <code>codec_version</code>, capacities, compiler identity, build type, and source identity are queryable and written into every receipt.</li>
+          <li>Input arrays require exact dtype, shape, contiguity, and writeability. Bindings reject mismatches rather than silently force-casting or copying.</li>
+          <li>Calls that wait for or execute native work release the Python GIL. Only buffer creation and Python object construction hold it.</li>
+          <li>NumPy/Torch views are leases. Each carries a generation token; submitting or releasing a stale token is a hard error.</li>
+          <li>The extension owns and joins every worker thread. No detached thread may outlive <code>NativePool.close()</code>.</li>
+        </ul>
+
+        <h3>Minimal Python-facing surface</h3>
+        <pre><code>pool = NativePool(config, bound_buffers)
+pool.admit(game_manifest)                  # bulk, iteration policy map frozen
+ready = pool.wait_ready(max_rows, timeout_ms)
+pool.submit(ready.token, actions, logps, values)
+completed = pool.finalize_iteration()      # canonical compact trajectory views
+receipt = pool.stats()
+pool.close(timeout_ms=...)</code></pre>
+        <p>The exact names may change during A0, but the number and granularity of boundary crossings should not. Fine-grained getters or setters are forbidden from the production path.</p>
+      </section>
+
+      <section id="state">
+        <span class="section-kicker">05 - Compact exact state</span>
+        <h2>Use one cache-friendly game slot, not a tensor lane and not Python objects.</h2>
+        <p>D2's <code>TensorGameState</code> remains the field checklist and bridge oracle, but its all-<code>int64</code> tensor representation is not the production native layout. Each C++ game has a fixed-capacity, game-local structure. The worker reads and writes adjacent memory and follows ordinary branches. Output observations and trajectories use structure-of-arrays because the policy consumes rows.</p>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Area</th><th>Native representation</th><th>Frozen capacity</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><td>Identity/control</td><td><code>uint64_t game_id</code>, <code>uint16_t round</code>, byte phase/count/order fields</td><td>2-6 players, 200 rounds</td><td>Slot index is never a game identity.</td></tr>
+              <tr><td>Track</td><td>Compact lanes, corners, starts, length, laps</td><td>90 spaces, 8 corners, 6 starts</td><td>Names stay in Python metadata; no strings in the hot state.</td></tr>
+              <tr><td>Players</td><td>Byte/small-integer scalar fields and explicit flag bytes</td><td>6 players</td><td>Start with readable byte fields; pack flags only if a profile shows value.</td></tr>
+              <tr><td>Card zones</td><td><code>uint16_t card_token[24]</code> plus byte length</td><td>24 cards per zone</td><td>Tokens map to immutable type/value/identity metadata.</td></tr>
+              <tr><td>Penalty stress</td><td>Reserved token range derived from the game stress counter</td><td>16-bit checked counter</td><td>Materializes <code>stress_penalty_N</code> only in debug receipts.</td></tr>
+              <tr><td>Spin history</td><td>Fixed <code>(round, corner_start)</code> records per player</td><td>200 per player</td><td>Preserves semantic snapshots even though training rewards need only the current edge.</td></tr>
+              <tr><td>Game RNG</td><td>624 32-bit MT words, index, version, Gaussian flag/value</td><td>CPython state version 3</td><td>About 2.5 KB per game; exactness is worth the memory.</td></tr>
+              <tr><td>Pending policy row</td><td>Row handle, action/logp/value, prior position/lap/spin flag, logical IDs</td><td>One per seat</td><td>Avoids a complete state clone for reward calculation.</td></tr>
+              <tr><td>Receipts</td><td>Optional fixed numeric ring</td><td>Bounded per native call</td><td>Off in production, full in differential tests.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <pre><code>struct alignas(64) GameSlot {
+    SlotHeader header;              // atomic status kept away from hot fields
+    GameControl game;
+    TrackState track;
+    std::array&lt;PlayerState, 6&gt; players;
+    PythonMt19937 rng;
+    std::array&lt;PendingSeat, 6&gt; pending;
+    SlotScratch scratch;            // reused; no per-step allocation
+};</code></pre>
+
+        <h3>Schema policy</h3>
+        <ul>
+          <li>The schema hash covers all capacities, numeric codes, observation/action dimensions, codec version, phase order, card-token rules, RNG version, receipt version, and struct-serialization version.</li>
+          <li>Capacity overflow is never truncated. It produces a typed error with the logical game, phase, player, observed count, and limit.</li>
+          <li>Checkpoint files never dump raw C++ struct bytes. They use named/versioned numeric arrays or, at the normal safe boundary, store no in-flight game state at all.</li>
+          <li>Track and card metadata can be interned within one pool only after byte-for-byte descriptor equality; game logic never relies on Python object identity.</li>
+        </ul>
+      </section>
+
+      <section id="machine">
+        <span class="section-kicker">06 - Exact state machine</span>
+        <h2>Replace the Python generator with an explicit resumable program counter.</h2>
+        <p>Each game advances through the same nine phases as <code>run_round_driver</code>. The native program counter records the phase, the player/turn-order cursor, and any substage needed to resume after a policy decision. A call to <code>advance()</code> runs forced and deterministic work until one of four boundaries is reached.</p>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Boundary</th><th>Meaning</th><th>Next owner</th></tr></thead>
+            <tbody>
+              <tr><td><code>READY_GROUP</code></td><td>One or more real choices share a consistent pre-action state.</td><td>Policy coordinator</td></tr>
+              <tr><td><code>BOOTSTRAP_READY</code></td><td>A truncated game needs terminal value rows before final rewards close.</td><td>Policy coordinator value-only path</td></tr>
+              <tr><td><code>COMPLETE</code></td><td>Every pending policy seat is closed and the game can be finalized.</td><td>Trajectory finalizer</td></tr>
+              <tr><td><code>FAULTED</code></td><td>A capacity, legality, invariant, or internal error stopped the game.</td><td>Trainer error path</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Decision-group rules</h3>
+        <ul>
+          <li>GEAR and CARDS expose all non-forced seats from the same unapplied state, matching simultaneous-decision semantics.</li>
+          <li>REACT, SLIPSTREAM, and DISCARD expose the exact sequential choice at the point the Python driver yields it.</li>
+          <li>A forced or one-legal-action decision is resolved in native code and never becomes a PPO row.</li>
+          <li>A group has a stable token <code>(game_id, decision_epoch)</code>. The action submission must cover every row exactly once and must pass legality revalidation before mutation.</li>
+          <li>Actions inside a simultaneous group are applied in the Python oracle's stable seat order, even though their policy evaluation was batched.</li>
+          <li>Every real live-policy choice first closes that seat's previous pending transition, then opens a new one from the current observation/action/logp/value.</li>
+        </ul>
+
+        <h3>Hard-slice boundary</h3>
+        <p>The first performance slice is deliberately not the easy path. It contains two in-place fragments:</p>
+        <ol>
+          <li><strong>Cards to first REACT:</strong> ordinary cards, clutter, already/newly finished players, stress chains, discard replenishment, empty-draw reshuffle, and exact RNG advancement.</li>
+          <li><strong>Movement to next decision:</strong> traffic, lap crossing, finish ordering, adrenaline/boost effects, slipstream, corner heat, spin-out placement/stress, discard, and replenishment.</li>
+        </ol>
+        <p>Together these cover the irregular work that defeated D2-R2 before the complete native engine is affordable.</p>
+      </section>
+
+      <section id="scheduler">
+        <span class="section-kicker">07 - Native pool and scheduler</span>
+        <h2>Keep workers independent, but make admission and results independent of thread timing.</h2>
+        <p>Each slot moves through a small checked lifecycle. Only the worker that successfully claims RUNNABLE may mutate the game. The coordinator is the only owner of ready-buffer leases and action submission. Completion order is never training order.</p>
+
+        <pre><code>EMPTY -> RUNNABLE -> RUNNING -> READY -----------+
+                    |          ^                |
+                    |          +-- action ------+
+                    +-> BOOTSTRAP_READY -> RUNNABLE
+                    +-> COMPLETE -> FINALIZED -> EMPTY
+                    +-> FAULTED  -> pool-wide bounded stop</code></pre>
+
+        <h3>Queue design</h3>
+        <ul>
+          <li>Begin with bounded preallocated queues guarded by a short mutex and condition variable. This is easier to prove correct than a custom lock-free queue and should be adequate at HEAT's decision rate.</li>
+          <li>Queue wait, wake, and contention time are measured from the first implementation. Replace with sharded or ring queues only if scheduling is more than 5% of rule-side time after the native rules pass.</li>
+          <li>Workers do not spin while waiting. The benchmark may test a short spin-then-park policy only after the blocking baseline.</li>
+          <li>Ready groups are never split across inference buffers. Rows within a buffer are sorted by logical identity for stable receipts and efficient scatter.</li>
+          <li>Backpressure is explicit: when every ready buffer is leased, workers publish no more rows and park without overwriting memory.</li>
+        </ul>
+
+        <h3>Deterministic iteration manifest</h3>
+        <p>At the start of an iteration, Python freezes the seat count, live policy version, selected snapshot/anchor policy, and a deterministic list of game specifications. The number of games is estimated from a checkpointed rows-per-game average for that seat/opponent mode. Every manifested game is completed; if the result is short of <code>n_steps</code>, a deterministic top-up manifest is appended. This avoids a thread-race deciding which game crosses the collection threshold.</p>
+        <ul>
+          <li><code>game_id</code> is a monotonic campaign identity, not a slot number.</li>
+          <li>Episode seed and generated track are pure consequences of the manifest and the existing training namespace.</li>
+          <li>The rows-per-game estimator and next game ID are training state. Resume restores both.</li>
+          <li>All completed rows are canonicalized by <code>(game_id, seat_id, decision_sequence)</code> before PPO. Worker completion order is telemetry only.</li>
+          <li>The initial estimate comes from a measured scalar receipt; later estimates use a fixed-form exponential moving average. The formula and coefficient are recipe fields.</li>
+        </ul>
+
+        <h3>Worker count policy</h3>
+        <p>Do not hard-code 15 workers because the machine reports 16 logical CPUs. The bounded scaling gate measures 1, 2, 4, 8, and 12 workers. A starts with 8 as the likely physical-core count and records Torch intra/inter-op thread settings. C normally reduces Torch CPU threads to 1 because inference and learning move to the GPU. Only the best stable measured setting becomes the default.</p>
+      </section>
+
+      <section id="policy">
+        <span class="section-kicker">08 - Policy and action boundary</span>
+        <h2>Batch rows by policy identity, not only by decision kind.</h2>
+        <p>An A8 iteration uses the live shared policy and, on some iterations, one frozen snapshot or anchor seat. The manifest maps every seat to a <code>policy_id</code> and a <code>record_for_ppo</code> flag. The coordinator partitions ready rows by policy ID, evaluates each model in a batch, and returns actions for every seat. Only live-policy rows create trajectories.</p>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Ready field</th><th>Type/shape</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td>Observation</td><td><code>float32 [R,104]</code></td><td>Exact codec-v3 policy input.</td></tr>
+              <tr><td>Dense legal mask</td><td><code>uint8/bool [R,516]</code></td><td>Immediate inference; generated into a reusable buffer.</td></tr>
+              <tr><td>Group token</td><td><code>uint64 [R]</code> plus row counts</td><td>Exact scatter and stale-submission protection.</td></tr>
+              <tr><td>Logical identity</td><td>game, seat, decision sequence, policy version</td><td>Ordering, receipts, and keyed sampling.</td></tr>
+              <tr><td>Policy identity</td><td><code>uint16 [R]</code></td><td>Live versus chosen frozen model.</td></tr>
+              <tr><td>Sampling word</td><td><code>uint32 [R]</code></td><td>Batch-order-independent categorical draw.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Keyed categorical v1</h3>
+        <p>The current <code>Categorical.sample()</code> consumes one shared Torch RNG stream, so changing batch order changes later actions. The native collector instead hashes immutable decision identity into a 32-bit uniform word. The policy computes the same masked categorical distribution and chooses the first cumulative probability crossing that word.</p>
+        <pre><code>key = splitmix64(run_sampling_seed, policy_identity,
+                 policy_version, game_id, seat_id, decision_sequence)
+u = (low32(key) + 0.5) / 2**32
+action = first_index(cumsum(masked_softmax(logits)) >= u)
+logp = masked_log_softmax(logits)[action]</code></pre>
+        <ul>
+          <li>The hash is a named algorithm with unsigned overflow, not platform-dependent <code>std::hash</code> or Python <code>hash()</code>.</li>
+          <li>Batch reorder, padding, worker count, and unrelated completed games must not change the action for a row.</li>
+          <li>CPU and GPU resume are each exact within their frozen runtime receipt; changing device mid-campaign remains forbidden.</li>
+          <li>This samples the intended categorical distribution but will not reproduce old scalar Torch RNG trajectories. That is why it is a new learned-policy recipe identity.</li>
+        </ul>
+
+        <h3>Batch dispatch</h3>
+        <p>The boundary supports a row capacity and an optional maximum wait. Dispatch occurs when the buffer is full, no runnable game remains, or the oldest ready group reaches the wait limit. Fixed-shape padding is supported because it can stabilize CPU/GPU kernels, but its actual row count and wait are deferred until A exposes real batch histograms. No hard-coded synthetic batch earns adoption.</p>
+      </section>
+
+      <section id="trajectory">
+        <span class="section-kicker">09 - Trajectories and rewards</span>
+        <h2>Store compact rows natively and finalize once per PPO iteration.</h2>
+        <p>The native arena is chunked so a long game cannot require a giant fixed reservation. Blocks come from a preallocated free list. Each game/seat owns an ordered chain; completion publishes a descriptor, not copied rows. Finalization walks descriptors in canonical game/seat order and performs bulk copies into one training batch.</p>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Stored field</th><th>Native type</th><th>Final PPO type</th></tr></thead>
+            <tbody>
+              <tr><td>Observation</td><td>104 <code>float32</code></td><td><code>float32 [N,104]</code></td></tr>
+              <tr><td>Legal mask</td><td>9 x <code>uint64</code> bitset</td><td><code>bool [N,516]</code> when evaluated</td></tr>
+              <tr><td>Action</td><td><code>uint16</code></td><td><code>int64 [N]</code></td></tr>
+              <tr><td>Old logp/value/reward</td><td><code>float32</code></td><td><code>float32 [N]</code></td></tr>
+              <tr><td>Done</td><td><code>uint8</code></td><td><code>float32/bool [N]</code></td></tr>
+              <tr><td>Logical IDs</td><td>compact integers</td><td>debug/provenance side arrays; omitted from PPO math</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Reward closure</h3>
+        <ul>
+          <li>Pending state stores previous position, lap, and spun-out flag because the current A8 reward reads only those fields between decisions.</li>
+          <li>Terminal placement and margin read the final native game state.</li>
+          <li>A truncated game emits value-only bootstrap rows. The coordinator batches <code>V(s_next)</code>; native code folds <code>gamma * V(s_next)</code> into the last reward and still stores <code>done=True</code>, matching the current collector.</li>
+          <li>Reward mode, shaping weight, spin penalty, margin coefficient, gamma, and GAE lambda are frozen iteration configuration and included in the schema/recipe receipt.</li>
+        </ul>
+
+        <h3>GAE plan</h3>
+        <p>A8 integration first finalizes rewards/dones/values and reuses the existing Python <code>RolloutBuffer.compute_gae</code> semantics as the oracle. Once the batch is exact, a tight native reverse pass may compute GAE per game/seat stream. It is adopted only if its float32 outputs match the reference exactly and preparation time materially falls. C may instead compute GAE on the GPU if that is faster; the storage contract does not depend on where it runs.</p>
+      </section>
+
+      <section id="rng">
+        <span class="section-kicker">10 - Randomness and semantic receipts</span>
+        <h2>Separate chance in the game from sampling in the policy.</h2>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Random stream</th><th>Owner</th><th>Contract</th><th>Checkpointed state</th></tr></thead>
+            <tbody>
+              <tr><td>Track generation</td><td>Python manifest builder</td><td>Existing namespaced deterministic track sampler</td><td>Manifest/game ID and training RNG state</td></tr>
+              <tr><td>Game chance</td><td>Each native game</td><td>CPython 3.12 MT19937 <code>random</code>, <code>getrandbits</code>, <code>_randbelow</code>, and shuffle consumption</td><td>Not normally in-flight; validated state import/export for tests</td></tr>
+              <tr><td>Policy action</td><td>Policy coordinator</td><td><code>keyed_categorical_v1</code> from immutable logical identity</td><td>Sampling seed, version, next game ID</td></tr>
+              <tr><td>PPO minibatch order</td><td>PyTorch learner</td><td>Existing Torch RNG on the resolved device</td><td>CPU and CUDA RNG states, already in D0 state</td></tr>
+              <tr><td>Seat schedule/opponent choice</td><td>Python trainer</td><td>Existing private NumPy generators</td><td>Existing schedule and training RNG states</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>CPython compatibility details</h3>
+        <ul>
+          <li>Import/export the complete version-3 <code>random.Random.getstate()</code> form: 624 words, index, and Gaussian cache.</li>
+          <li>Implement the same 53-bit <code>random()</code>, variable-width <code>getrandbits(k)</code>, rejection-based <code>_randbelow(n)</code>, and reverse Fisher-Yates shuffle used by the frozen Python runtime.</li>
+          <li>Test empty, one-card, power-of-two, and non-power-of-two shuffle lengths because rejection consumption differs.</li>
+          <li>Record Python major/minor and RNG contract version. A later Python RNG change is a schema migration, never a silent rebuild.</li>
+        </ul>
+
+        <h3>Receipt modes</h3>
+        <ul>
+          <li><strong>Off:</strong> production hot path; only aggregate counters and failures.</li>
+          <li><strong>Hash:</strong> incremental semantic hashes at decision boundaries for bounded canaries and repeat tests.</li>
+          <li><strong>Full:</strong> fixed numeric state/event/decision receipts that Python materializes for differential diagnosis.</li>
+        </ul>
+      </section>
+
+      <section id="errors">
+        <span class="section-kicker">11 - Failures, shutdown, and telemetry</span>
+        <h2>A native crash must not look like a slow training run.</h2>
+        <p>Workers never throw across a thread boundary. They catch expected failures, write one fixed <code>ErrorRecord</code>, mark the slot FAULTED, and request a pool-wide stop. The coordinator stops admission, wakes parked threads, joins them with a bounded timeout, and raises a Python <code>NativeEngineError</code> containing the receipt.</p>
+
+        <h3>Typed failures</h3>
+        <ul>
+          <li>Schema or codec mismatch at pool creation.</li>
+          <li>Track/card/state capacity overflow.</li>
+          <li>Illegal, missing, duplicate, or stale action submission.</li>
+          <li>Impossible phase/program-counter combination or invariant failure.</li>
+          <li>Ready/trajectory arena exhaustion after backpressure should have prevented it.</li>
+          <li>Worker heartbeat timeout, coordinator timeout, or shutdown timeout.</li>
+          <li>CUDA copy, stream, event, out-of-memory, or device failure in option C.</li>
+        </ul>
+
+        <h3>Always-on low-cost telemetry</h3>
+        <p>Record games, transitions, forced/real decisions, decision kinds, branch counts, reshuffles, stress draws, truncations, ready-batch histogram, rows by policy ID, worker busy/parked time, queue wait, inference wait, arena high-water marks, manifest overshoot, throughput, and repeat spread. C adds H2D/D2H bytes and time, GPU inference/update time, stream idle time, allocated/reserved memory, utilization, temperature, power, and throttle reasons where available.</p>
+      </section>
+
+      <section id="a-plan">
+        <span class="section-kicker">12 - Option A implementation plan</span>
+        <h2>Eleven independently gated chunks reach the full native CPU collector.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Chunk</th><th>Deliverable</th><th>Focused gate</th><th>Stop/redesign condition</th></tr></thead>
+            <tbody>
+              <tr><td>A0<br><strong>Implemented - pass</strong></td><td>Separate native package, release/debug MSVC build, opaque pybind object, schema receipt, GIL-release smoke.</td><td>Both builds passed; strict fixed-buffer round-trip and GIL-release tests passed.</td><td>None triggered.</td></tr>
+              <tr><td>A1<br><strong>Implemented - pass</strong></td><td>Compact state, card tokens, track descriptor, MT state import/export, Python/D2 bridges used only by tests.</td><td>Generated 2-6 seat and transient states round-trip to exact D0 snapshots; CPython words, floats, rejection draws, shuffles, and state match exactly.</td><td>None triggered.</td></tr>
+              <tr><td>A2<br><strong>Implemented - pass</strong></td><td>Hard slices: cards-to-REACT and movement-to-next-decision, including stress and reshuffle.</td><td>100,157 weighted transitions across 20,032 games had zero mismatches; matched five-repeat median was 5.84x scalar.</td><td>None triggered. See <a href="D3-A0-A2-native-results.html">A0-A2 results</a>.</td></tr>
+              <tr><td>A3<br><strong>Implemented - pass</strong></td><td>All remaining phase rules and explicit program counters in a single-thread runner.</td><td>All five decision kinds and 2-6 seats passed focused and randomized round lockstep.</td><td>One later A5 capacity issue was found and bounded; the explicit continuation model remained valid.</td></tr>
+              <tr><td>A4<br><strong>Implemented - pass</strong></td><td>Native observations, legal masks, rewards, terminal margin, bootstrap rows, compact receipts.</td><td>Native float32 observations, 516-bit masks, rewards, margins, value-only rows, state/RNG digests, and fixed receipts matched at every tested boundary.</td><td>None triggered; exact floating order matched without Python rule callbacks.</td></tr>
+              <tr><td>A5<br><strong>Implemented - pass</strong></td><td>Single-thread full-race engine, flat action decoding, and canonical game digest.</td><td>1,000,023 randomized transitions across 1,254 races had zero mismatch; final five-repeat full-rule median was 7.63x scalar.</td><td>None triggered after raising the finite stress-card arena bound. See <a href="D3-A3-A5-native-results.html">A3-A5 results</a>.</td></tr>
+              <tr><td>A6<br><strong>Implemented - component pass</strong></td><td>Bounded worker pool, slot lifecycle, backpressure, manifest admission, cooperative stop/join, and pool-wide fault propagation.</td><td>Real native-state digests matched with 1/2/4/8/12 workers under admission-order and work-duration perturbations; capacity, injected-fault, and bounded-stop gates passed.</td><td>None triggered. The production ready/action loop is deliberately connected at A9 rather than claimed from the scheduler component alone.</td></tr>
+              <tr><td>A7<br><strong>Implemented - component pass</strong></td><td>CPU batched policy coordinator, frozen policy registry, keyed-categorical-v1 sampling, strict ready-buffer schema, value-only rows, and batch telemetry.</td><td>Actions/log-probabilities/values matched by immutable identity after group reorder; current/snapshot partitioning and policy-version rejection passed.</td><td>The real ready-batch distribution and trained-throughput decision require A9 integration. Synthetic shapes were not used to choose capacities or claim adoption.</td></tr>
+              <tr><td>A8<br><strong>Implemented - pass</strong></td><td>Preallocated compact native trajectory blocks, packed masks, canonical finalization, snapshot/anchor filtering, terminal margin, bootstrap folding, and exact native GAE.</td><td>Scrambled current/snapshot rows finalized in canonical game/seat/decision order; masks, transitions, float32 advantages, and returns matched the Python oracle exactly.</td><td>An initial one-bit GAE mismatch exposed wider native intermediates; matching the reference float32 operation order fixed it. No unresolved mismatch remains. See <a href="D3-A6-A8-native-results.html">A6-A8 results</a>.</td></tr>
+              <tr><td>A9<br><strong>Integrated - bridge pass</strong></td><td><code>collector_mode="native"</code> in A8, policy-version barrier, controller/snapshot integration, full telemetry.</td><td>Repeated manifests were exact; snapshot filtering and complete PPO smoke updates passed.</td><td>The simpler integration leaves active native states on the Python coordinator thread; the original worker-owned ready/action hot loop is not complete.</td></tr>
+              <tr><td>A10<br><strong>Operational gate passes</strong></td><td>Safe-boundary checkpoint fields, manifest-v2 continuous refill, fresh-process resume, first soak diagnosis, and replacement one-hour confirmation.</td><td>The 48-slot, capacity-288, Torch-8/2 configuration trained 21.18M rows at 5,875.53 tps for one hour; minimum/median stability was 98.84% and every subgate passed.</td><td>Adopt this native operational configuration. Learning quality and the eight-hour rehearsal remain separate gates. See <a href="D3-A10-soak-results.html">soak result</a> and <a href="D3-A10-performance-diagnostics.html">diagnostics</a>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="decision-banner">
+          <strong>A9 integration and the A10 operational gate now pass.</strong>
+          The first 32-slot/Torch-2 hour failed at 4,667/s. Diagnostics found snapshot batch fragmentation and insufficient Torch CPU capacity rather than clock collapse. The 48-slot, capacity-288, Torch-8/2 replacement then sustained 5,875.53/s for one hour with 98.84% stability and all subgates passing. Learning quality, the eight-hour rehearsal, and CUDA work remain separate. See the <a href="D3-A10-soak-results.html">soak result</a>.
+        </div>
+      </section>
+
+      <section id="gpu">
+        <span class="section-kicker">13 - Option C: GPU inference pipeline</span>
+        <h2>The confirmed RTX 4080 SUPER accelerates batches; native CPU workers keep owning rules.</h2>
+        <p>A read-only receipt on 21 July confirmed an NVIDIA GeForce RTX 4080 SUPER with 16,376 MiB VRAM, driver 596.49, and compute capability 8.9. The current repo environment uses PyTorch 2.13.0+cpu, so the exact CUDA wheel/toolkit pairing remains an implementation-time compatibility choice. Installing it is not authorized by this design.</p>
+
+        <pre><code>native workers ---> pinned host buffer 0 --H2D--> CUDA inference --D2H--> actions
+       |            pinned host buffer 1 --H2D--> CUDA inference --D2H--> actions
+       |            pinned host buffer 2 --H2D--> CUDA inference --D2H--> actions
+       +---- continue runnable games while other games wait for results ----+
+
+after collection barrier:
+compact trajectory --bulk H2D--> GPU tensors --> PPO epochs --> new policy version</code></pre>
+
+        <h3>Environment and ownership</h3>
+        <ul>
+          <li>Create a separate CUDA development environment first; do not replace the proven CPU-only environment until the CUDA smoke and resume receipts pass.</li>
+          <li>The native extension remains CPU-only and PyTorch-independent. CUDA streams and tensors are owned by the Python policy coordinator.</li>
+          <li>The live policy and the one selected snapshot/anchor model reside on the GPU for the iteration. The snapshot pool remains checkpointed on CPU; only the selected model is copied once per iteration.</li>
+          <li>Use FP32 eager inference first with TF32 and mixed precision disabled. Faster numerical modes are separate learning-affecting experiments.</li>
+        </ul>
+
+        <h3>Reusable pinned buffers</h3>
+        <p>Python allocates two buffers initially and supports a third if overlap data proves useful. Each buffer contains pinned CPU tensors for observation, dense mask or packed mask, logical metadata, sampling words, and action/logp/value outputs. Their NumPy views are bound once to the native pool. No batch pins memory or allocates a new tensor.</p>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Buffer state</th><th>Owner</th><th>Valid operation</th></tr></thead>
+            <tbody>
+              <tr><td>FREE</td><td>Native scheduler</td><td>Fill complete ready groups up to row capacity.</td></tr>
+              <tr><td>HOST_READY</td><td>Coordinator</td><td>Partition policy IDs and issue non-blocking H2D copies.</td></tr>
+              <tr><td>H2D</td><td>Transfer stream</td><td>Record event when inputs are visible to inference.</td></tr>
+              <tr><td>INFER</td><td>Inference stream</td><td>Wait on H2D event; run logits/value and keyed sampling.</td></tr>
+              <tr><td>D2H</td><td>Transfer stream</td><td>Wait on inference; copy compact action/logp/value outputs.</td></tr>
+              <tr><td>RESULT_READY</td><td>Coordinator/native scheduler</td><td>Submit token, then return the buffer to FREE.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Seven C chunks after A</h3>
+        <ol>
+          <li><strong>C0 - environment receipt:</strong> freeze GPU/driver/PyTorch/CUDA/compiler versions; CUDA policy smoke; CPU environment remains untouched.</li>
+          <li><strong>C1 - real-batch inference gate:</strong> benchmark eager FP32 on batch sizes actually emitted by A, including small tails and two policy identities.</li>
+          <li><strong>C2 - pinned buffer contract:</strong> bind reusable host buffers, lease states, non-blocking transfers, events, and fault injection.</li>
+          <li><strong>C3 - overlapped collection:</strong> double-buffer CPU simulation, transfers, and inference; add bounded wait/backpressure and stream telemetry.</li>
+          <li><strong>C4 - GPU PPO baseline:</strong> move finalized tensors, policy, optimizer, and update to CUDA without changing minibatch size, epochs, or objective.</li>
+          <li><strong>C5 - update launch optimization:</strong> only if measured, compile the fixed-shape full-minibatch step; leave the tail eager. Consider CUDA graphs only after compile evidence.</li>
+          <li><strong>C6 - operational gate:</strong> fresh-process resume, matched full-loop repeats, one-hour thermal soak, then an eight-hour rehearsal.</li>
+        </ol>
+
+        <div class="decision-banner">
+          <strong>C entry and adoption</strong>
+          Enter C after A can continuously supply useful batches and either misses 5,000/s or leaves a measured inference/update bottleneck. Continue only if GPU inference improves the full collection loop by at least 1.25x. Adopt A+C at 5,000+ trained tps with less than 5% spread; target 6,500/s for the one-billion route.
+        </div>
+      </section>
+
+      <section id="ppo">
+        <span class="section-kicker">14 - GPU PPO update design</span>
+        <h2>Preserve the learning recipe before optimizing launch overhead.</h2>
+        <p>The current workload uses a small 104-input MLP, 516 action logits, minibatches of 256, and five epochs in A8. The GPU can make matrix work cheap enough that Python/kernel launch overhead dominates. C therefore separates device migration from update-graph optimization.</p>
+
+        <h3>C4 baseline</h3>
+        <ul>
+          <li>Bulk-copy the finalized iteration once. Unpack legal-mask bits into one GPU boolean tensor or compare a packed-mask kernel only if transfer measurements justify it.</li>
+          <li>Keep FP32 parameters, Adam state, losses, advantage normalization, minibatch size, epoch count, clip range, gradient clipping, and <code>torch.randperm</code> ordering semantics.</li>
+          <li>Keep the optimizer on the resolved device for the whole campaign. Resume rejects a device change.</li>
+          <li>Synchronize only for bounded timing, error checks, iteration completion, checkpoint copying, and scalar logging. Avoid <code>.item()</code> inside the minibatch loop.</li>
+          <li>Accumulate diagnostic loss sums as device tensors and transfer them once after the update.</li>
+        </ul>
+
+        <h3>C5 measured optimizations</h3>
+        <ul>
+          <li>Compile one fixed-shape full-minibatch function that accepts index tensors; handle the final partial minibatch eagerly so no samples are dropped or reweighted.</li>
+          <li>Require the same losses and parameter deltas within a frozen numerical tolerance on a fixed batch before timing.</li>
+          <li>Use CUDA graphs only if compile still leaves launch gaps and static buffers can preserve exact data/order semantics.</li>
+          <li>Do not change minibatch size, accumulate gradients, enable AMP/BF16, or alter epochs as a substrate optimization. Each changes the learning recipe and needs a separately registered generation and learning comparison.</li>
+        </ul>
+
+        <h3>Fallback combinations</h3>
+        <p>GPU inference and GPU learning are gated independently. If inference passes but the update is slower, a temporary GPU-inference/CPU-update mode may be measured, including the once-per-iteration weight copy. It is a diagnostic fallback, not the preferred 800M design. If neither neural component improves the full loop, C stops and A remains the production result.</p>
+      </section>
+
+      <section id="resume">
+        <span class="section-kicker">15 - Resume, provenance, and policy identity</span>
+        <h2>Keep checkpoints at completed PPO boundaries; do not serialize live threads.</h2>
+        <p>The existing D0 contract already checkpoints after a completed update. A and C retain that boundary. When a checkpoint is written, every admitted game has completed, every trajectory row has been consumed, the pool is drained, and there is no in-flight native state. A hard failure loses at most the current iteration and resumes from the previous verified checkpoint.</p>
+
+        <h3>New training-state fields</h3>
+        <ul>
+          <li>Collector kind and native protocol/state/codec/RNG/receipt versions.</li>
+          <li>Native source identity, compiler/build receipt, and production/debug mode.</li>
+          <li>Worker count, queue/buffer capacities, chosen dispatch policy, Torch thread counts.</li>
+          <li>Next logical game ID, sampling seed/version, rows-per-game estimator state, and manifest formula version.</li>
+          <li>Resolved device plus, for C, GPU model, driver, PyTorch CUDA build, precision flags, stream/buffer configuration, and compiled-update identity.</li>
+          <li>Existing live policy, optimizer, controller, snapshot pool, seat schedule, NumPy/Torch RNG, progress, campaign, source, recipe, and anchor identity.</li>
+        </ul>
+
+        <h3>Stop behaviour</h3>
+        <ul>
+          <li>A normal stop stops new iteration admission, finishes the current iteration, performs its update, saves atomically, and exits.</li>
+          <li>A requested bounded test stop may drain admitted games and discard the uncommitted iteration only in a smoke tool, never in a registered training campaign.</li>
+          <li>A native or CUDA fault aborts the current iteration without updating. The last completed checkpoint remains authoritative.</li>
+          <li>Fresh-process resume must reproduce the uninterrupted training-state digest for the same runtime and configuration.</li>
+        </ul>
+
+        <div class="result-note"><strong>Generation rule.</strong> Native collection and keyed categorical sampling can change learned weights even when the probability distribution and game semantics are correct. The first non-smoke A campaign therefore allocates the next immutable <code>G####</code> identity after its resolved recipe and source are frozen. A later CUDA/precision/update-recipe change also receives a new generation when it can affect weights.</div>
+      </section>
+
+      <section id="verification">
+        <span class="section-kicker">16 - Correctness gates</span>
+        <h2>Use the Python engine as an oracle at every boundary, then reduce checks in production.</h2>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Gate</th><th>Corpus</th><th>Compared evidence</th><th>Pass rule</th></tr></thead>
+            <tbody>
+              <tr><td>State bridge</td><td>Generated and hand-built 2-6 seat states, every phase and capacity edge</td><td>D0 canonical semantic snapshot and RNG state</td><td>Exact equality; expected overflows fail loudly.</td></tr>
+              <tr><td>RNG</td><td>Frozen seeds, state imports, draw widths, shuffle lengths, resume points</td><td>Words, floats, choices, deck orders, next RNG state</td><td>Exact equality.</td></tr>
+              <tr><td>Hard slices</td><td>100,000 weighted randomized transitions with rare-branch quotas</td><td>Intermediate state, decisions, events, obs, masks, rewards, terminal flags, RNG</td><td>Zero unexplained mismatches.</td></tr>
+              <tr><td>Full races</td><td>At least 1,000,000 transitions across 2-6 seats and generated-track strata</td><td>Every decision boundary plus final order/digest</td><td>Zero unexplained mismatches.</td></tr>
+              <tr><td>Concurrency</td><td>Same manifest under 1/2/4/8/12 workers, queue jitter, reorder, padding</td><td>Per-game and canonical trajectory digests</td><td>Exact equality.</td></tr>
+              <tr><td>Policy sampler</td><td>Fixed logits/masks/keys and real observation corpus</td><td>Actions, logps, values under reorder/padding</td><td>Exact on one frozen device/runtime.</td></tr>
+              <tr><td>Collector</td><td>Fixed manifest with current, snapshot, anchor, truncation</td><td>Recorded rows, rewards, GAE/returns, policy versions</td><td>Exact against keyed Python reference.</td></tr>
+              <tr><td>Resume</td><td>Uninterrupted, one-stop, and two-stop fresh processes</td><td>Training-state and next-iteration digests</td><td>Exact equality on the same runtime/device.</td></tr>
+              <tr><td>CUDA numeric</td><td>Fixed real batches and one fixed PPO update</td><td>Logits, values, actions, losses, parameter deltas</td><td>Frozen tolerance; zero action differences preferred and reported.</td></tr>
+              <tr><td>Operational</td><td>Fault injection, one-hour soak, then eight-hour rehearsal</td><td>Memory, stalls, thermal clocks, checkpoints, throughput</td><td>No growth/stall/digest failure; stable rate.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Focused test policy</h3>
+        <p>Do not mirror every Python unit test in C++. Keep small native unit tests for RNG and local invariants, then rely on high-value differential corpora for duplicated rules. Every bug found in random differential testing becomes one small named regression fixture before the random seed is retained in the corpus.</p>
+      </section>
+
+      <section id="experiments">
+        <span class="section-kicker">17 - Bounded performance experiments</span>
+        <h2>Every speed claim has a hypothesis, confidence, compute bound, and stop rule.</h2>
+
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Experiment</th><th>Hypothesis and confidence before run</th><th>Code scope</th><th>Compute/logging scope</th><th>Decision</th></tr></thead>
+            <tbody>
+              <tr><td>A2 hard slice</td><td>C++ branch execution is &ge;3x scalar; 0.75 confidence. Five times is the design goal.</td><td>About 1,500-2,500 native/test lines through A2.</td><td>100k differential transitions, warmup, 5 matched timing repeats, &lt;1 CPU hour, progress every 10k.</td><td>Continue &ge;3x; one profile pass at 2-3x; stop &lt;2x or on mismatch.</td></tr>
+              <tr><td>A5 full rules</td><td>Rare paths preserve &ge;3x non-inference gain; 0.70 confidence.</td><td>About 2,500-4,000 cumulative native lines.</td><td>1M lockstep transitions plus 5 timing repeats, &lt;30 minutes expected, hard 1-hour timeout.</td><td>Continue only with exactness and &ge;3x rule-side gain.</td></tr>
+              <tr><td>A6/A7 scaling</td><td>Native workers plus real policy batches reach &ge;4,000 trained tps; 0.65 confidence.</td><td>Pool, coordinator, buffers, keyed sampler.</td><td>Only 1/2/4/8/12 workers and a small fixed dispatch grid; 3 repeats/config; &lt;2 hours.</td><td>Adopt at 5,000+; enter C or redesign at 4,000-5,000; stop A as target path below 4,000.</td></tr>
+              <tr><td>C1 GPU inference</td><td>RTX 4080 SUPER real-batch inference improves full collection &ge;1.25x; 0.70 confidence because the model is small.</td><td>CUDA environment, eager policy path, reusable buffers.</td><td>Real A histogram only, 5 repeats, CUDA-event timing plus wall time, &lt;1 hour.</td><td>Continue only on full-loop gain, not synthetic peak.</td></tr>
+              <tr><td>C4/C5 GPU update</td><td>GPU update is &ge;1.5x eager CPU and can approach 2x after launch work; 0.60 confidence.</td><td>Device update, bulk transfer, optional compiled full minibatch.</td><td>Fixed recorded rollout, correctness first, 5 repeats per baseline/compiled path, &lt;1 hour.</td><td>Keep only paths that improve end-to-end time without recipe drift.</td></tr>
+              <tr><td>A+C end to end</td><td>Combined system sustains 5,000+ tps; 6,500/s is plausible stretch; 0.65/0.45 confidence.</td><td>Production integration and telemetry complete.</td><td>3 matched repeats, one-hour soak, then separately authorized eight-hour rehearsal with progress heartbeat.</td><td>Adopt &ge;5,000 with &lt;5% spread; call one-billion credible only &ge;6,500.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Measurement discipline</h3>
+        <ul>
+          <li>Use identical manifests and policy weights for matched comparisons.</li>
+          <li>Report actual recorded/trained transitions, not requested rows or synthetic games.</li>
+          <li>Warm native code, Torch kernels, CUDA context, and compiled graphs before timed samples.</li>
+          <li>Use wall-clock component spans; use CUDA events for device subspans; synchronize at measurement boundaries only.</li>
+          <li>Record source patch hash, native binary hash, runtime/compiler/device receipt, configuration, raw samples, median, and spread.</li>
+          <li>Every command has a timeout or periodic heartbeat. No large training campaign or final 48-hour run is authorized by these engineering gates.</li>
+        </ul>
+      </section>
+
+      <section id="deferred">
+        <span class="section-kicker">18 - Decisions deliberately deferred</span>
+        <h2>Leave tuning choices until the first implementation exposes the real data.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Decision</th><th>When to make it</th><th>Evidence required</th></tr></thead>
+            <tbody>
+              <tr><td>Ready batch capacity and maximum wait</td><td>After A7 emits real batch/latency histograms</td><td>Full-loop throughput, p50/p95 rows, worker idle time; not synthetic inference alone.</td></tr>
+              <tr><td>Final worker/Torch thread counts</td><td>After A6/A7 scaling gate</td><td>Bounded 1/2/4/8/12 worker grid and repeat spread.</td></tr>
+              <tr><td>Mutex queue versus sharded/lock-free queue</td><td>After scheduler profile</td><td>Queue/synchronization exceeds 5% of rule-side time.</td></tr>
+              <tr><td>Dense versus packed inference masks</td><td>C1 buffer benchmark</td><td>Measured H2D time versus unpack-kernel launch cost.</td></tr>
+              <tr><td>Two versus three pinned buffers</td><td>C3 overlap trace</td><td>Visible transfer/inference bubbles that a third buffer removes.</td></tr>
+              <tr><td>Exact CUDA PyTorch build</td><td>C0 implementation start</td><td>Current official compatibility for driver 596.49, Python 3.12, RTX 4080 SUPER, and repo dependencies.</td></tr>
+              <tr><td><code>torch.compile</code> or CUDA graphs</td><td>After eager GPU update profile</td><td>Launch-bound update with stable fixed shapes and correctness tolerance passed.</td></tr>
+              <tr><td>AMP/BF16/TF32</td><td>Separate post-C performance/learning experiment</td><td>Numerical, action-divergence, update, and skill evidence; new generation if adopted.</td></tr>
+              <tr><td>Different PPO minibatch size/epochs</td><td>Separate learning-method optimization</td><td>Matched sample-efficiency and skill gate, not only faster updates.</td></tr>
+              <tr><td>Port track generation to C++</td><td>Only if manifest construction is measured as material</td><td>Python track generation/admission is a significant full-loop share.</td></tr>
+              <tr><td>In-flight native checkpoints</td><td>Only if iteration length becomes operationally unacceptable</td><td>Measured recovery cost justifies a much larger state/queue serialization contract.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>These are not missing parts of the design. The interfaces deliberately leave room for them, while their values or adoption cannot be responsibly chosen before the relevant measurements exist.</p>
+      </section>
+
+      <section id="files">
+        <span class="section-kicker">19 - Planned file and ownership map</span>
+        <h2>Keep the native engine isolated and the trainer changes narrow.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Area</th><th>Planned location</th><th>Responsibility</th></tr></thead>
+            <tbody>
+              <tr><td>Native package/build</td><td><code>native/pyproject.toml</code>, <code>native/setup.py</code></td><td>Optional local build, compiler flags, package metadata.</td></tr>
+              <tr><td>Native core</td><td><code>native/src/heat_native/</code></td><td>State, RNG, rules, observations, masks, rewards, scheduler, arenas, receipts, binding.</td></tr>
+              <tr><td>Python protocol types</td><td><code>src/heat/ml/native_env/protocol.py</code></td><td>Typed config, schema checks, manifests, ready/trajectory views, errors.</td></tr>
+              <tr><td>Collector</td><td><code>src/heat/ml/selfplay/native_collector.py</code></td><td>Manifest construction, policy registry, coordinator, canonical batch handoff.</td></tr>
+              <tr><td>Keyed sampling</td><td><code>src/heat/ml/selfplay/sampling.py</code></td><td>Frozen hash/uniform/categorical contract shared by CPU and CUDA.</td></tr>
+              <tr><td>CUDA coordinator</td><td><code>src/heat/ml/selfplay/cuda_coordinator.py</code></td><td>Pinned buffers, streams/events, GPU policy partitioning, overlap telemetry.</td></tr>
+              <tr><td>PPO integration</td><td><code>src/heat/ml/selfplay/phase1.py</code>, <code>ppo.py</code>, <code>training_state.py</code></td><td>Native collector selection, device update, recipe and resume fields.</td></tr>
+              <tr><td>Differential tools</td><td><code>experiments/verify_direction_d3_native.py</code></td><td>State/RNG/slice/full-race/concurrency oracle campaigns.</td></tr>
+              <tr><td>Benchmarks</td><td><code>experiments/benchmark_direction_d3_native.py</code>, <code>benchmark_direction_d3_cuda.py</code></td><td>Matched manifests, component/full-loop measurements, JSON receipts.</td></tr>
+              <tr><td>Focused tests</td><td><code>tests/native/</code>, <code>tests/test_direction_d3_*.py</code></td><td>Build/API, regression fixtures, sampler, collector, resume, fault injection.</td></tr>
+              <tr><td>Results</td><td><code>docs/direction-D/</code>, <code>runs/direction_d/</code></td><td>Human-readable HTML results and ignored raw JSON receipts.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Implementation sequence in one line</h3>
+        <ol class="step-line" aria-label="Implementation sequence">
+          <li><strong>A0-A2</strong><br>prove hard native branches</li>
+          <li><strong>A3-A5</strong><br>complete exact single-game engine</li>
+          <li><strong>A6-A10</strong><br>pool, train, resume, adopt</li>
+          <li><strong>C0-C6</strong><br>feed and learn on GPU</li>
+        </ol>
+      </section>
+
+      <section id="sources">
+        <span class="section-kicker">20 - Sources, evidence, and limits</span>
+        <h2>External documentation supports the mechanisms; HEAT's gates decide adoption.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Source</th><th>Used for</th><th>Does not prove</th></tr></thead>
+            <tbody>
+              <tr><td><a href="https://pybind11.readthedocs.io/en/stable/advanced/pycpp/numpy.html">pybind11 NumPy/buffer documentation</a> and <a href="https://pybind11.readthedocs.io/en/stable/advanced/misc.html">GIL guidance</a></td><td>Strict numeric buffers, zero-copy views with controlled lifetime, and releasing the GIL around native work.</td><td>That the proposed HEAT boundary is automatically safe or fast.</td></tr>
+              <tr><td><a href="https://setuptools.pypa.io/en/latest/userguide/ext_modules.html">setuptools extension documentation</a></td><td>Ahead-of-time local C++ extension build.</td><td>That the local MSVC flags and editable install need no spike.</td></tr>
+              <tr><td><a href="https://docs.pytorch.org/docs/main/notes/cuda.html">PyTorch CUDA semantics</a></td><td>Pinned memory, non-blocking copies, streams, events, and explicit synchronization.</td><td>That small HEAT policy batches will amortize GPU launch cost.</td></tr>
+              <tr><td><a href="https://docs.pytorch.org/docs/main/cpp_extension.html">PyTorch C++ extension guidance</a></td><td>Alternative custom-operator route and current Windows/CUDA build considerations.</td><td>That A should link LibTorch; this design deliberately avoids that dependency.</td></tr>
+              <tr><td><a href="https://github.com/sail-sg/envpool">EnvPool</a></td><td>The broad pattern of native environment workers feeding batched Python policy calls.</td><td>HEAT's speedup, exactness, scheduler, or Windows behaviour.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p><strong>Primary internal evidence:</strong> <code>runs/direction_d/d0_baseline.json</code>, <code>d1_lane_benchmark.json</code>, <code>d2_cpu_profile.json</code>, <code>d2r_r1_gate.json</code>, and <code>d2r_r2_gate.json</code>; the D0 semantic corpus; current <code>MultiSeatCollector</code>, <code>ExactLaneCollector</code>, <code>TensorGameState</code>, codec-v3 observation/mask code, PPO policy/buffer/update, and D0 training-state implementation.</p>
+        <p><strong>Limits:</strong> A9's exact trainer bridge, manifest-v2 refill, A10 fresh-process resume, sustained-load diagnosis, and the replacement one-hour operational pass are implemented. The 32K learning-quality gate, original worker-owned live-game loop, CUDA environment change, registered campaign, eight-hour rehearsal, and final 48-hour run remain outstanding.</p>
+      </section>
+    </article>
+  </div>
+</main>
+</body>
+</html>

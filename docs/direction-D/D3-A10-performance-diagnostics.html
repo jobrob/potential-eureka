@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Direction D3 A10 performance diagnostics</title>
+  <style>
+    :root { color-scheme:light; --ink:#17212b; --muted:#526170; --line:#d7dee5; --panel:#f6f8fa; --good:#0b6b3a; --warn:#8a5a00; --accent:#2457a6; --bad:#a12622; }
+    body { margin:0; font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:1000px; margin:auto; padding:40px 24px 64px; }
+    h1 { font-size:clamp(2rem,5vw,3.35rem); line-height:1.05; margin:.25rem 0 1rem; }
+    h2 { margin-top:2.3rem; font-size:1.45rem; }
+    h3 { margin-top:1.6rem; }
+    .status { color:var(--good); font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
+    .lede { font-size:1.15rem; max-width:820px; }
+    .banner,.card { border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin:18px 0; background:var(--panel); }
+    .banner { border-left:5px solid var(--good); }
+    .warning { border-left:5px solid var(--warn); }
+    table { width:100%; border-collapse:collapse; margin:14px 0; }
+    th,td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:10px 8px; }
+    th { font-size:.83rem; text-transform:uppercase; color:var(--muted); }
+    code { font-family:ui-monospace,"Cascadia Code",monospace; }
+    .muted { color:var(--muted); }
+    .number { white-space:nowrap; font-weight:700; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="status">Diagnosis complete - replacement hour passes - 23 July 2026</p>
+  <h1>The diagnosed configuration change holds for a full hour.</h1>
+  <p class="lede">Confidence before diagnosis was 0.70 that durable system telemetry would distinguish thermal contention from a repeatable training phase. The measurements rule out clock collapse and expose two compounding costs: snapshot-policy batches are smaller, and two Torch threads do not sustain the combined inference and PPO workload.</p>
+
+  <div class="banner"><strong>Operational pass:</strong> 48 native slots, ready capacity 288, 32,768 requested rows, reserve 1.30, and Torch CPU threads 8/2 sustained 5,875.53/s for one hour with 98.84% minimum-to-median stability. Every operational subgate passed.</div>
+
+  <h2>Experiment scope</h2>
+  <ul>
+    <li><strong>Code:</strong> one read-only historical analyzer, one steady-state slot benchmark, durable Windows CPU/per-core telemetry, and a reporter regression test.</li>
+    <li><strong>Compute:</strong> historical analysis, one rejected microbenchmark, one ten-minute reproduction, two five-minute thread arms, and one ten-minute combined confirmation.</li>
+    <li><strong>Stop rules:</strong> reject code changes below 1.10x; require at least 5,000/s and 90% minimum-to-median stability for the candidate.</li>
+    <li><strong>Safety:</strong> disposable <code>dev-*</code> weights only, hard duration boundaries, progress/stall samples, and atomic safe-boundary checkpoints.</li>
+  </ul>
+
+  <h2>Diagnosis chain</h2>
+  <table>
+    <thead><tr><th>Question</th><th>Evidence</th><th>Answer</th></tr></thead>
+    <tbody>
+      <tr><td>Did the early selector see the real workload?</td><td>It measured only three early iterations. The hour later contained 238 current and 244 snapshot iterations.</td><td>No. It under-sampled the mature snapshot mix.</td></tr>
+      <tr><td>Are snapshots slower?</td><td>Current iterations: 5,196/s, mean batch 26.87, inference 29.03 us/row. Snapshot: 4,245/s, batch 16.07, inference 57.67 us/row.</td><td>Yes. Mixed-policy dispatch fragments batches.</td></tr>
+      <tr><td>Did one native rules path degrade?</td><td>Worst versus best hour block: rollout +18.5%, PPO update +30.8%, inference +21.2%; batch size only -5.0%.</td><td>No. Several CPU stages slowed together.</td></tr>
+      <tr><td>Was the CPU thermally throttled?</td><td>Active-core performance remained around 103-108% of nominal; late/early ratios remained near 1.0; Windows process power throttling was inactive.</td><td>No evidence of clock or EcoQoS throttling.</td></tr>
+      <tr><td>Can concurrent policy forwards fix it?</td><td>Byte-exact outputs, but only 1.001x median speedup against a 1.10x gate.</td><td>No. The prototype was removed.</td></tr>
+      <tr><td>Does CPU thread capacity matter?</td><td>At 32 slots: Torch 2 reached 3,336/s over ten minutes, Torch 4 reached 3,992/s, and Torch 8 reached 4,713/s in five-minute diagnostics.</td><td>Yes. Eight threads materially reduce PPO cost.</td></tr>
+      <tr><td>Does width still help after snapshot warm-up?</td><td>48 slots reached 5,127/s versus 4,995/s for 32 slots, a 2.64% isolated gain.</td><td>Slightly; combine it with eight threads.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Combined confirmation</h2>
+  <p>The 48x8 candidate trained 3,179,192 actual rows in 603.67 seconds, or 5,266.42/s. Its six windows were 5,014, 5,319, 5,637, 4,822, 5,663, and 5,144/s. The minimum was 92.18% of the 5,231/s median, above the frozen 90% gate. Memory grew by 12.6 MiB after warm-up, CPU performance remained stable, no stall occurred, and the update-89 checkpoint passed SHA and complete-state checks.</p>
+
+  <h2>Full-hour confirmation</h2>
+  <p>The same recipe then trained 21,182,927 rows in 3,605.28 seconds, or 5,875.53/s. Its six time-window rates were 5,806, 5,919, 5,861, 5,888, 5,849, and 5,929/s. The minimum was 98.84% of the 5,875/s median. Post-warm-up memory growth was 21.1 MiB, the late/early CPU performance ratio was 99.26%, no stall occurred, and update 616 passed an independent checkpoint reload and complete-state digest.</p>
+
+  <div class="card warning"><strong>Interpretation limit:</strong> this passes operational performance and stability. It does not measure whether the 32K rollout recipe learns as well as the adopted policy baseline.</div>
+
+  <h2>Implemented changes</h2>
+  <ul>
+    <li>The soak reporter persists complete samples and safely serializes NumPy scalar values.</li>
+    <li>Telemetry now records effective processor performance, maximum-frequency percentage, busiest logical-core performance/utility, and process power-throttling state.</li>
+    <li>The historical analyzer separates seat count, opponent source, six blocks, and cost correlations while checking the stored checkpoint identity.</li>
+    <li>The steady-state benchmark warms through 50 PPO iterations before comparing slot widths, so snapshots and the full pool are represented.</li>
+    <li>The soak runner and native-specific production trainer defaults now name the adopted 48/288, Torch-8/2 operational configuration. Scalar collection keeps its existing runtime behavior.</li>
+  </ul>
+
+  <h2>Next gate</h2>
+  <p>The operational gate is complete. Freeze the exact 48/288, 32K, reserve-1.30, Torch-8/2 recipe for the separate learning-quality comparison before any registered campaign. The eight-hour rehearsal remains a later, separately authorized operational step.</p>
+
+  <p class="muted">Machine-readable evidence: <code>runs/direction_d/d3_a10_soak_diagnostic.json</code>, <code>d3_a10_snapshot_inference.json</code>, <code>d3_a10_cpu_diagnostic.json</code>, <code>d3_a10_threads4_diagnostic.json</code>, <code>d3_a10_threads8_diagnostic.json</code>, <code>d3_a10_steady_state_slots.json</code>, <code>d3_a10_48x8_confirmation.json</code>, and <code>d3_a10_48x8_soak_1h_20260723.json</code>. Summary: <a href="D3-A10-soak-results.html">replacement one-hour result</a>.</p>
+</main>
+</body>
+</html>

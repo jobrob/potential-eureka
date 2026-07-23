@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="T1a design and results for the finish-aware solvency repair and post-fix T0/T1 reruns.">
+  <title>T1a — finish-aware solvency repair</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">T1a complete · post-fix T0/T1 complete</span>
+      <h1>Stop planning when the race is over.</h1>
+      <p class="hero-copy">Make the existing one-corner heat-solvency projection respect the finish line, then repeat T0 and T1 without overwriting their original evidence.</p>
+      <p><a href="static-bot-investigation-plan.html">Back to the static-bot plan</a><br><span class="muted">Design frozen 17 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="T1a current state">
+      <span class="board-label">Change boundary</span>
+      <strong>Finish defect removed.<br>Strength improved.</strong>
+      <p>The production change belongs only in shared forward solvency. It therefore corrects both the repaired heuristic and StaticSearchV1, which calls the same evaluator. Cache identity, risk weights, and unrelated behavior remain fixed.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#cause">Cause</a>
+      <a href="#design">Design</a>
+      <a href="#experiment">Experiment</a>
+      <a href="#results">Results</a>
+      <a href="#verification">Verification</a>
+    </nav>
+    <article class="hybrid-content">
+      <section id="cause">
+        <span class="section-kicker">T1a · Repair target</span>
+        <h2>The projection wraps around before asking whether the car has finished.</h2>
+        <p class="lede"><code>project_solvency</code> walks to the next corner using modulo track coordinates. On the final straight, that corner belongs to a lap the player will never drive. Its projected heat cost suppresses faster gears in 408 decisions across all 60 T1 losses.</p>
+      </section>
+
+      <section id="design">
+        <span class="section-kicker">01 · Small implementation</span>
+        <h2>Compare absolute race progress with absolute finish progress.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Part</th><th>Frozen design</th></tr></thead>
+            <tbody>
+              <tr><td>Repair</td><td>In <code>project_solvency</code>, track lap-aware absolute progress. Before charging a projected corner, stop when that corner starts at or beyond <code>(track.laps + 1) × track.length</code>.</td></tr>
+              <tr><td>Preservation</td><td>Corners before the finish retain the existing cooldown, overage, shortfall, and penalty math. Multi-corner horizons advance absolute progress past each inspected corner.</td></tr>
+              <tr><td>Focused tests</td><td>A next-lap corner contributes zero on the final straight; the same corner remains priced on an earlier lap; and the known final-straight planner state now agrees with the no-future-corner counterfactual.</td></tr>
+              <tr><td>Code estimate</td><td>About 10–20 production lines, 30–60 test lines, and diagnostic/report updates. No agent API or serialized artifact schema change is required.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="experiment">
+        <span class="section-kicker">02 · Post-fix evidence</span>
+        <h2>Repeat the same investigations and preserve both generations of evidence.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Item</th><th>Frozen specification</th></tr></thead>
+            <tbody>
+              <tr><td>Primary hypothesis</td><td>The post-fix T1 run reports zero <code>post_finish_solvency_drag</code> races while all deterministic replay contracts continue to pass. Confidence: high, about 95%.</td></tr>
+              <tr><td>T0 rerun</td><td>Repeat all 1,728 matched races with the original 12 tracks per family, one repeat, seat crossing, seed bands, and 1,800-second cap. Write <code>runs/t0_static_matchup_map_post_t1a.json</code>.</td></tr>
+              <tr><td>T1 rerun</td><td>Select five post-fix repaired-heuristic losses from each of the same 12 T0 strata. Write <code>runs/t1_heuristic_loss_replay_post_t1a.json</code> and separate logs.</td></tr>
+              <tr><td>Manual review</td><td>Read the refreshed 18-log set: one baseline per stratum and six highest remaining anomaly scores. Compare recurring labels with actual choices.</td></tr>
+              <tr><td>New-candidate rule</td><td>Call another low-hanging repair only if a coherent controllable choice appears in at least 20% of losses, spans both opponents and at least two field sizes, and is convincing in multiple complete logs. Broad symptom counts alone do not qualify.</td></tr>
+              <tr><td>Compute</td><td>Expected T0 wall time about seven minutes from the prior 411-second run, with cell-level persistence and a 30-minute cap. T1 should take under one minute with a ten-minute cap.</td></tr>
+              <tr><td>Interpretation boundary</td><td>These are consumed static-development bands. Compare pre/post behavior and identify candidates; do not make a final-strength or human-level claim.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="results">
+        <span class="section-kicker">03 · Results</span>
+        <h2>The defect is gone and the repaired heuristic is materially stronger.</h2>
+        <div class="result-note"><strong>Primary hypothesis passed.</strong> Post-fix T1 reports zero <code>post_finish_solvency_drag</code> races, down from 60/60. The complete T0 rerun also moved the repaired heuristic from 113 to 181 first-place finishes over the same 576 focal races.</div>
+        <div class="config-panel" aria-label="T1a result summary">
+          <div><span>T0 rerun</span><strong>1,728 races<br>36 / 36 cells</strong></div>
+          <div><span>Repaired wins</span><strong>113 → 181<br>+68 firsts</strong></div>
+          <div><span>Mean reward</span><strong>−0.195 → +0.144<br>same coordinates</strong></div>
+          <div><span>T1 defect</span><strong>60 / 60 → 0 / 60<br>18 logs reread</strong></div>
+        </div>
+
+        <h3>T0 comparison</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Repaired focal field</th><th>Pre-fix</th><th>Post-fix</th><th>Interpretation</th></tr></thead>
+            <tbody>
+              <tr><td>Versus weak heuristic, all regimes</td><td>79 / 288 wins<br>reward −0.049</td><td>114 / 288 wins<br>reward +0.213</td><td>Broad improvement across both track families and all field sizes.</td></tr>
+              <tr><td>Versus StaticSearchV1, all regimes</td><td>34 / 288 wins<br>reward −0.341</td><td>67 / 288 wins<br>reward +0.075</td><td>Nearly doubled firsts; the largest gains were on tight tracks.</td></tr>
+              <tr><td>All repaired focal cells</td><td>113 / 576 wins<br>reward −0.195</td><td>181 / 576 wins<br>reward +0.144</td><td>Eleven of twelve cells gained wins; default two-seat versus search fell by one win.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The finish guard lives in the shared move evaluator, so StaticSearchV1 also changed. Search-versus-weak firsts moved from 107/288 to 96/288 while mean placement reward moved from +0.141 to +0.095. The post-fix matrix is therefore a corrected static population, not a clean single-agent ablation. The repaired heuristic is still not universal: several search matchups remain below the field-size chance win rate.</p>
+
+        <h3>Post-fix T1 and manual review</h3>
+        <p>All 60 fresh loss replays reproduced their post-fix T0 place and terminal round through the exact T0 scripted-game seam. The final straight now looks strategically normal in the logs: after the last real corner, the agent commonly shifts through gears 3 and 4 rather than protecting heat for a wrapped corner.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Finding</th><th>Frequency</th><th>Manual interpretation</th></tr></thead>
+            <tbody>
+              <tr><td>Post-finish solvency drag</td><td>0 / 60 races</td><td>Removed. No residual example appeared in the refreshed 18-log set.</td></tr>
+              <tr><td>Stale plan cache</td><td>20 / 60 races</td><td>Usually harmless, but six turns in four losses selected a lower-valued current plan.</td></tr>
+              <tr><td>Harmful stale-cache regret</td><td>4 / 60 races</td><td>Real and understandable, but confined to tight tracks against weak fields at four or six seats.</td></tr>
+              <tr><td>Other broad labels</td><td>Many races</td><td>Under-push, weak-shadow divergence, traffic, and spin labels still overlap reasonable or forced choices; none supplied another coherent repair.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The clearest cache example is <code>tight-weak-4p-t915002-g1511402010-s1</code>, rounds 26–27: an unchanged position/lap/gear/hand-size signature reuses gear 2 after the hand changes. The current planner prefers a zero-speed gear-1 play, but the cached route plays stress cards and spins. Two six-seat losses similarly reuse a gear-2 <code>Upgrade(5)+4</code> plan that the current guaranteed-spin guard marks ineligible.</p>
+        <div class="decision-banner"><strong>Next low-hanging candidate</strong>Add hand identity to the plan-cache signature. This is a small correctness hardening with concrete failures, but it does not pass T1a's broad-strength gate: harmful regret occurred in 6.7% of losses and did not span both opponent styles. Keep it separate from this adopted finish repair.</div>
+      </section>
+
+      <section id="verification">
+        <span class="section-kicker">04 · Verification</span>
+        <h2>The semantic and experiment gates passed.</h2>
+        <div class="verification-panel"><strong>Complete evidence</strong><br>The focused boundary test proves the wrapped corner is ignored only on the final straight and remains priced one lap earlier. The combined Strong/T0/T1/H1 gate passes 49 tests; targeted Ruff and <code>mypy src</code> also pass. The corrected policy changes one old stochastic H1 fixture from one to six spins but still finishes in 23 rounds; its regression assertion now checks the intended finite-recovery invariant rather than an unstable fixed spin count. A one-track 36-cell smoke completed in 33.0 seconds. Full T0 completed in 372.5 seconds after exercising its two-cell resume path; full T1 completed in 12.04 seconds. The production repair is 11 lines in the shared evaluator; diagnostic scope grew only to align T1 with the exact T0 driver and retain ineligible cached plans for audit. The original artifacts remain intact beside <code>runs/t0_static_matchup_map_post_t1a.json</code>, <code>runs/t1_heuristic_loss_replay_post_t1a.json</code>, and <code>runs/t1_heuristic_loss_logs_post_t1a/</code>.</div>
+      </section>
+    </article>
+  </div>
+</main>
+<footer class="hybrid-footer"><strong>Static-agent strength · T1a finish-aware solvency</strong></footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

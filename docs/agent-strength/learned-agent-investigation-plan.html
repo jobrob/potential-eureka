@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Evidence-first plan for investigating the strength of Heat's trained policies.">
+  <title>Learned-agent strength — investigation plan</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Stream L · L0 implemented</span>
+      <h1>Learned-agent strength: understand the training ceiling.</h1>
+      <p class="hero-copy">Investigate whether current PPO policies need more experience, more stable self-play, better information, better targets, or better policy selection before choosing an implementation.</p>
+      <p><a href="S0-investigation-plan.html">Back to the strength-track index</a><br><span class="muted">Started 17 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="Current learned-policy conclusion">
+      <span class="board-label">Current state</span>
+      <strong>Evidence mapped.<br>32K quality is next.</strong>
+      <p>L0 consolidates the existing policy evidence and freezes the minimum live benchmark. Long-scale improvement and human strength remain unmeasured.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#scope">Scope</a>
+      <a href="#state">Current policies</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#unknowns">Unknowns</a>
+      <a href="#investigations">Investigations</a>
+      <a href="L0-learned-strength-map.html">L0 result</a>
+      <a href="#sequence">Starting sequence</a>
+      <a href="#boundary">Boundary</a>
+    </nav>
+    <article class="hybrid-content">
+      <section id="scope">
+        <span class="section-kicker">L01 · Scope</span>
+        <h2>This stream studies policies produced by training.</h2>
+        <p class="lede">Its question is not whether the heuristic or search bot can be hand-improved. It asks why trained policies reach their present level, whether that level rises with scale, and which part of the learning process limits breadth and stability.</p>
+        <div class="decision-banner"><strong>Implementation deferred</strong>No new encoder, action head, reward, auxiliary target, league, optimizer, averaging method, or training campaign is selected here. Investigations must first distinguish scale limitation from algorithmic or representational limitation.</div>
+      </section>
+
+      <section id="state">
+        <span class="section-kicker">L02 · Current policy families</span>
+        <h2>One adopted recipe and two rejected-but-useful leads define the present state.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Policy family</th><th>Current role</th><th>Positive evidence</th><th>Limitation</th></tr></thead>
+            <tbody>
+              <tr><td><strong>G0002</strong><br>five-epoch PPO</td><td>Adopted Direction-A recipe and final selection.</td><td>Three 1M runs passed the untouched multi-ruler final gate; median aggregate reward +0.139 and all runs positive.</td><td>Only 1M nominal transitions per seed; oscillatory checkpoints; no competent-human comparison.</td></tr>
+              <tr><td><strong>G0003</strong><br>fixed anchor</td><td>Selected-skill research lead only.</td><td>B2 development median +0.159 versus G0002 +0.097; all four ruler medians improved.</td><td>One of three seeds regressed and across-seed variation worsened; no untouched final claim.</td></tr>
+              <tr><td><strong>G0004</strong><br>late-checkpoint average</td><td>Post-training combination lead.</td><td>Validation skill increased by +0.1083 and every ruler median improved.</td><td>Missed its stability gate and was not adopted.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The adopted G0002 policy uses the flat 104-value observation, fixed 516-wide masked action head, sparse race reward, current/snapshot self-play, and selected 1M checkpoint. Earlier structured-encoder, dot-product-head, dense-margin, and fixed-anchor alternatives did not earn default status.</p>
+      </section>
+
+      <section id="evidence">
+        <span class="section-kicker">L03 · What the data establishes</span>
+        <h2>Generalization is established; absolute strength and scaling are not.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Untouched G0002 final slice</th><th>Recipe-median placement reward</th><th>Reading</th></tr></thead>
+            <tbody>
+              <tr><td>Weak heuristic</td><td class="metric-good">+0.243</td><td>Basic competence is comfortably established.</td></tr>
+              <tr><td>Repaired heuristic</td><td class="metric-good">+0.231</td><td>Positive, but this ruler is not universally strong.</td></tr>
+              <tr><td>Historical G0002 policy</td><td>+0.051</td><td>Learned-vs-learned advantage is modest.</td></tr>
+              <tr><td>StaticSearchV1</td><td>+0.033</td><td>Near parity and style-sensitive.</td></tr>
+              <tr><td>StaticSearchV1 at six seats</td><td class="metric-bad">−0.022</td><td>The one negative ruler × seat recipe median in the final summary.</td></tr>
+              <tr><td>All four rulers</td><td class="metric-good">+0.139</td><td>Broad useful play across 40 untouched tracks and 2/4/6 seats.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <ul class="open-list">
+          <li><strong>Seed sensitivity remains.</strong><br>Final run aggregates range from +0.089 to +0.181.</li>
+          <li><strong>Checkpoint choice matters.</strong><br>Late policies could regress; averaging improved skill but missed its stated stability goal.</li>
+          <li><strong>The learning curve is short.</strong><br>50k was underpowered and 1M learned; nothing establishes returns beyond 1M.</li>
+          <li><strong>Opponent breadth is limited.</strong><br>Four useful rulers are better than one, but still do not establish exploitability or human strength.</li>
+        </ul>
+      </section>
+
+      <section id="unknowns">
+        <span class="section-kicker">L04 · Blocking unknowns</span>
+        <h2>Several incompatible explanations still fit the same scores.</h2>
+        <ul class="open-list">
+          <li><strong>Scale.</strong><br>Does the same recipe improve at 3M, 10M, and later milestones, or cycle faster?</li>
+          <li><strong>Local decisions.</strong><br>Are losses driven by repeatable tactical errors or noisy long-horizon outcomes?</li>
+          <li><strong>Self-play population.</strong><br>Does current/snapshot play forget styles or converge to exploitable conventions?</li>
+          <li><strong>Representation.</strong><br>Does the flat/masked policy underuse private hand, traffic, opponent, or track information?</li>
+          <li><strong>Learning signal.</strong><br>Is terminal placement too delayed or noisy for the hardest decisions?</li>
+          <li><strong>Selection.</strong><br>Can checkpoint choice or combination recover skill reliably without hiding recipe instability?</li>
+          <li><strong>Absolute standard.</strong><br>How far is G0002 from competent humans or a trusted stronger oracle?</li>
+        </ul>
+      </section>
+
+      <section id="investigations">
+        <span class="section-kicker">L05 · Investigation queue</span>
+        <h2>Diagnose the learned process before altering it.</h2>
+        <p>These are indicative scopes, not approved experiments. Each receives a detailed hypothesis, track namespace, compute estimate, logging plan, and stop rule before execution.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>Investigation</th><th>Working hypothesis</th><th>Indicative evidence</th><th>Decision unlocked</th></tr></thead>
+            <tbody>
+              <tr><td><strong><a href="L0-learned-strength-map.html">L0 · Learned strength map</a></strong><br>Implemented</td><td>Map G0002/G0003/G0004 by seed, milestone, ruler, seat, starting position, and track family.</td><td>Supported: selected-policy differences are coherent by ruler but reverse by training seed; checkpoint progress is also non-monotonic.</td><td>28,800 existing multi-ruler races and 24 milestone reports. Historical artifacts cannot recover per-race start or track-family outcomes.</td><td>Use a three-ruler milestone screen and four-ruler V2 promotion gate; design the registered 32K learning-quality comparison next.</td></tr>
+              <tr><td><strong>L1 · Loss replay</strong></td><td>Replay a fixed sample of G0002 losses and classify policy decisions and state context.</td><td>A few recurring tactical or economy failures explain a material share. Medium confidence, ~65%.</td><td>About 100–150 preselected losses across ruler styles and 2/4/6 seats.</td><td>Identify whether inputs, actions, value, opponent modelling, or scale deserves first design.</td></tr>
+              <tr><td><strong>L2 · Track/seat stratification</strong></td><td>Relate learned performance to geometry, congestion, starting seat, and field size.</td><td>Six-seat/search weakness concentrates in traffic-heavy or tight-corner regimes. Medium-high confidence, ~70%.</td><td>Analyze existing cell outcomes before new games.</td><td>Choose distribution/curriculum work versus global policy work.</td></tr>
+              <tr><td><strong>L3 · Decision-quality audit</strong></td><td>Compare policy choices on fixed states with exact short counterfactuals and multiple evaluators.</td><td>Large mistakes recur even when race outcomes are noisy. Medium confidence, ~65%.</td><td>Hundreds of states stratified by phase and L1 category.</td><td>Separate representation/action failure from long-horizon value failure.</td></tr>
+              <tr><td><strong>L4 · Scale curve beyond 1M</strong></td><td>Continue the unchanged recipe through staged milestones with frozen evaluation.</td><td>Some breadth improves, but checkpoint regression remains. Medium confidence, ~60%.</td><td>Existing milestones, then permission-gated 3M and 10M rungs before long training.</td><td>Decide whether Direction D scale is itself the primary strength intervention.</td></tr>
+              <tr><td><strong>L5 · Self-play dynamics</strong></td><td>Measure cycling, forgetting, exploitability, entropy, and cross-seed play over checkpoints.</td><td>Opponent mixture shapes breadth more than the aggregate currently reveals. Medium confidence, ~65%.</td><td>Checkpoint cross-play and existing opponent-source histories first.</td><td>Decide whether league/population/current-policy work deserves design.</td></tr>
+              <tr><td><strong>L6 · Representation sensitivity</strong></td><td>Probe how decisions change under controlled observation and legal-action perturbations.</td><td>Some private-hand, traffic, or track fields are underused. Medium-low confidence, ~50%.</td><td>Counterfactual observation pairs and logit/value sensitivity; no new model initially.</td><td>Decide whether to revisit structured encoding or legal-action scoring.</td></tr>
+              <tr><td><strong>L7 · Learning-signal audit</strong></td><td>Measure balance, predictability, and decision relevance of candidate dense targets.</td><td>At least one target supplies earlier useful signal than final placement. Medium confidence, ~60%.</td><td>Offline labels from exact traces before adding any head.</td><td>Select at most one reward/auxiliary treatment for a controlled design.</td></tr>
+              <tr><td><strong>L8 · Policy combination</strong></td><td>Compare checkpoint selection, within-run averaging, cross-seed combination, ensemble, and distillation evidence.</td><td>Within-run averaging can recover skill; naive cross-seed merging is unreliable. Medium confidence, ~65%.</td><td>Existing G0002/G0004 artifacts and a small matched development matrix.</td><td>Determine whether combination is a strength tool or only a diagnostic.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="sequence">
+        <span class="section-kicker">L06 · Starting order</span>
+        <h2>Begin with L0 and L1; let their evidence choose the next branch.</h2>
+        <ol class="step-line" aria-label="Learned-agent sequence">
+          <li><strong>L0</strong><br>consolidate current policy evidence</li>
+          <li><strong>L1</strong><br>replay and classify losses</li>
+          <li><strong>L2/L3</strong><br>localize regime and decision errors</li>
+          <li><strong>Choose</strong><br>scale, stability, inputs, targets, or selection</li>
+        </ol>
+      </section>
+
+      <section id="boundary">
+        <span class="section-kicker">L07 · Boundary</span>
+        <h2>L0 is complete; no learned-policy experiment is authorized yet.</h2>
+        <div class="verification-panel"><strong>Status: L0 evidence consolidated.</strong><br>The <a href="L0-learned-strength-map.html">L0 report</a> freezes the minimum live benchmark and identifies historical coverage gaps. The next implementation-ready artifact is the registered 32K learning-quality comparison design. Any non-smoke change capable of altering learned weights receives a new registered <code>G####</code> before compute. The A8 untouched final band remains historical and is never reused for tuning.</div>
+      </section>
+    </article>
+  </div>
+</main>
+<footer class="hybrid-footer">Learned-agent strength · diagnose training before changing training</footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

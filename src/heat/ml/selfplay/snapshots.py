@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import copy
 from collections import deque
-from typing import cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -104,6 +105,21 @@ class SnapshotAgent(BaseAgent):
         ).unsqueeze(0)
         action_t, _logp, _value, _entropy = self._policy.act(obs_t, mask_t)
         return decode_legal_action(decision, state, int(action_t.item()))
+
+    def export_state(self) -> dict[str, Any]:
+        """Return the immutable label and CPU policy tensors needed to resume."""
+        return {
+            "name": self.name,
+            "policy": {
+                key: value.detach().cpu().clone()
+                for key, value in self._policy.state_dict().items()
+            },
+        }
+
+    @property
+    def policy(self) -> PPOPolicy:
+        """Expose the immutable actor-critic to the native batch coordinator."""
+        return self._policy
 
     # ------------------------------------------------------------------
     # BaseAgent interface: rebuild the Decision, delegate to _decide.
@@ -195,6 +211,38 @@ class SnapshotPool:
         if not self._entries:
             raise IndexError("SnapshotPool is empty")
         return self._entries[0]
+
+    def export_state(self) -> dict[str, Any]:
+        """Return an ordered, self-contained representation of the pool."""
+        return {
+            "capacity": self.capacity,
+            "entries": [entry.export_state() for entry in self._entries],
+        }
+
+    def restore_state(
+        self,
+        state: dict[str, Any],
+        policy_factory: Callable[[], PPOPolicy],
+    ) -> None:
+        """Replace the pool with validated ordered snapshots from a checkpoint."""
+        if state.get("capacity") != self.capacity:
+            raise ValueError(
+                "snapshot pool capacity does not match the resolved recipe"
+            )
+        entries = state.get("entries")
+        if not isinstance(entries, list) or len(entries) > self.capacity:
+            raise ValueError("invalid snapshot pool entries")
+        restored: deque[SnapshotAgent] = deque(maxlen=self.capacity)
+        for item in entries:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise ValueError("invalid snapshot pool entry metadata")
+            policy_state = item.get("policy")
+            if not isinstance(policy_state, dict):
+                raise ValueError("invalid snapshot pool policy state")
+            policy = policy_factory()
+            policy.load_state_dict(policy_state)
+            restored.append(SnapshotAgent(policy, name=item["name"]))
+        self._entries = restored
 
     def __len__(self) -> int:
         return len(self._entries)

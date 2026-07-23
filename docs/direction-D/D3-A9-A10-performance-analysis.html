@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Direction D3 A9-A10 performance analysis</title>
+  <style>
+    :root { color-scheme:light; --ink:#17212b; --muted:#526170; --line:#d7dee5; --panel:#f6f8fa; --good:#0b6b3a; --warn:#8a5a00; --accent:#2457a6; }
+    body { margin:0; font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:1000px; margin:auto; padding:40px 24px 64px; }
+    h1 { font-size:clamp(2rem,5vw,3.35rem); line-height:1.05; margin:.25rem 0 1rem; }
+    h2 { margin-top:2.3rem; font-size:1.45rem; }
+    h3 { margin-top:1.6rem; }
+    .status { color:var(--good); font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
+    .lede { font-size:1.15rem; max-width:820px; }
+    .banner,.card { border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin:18px 0; background:var(--panel); }
+    .banner { border-left:5px solid var(--good); }
+    .warning { border-left:5px solid var(--warn); }
+    table { width:100%; border-collapse:collapse; margin:14px 0; }
+    th,td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:10px 8px; }
+    th { font-size:.83rem; text-transform:uppercase; color:var(--muted); }
+    code { font-family:ui-monospace,"Cascadia Code",monospace; }
+    .muted { color:var(--muted); }
+    .number { white-space:nowrap; font-weight:700; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="status">Replacement one-hour soak passes - 23 July 2026</p>
+  <h1>The diagnosed 48-slot, Torch-8 fix sustains 5,876/s.</h1>
+  <p class="lede">Manifest-v2 now replaces finished games while collection remains open, credits the predicted unfinished rows already in active games, and then drains every admitted game before PPO. The selected 32-slot, 32,768-row configuration sustained 5,308 trained transitions/s with 0.33% spread and 13.6% total overshoot.</p>
+
+  <div class="banner"><strong>Decision: pass the A10 operational gate and adopt 48 slots, capacity 288, and Torch 8/2 for the native recipe.</strong> The replacement sustained 5,875.53/s for one hour with 98.84% minimum-to-median stability, stable CPU performance and memory, no stall, and a valid checkpoint.</div>
+
+  <div class="banner warning"><strong>Training-recipe caveat:</strong> the confirmed rate uses <code>n_steps=32,768</code>, so PPO updates happen less often and over larger rollout batches than in the earlier arm. This is not learning-equivalent to the frozen smaller-rollout recipe. It requires a new immutable policy generation and bounded learning-quality comparison before campaign use.</div>
+
+  <h2>What changed the decision</h2>
+  <table>
+    <thead><tr><th>Configuration</th><th>Trained rate</th><th>Spread</th><th>Interpretation</th></tr></thead>
+    <tbody>
+      <tr><td>12 slots, 8,192 rows</td><td class="number">3,638/s</td><td>0.14%</td><td>Original stop result.</td></tr>
+      <tr><td>24 slots, 16,384 rows</td><td class="number">4,146/s</td><td>0.43%</td><td>Three-repeat confirmation; 4,000/s continuation gate passes.</td></tr>
+      <tr><td>Refill, 24 slots, 16,384 rows</td><td class="number">4,973/s</td><td>0.76%</td><td>Faster, but just below adoption.</td></tr>
+      <tr><td>Refill, 32 slots, 16,384 rows, reserve 1.00</td><td class="number">5,078/s</td><td>0.99%</td><td>Rate passes, but total overshoot is 43.7%.</td></tr>
+      <tr><td><strong>Refill, 32 slots, 32,768 rows, reserve 1.30</strong></td><td class="number"><strong>5,308/s</strong></td><td><strong>0.33%</strong></td><td>Selected balance: rate passes and overshoot falls to 13.6%.</td></tr>
+      <tr><td><strong>Adopted operations: 48 slots, 32,768 rows, Torch 8/2</strong></td><td class="number"><strong>5,876/s over 1 h</strong></td><td>98.84% minimum/median</td><td>Passes every one-hour operational gate.</td></tr>
+    </tbody>
+  </table>
+  <p>The selected arm is 45.9% faster than the original 3,638/s result, 3.55x the D0 scalar baseline, and projects about 825 million transitions in 48 hours at 90% useful uptime. It clears the safer 800-million engineering target.</p>
+
+  <h2>The one-hour result changes the decision</h2>
+  <table>
+    <thead><tr><th>Measure</th><th>Result</th><th>Gate</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr><td>Duration</td><td class="number">3,600.20 s</td><td>At least one hour</td><td>Pass</td></tr>
+      <tr><td>Trained rows</td><td class="number">16,802,559</td><td>Actual rows only</td><td>Receipt</td></tr>
+      <tr><td>Sustained trained rate</td><td class="number">4,667/s</td><td>Adopt at 5,000/s</td><td>Fail</td></tr>
+      <tr><td>Six-block stability</td><td>3,989/s minimum; 4,816/s median; 82.83%</td><td>Minimum at least 90% of median</td><td>Fail</td></tr>
+      <tr><td>Progress</td><td>482 updates; 12.36 s longest; no 60 s stall</td><td>No stall</td><td>Pass</td></tr>
+      <tr><td>Checkpoint</td><td>SHA-256 and complete-state load verified at update 482</td><td>Valid exact-resume boundary</td><td>Pass</td></tr>
+      <tr><td>Memory and clocks</td><td>431.5 MiB final; 817.4 MiB transient peak; early 4,201 MHz</td><td>Full retained sample series</td><td>Not scored after reporter failure</td></tr>
+    </tbody>
+  </table>
+  <p>The observed sustained rate projects about 726 million transitions in 48 hours at 90% useful uptime. That remains above the original 600-million minimum, but misses the safer 800-million target and the explicit adoption rule.</p>
+  <p>The slow block affected rollout, inference, and PPO work together. Durable CPU telemetry then reproduced the slowdown without a clock collapse or Windows execution-speed throttling. Historical source splitting showed the mature workload was half snapshot iterations: current-policy iterations averaged 5,196/s, while snapshot iterations averaged 4,245/s with smaller batches and roughly twice the inference cost per row. The main causes are mixed-policy batch fragmentation and insufficient Torch CPU capacity, not one isolated native rule path.</p>
+
+  <h2>Where the confirmed 21.40 seconds goes</h2>
+  <table>
+    <thead><tr><th>Area</th><th>Median time</th><th>Share</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Policy coordination and inference</td><td class="number">4.39 s</td><td>20.5%</td><td>Refill more than halved this cost relative to the pre-refill arm.</td></tr>
+      <tr><td>Other native rollout work</td><td class="number">3.89 s</td><td>18.1%</td><td>Rules, pybind crossings, observations, masks, rewards, and admission.</td></tr>
+      <tr><td>PPO update</td><td class="number">12.19 s</td><td>57.0%</td><td>Now the clear ceiling; further large changes would affect the learning recipe.</td></tr>
+      <tr><td>Preparation and fixed overhead</td><td class="number">0.93 s</td><td>4.3%</td><td>Not a priority.</td></tr>
+    </tbody>
+  </table>
+  <p>The selected repeat trained 113,590 actual rows in about 21.40 seconds. The throughput target is met without relying on profiler-inflated timing or requested-row counts.</p>
+
+  <h2>The implemented fix</h2>
+  <div class="card">
+    <p><code>NativeCollector.collect()</code> now estimates unfinished rows in every active game. If those rows are insufficient to reach the target, it admits deterministic replacements into vacant slots. Once the target closes, admission stops and all live games drain under the same frozen policy.</p>
+    <ul>
+      <li>Mean policy batch rose from 6.06 to 17.11 rows.</li>
+      <li>Batch-size-1 calls fell from 30.4% to 15.5%.</li>
+      <li>Calls of size 4 or smaller fell from 63.2% to 32.7%.</li>
+      <li>p50 is now 9, p95 is 48, and the measured maximum is 160 rows.</li>
+    </ul>
+    <p><strong>Overshoot control:</strong> a reserve factor of 1.30 conservatively values unfinished active games. The naive 1.00 formula passed speed but over-admitted by 43.7%; the selected 1.30/32K arm reduces total overshoot to 13.6% while increasing the median rate.</p>
+    <p><strong>Exactness:</strong> repeated manifests remain byte-identical and uninterrupted, one-stop, and two-stop fresh processes share one complete-state digest.</p>
+  </div>
+
+  <h2>Ranked improvements</h2>
+  <table>
+    <thead><tr><th>Priority</th><th>Change</th><th>Likely payoff</th><th>Risk and gate</th></tr></thead>
+    <tbody>
+      <tr><td>Done</td><td><strong>Continuously refill active slots.</strong> Manifest-v2 uses unfinished-row forecasting and reserve 1.30.</td><td>Measured adoption result: 5,308/s.</td><td>Repeated-manifest and fresh-process-resume gates pass.</td></tr>
+      <tr><td>Done - pass</td><td><strong>Repeat the one-hour operational soak.</strong> 48 slots, capacity 288, and Torch 8/2 sustained 5,876/s.</td><td>98.84% stability; all subgates pass.</td><td>Operational performance configuration adopted.</td></tr>
+      <tr><td>1</td><td><strong>Run the learning-quality gate.</strong> Freeze the exact adopted 32K recipe and compare it with the policy baseline.</td><td>Required evidence, not a speed target.</td><td>The larger rollout changes update cadence and learned weights.</td></tr>
+      <tr><td>3</td><td><strong>Simplify exact categorical sampling.</strong> Use inference mode, remove redundant distribution validation, and gather normalized log-probabilities directly.</td><td>Optional 2-4% end to end.</td><td>Only worthwhile if more headroom is desired; exact output gate required.</td></tr>
+      <tr><td>4</td><td><strong>Reuse ready arrays.</strong> Fill preallocated observation, mask, identity, and result buffers rather than rebuilding <code>np.stack</code> plus eight metadata arrays for every dispatch.</td><td>Small: about 1-3% end to end.</td><td>Low semantic risk; add lease-overwrite and capacity tests.</td></tr>
+      <tr><td>5</td><td><strong>Skip observation allocation for forced actions.</strong> Ask native state for the sole legal action before creating a 104-float observation and 516-bit NumPy mask.</td><td>Small, dependent on forced-action share.</td><td>Low semantic risk; differential-test every decision kind.</td></tr>
+      <tr><td>6</td><td><strong>Move live ready/action ownership into NativePool.</strong> This removes repeated Python/pybind control crossings and completes the original architecture.</td><td>Medium ceiling: the non-inference rollout budget is 3.89 s.</td><td>High complexity. Do this only if priorities 1-3 leave a measured gap.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>PPO is the second ceiling</h2>
+  <p>PPO now consumes 12.19 seconds, or 57% of wall time. Increasing the minibatch from 256 to 512 or 1,024 could improve headroom, but it changes gradient updates and therefore the learned policy. The current rate already passes adoption, so do not bundle this into the refill recipe.</p>
+  <p>Before changing the recipe, two exact-oriented ideas are worth measuring: use normalized logits directly for PPO log-probability and entropy calculations, and test a sparse legal-action head that evaluates only legal rows from the existing weights. The sparse head is mathematically equivalent but may change float rounding because it uses different matrix shapes, so it still needs strict output and resume gates.</p>
+
+  <h2>What the diagnosis rejected</h2>
+  <ul>
+    <li><strong>Concurrent live/snapshot forwards:</strong> exact outputs passed, but median speedup was only 1.001x against the predeclared 1.10x gate. The prototype was removed.</li>
+    <li><strong>Thermal or EcoQoS failure:</strong> active-core performance remained stable and process execution-speed throttling was inactive while throughput declined.</li>
+    <li><strong>Native rule kernels:</strong> earlier full-rule measurement was already 7.63x scalar, and current time is dominated by inference and PPO.</li>
+    <li><strong>CUDA immediately:</strong> GPU work remains a separate environment and architecture decision. The native CPU configuration has already passed its one-hour operational gate.</li>
+  </ul>
+
+  <h2>Remaining gates</h2>
+  <p><strong>Operations:</strong> the one-hour gate passes for 48 active slots, capacity 288, <code>n_steps=32,768</code>, reserve 1.30, and <code>--torch-threads 8 --torch-interop-threads 2</code>. The later eight-hour rehearsal remains separately authorized work.</p>
+  <p><strong>Learning:</strong> allocate a new immutable generation for the exact adopted recipe and compare its learning quality with the baseline before a final campaign.</p>
+
+  <p class="muted">Primary evidence: <code>runs/direction_d/d3_a10_native_refill_benchmark.json</code>, <code>d3_a10_native_resume_refill.json</code>, <code>d3_a10_native_soak.json</code>, <code>d3_a10_48x8_confirmation.json</code>, and <code>d3_a10_48x8_soak_1h_20260723.json</code>. See the <a href="D3-A10-soak-results.html">plain-language soak result</a> and <a href="D3-A10-performance-diagnostics.html">diagnostic record</a>.</p>
+</main>
+</body>
+</html>

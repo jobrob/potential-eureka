@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Direction D3 A0-A2 native implementation and gate results.">
+  <title>Direction D3 - A0-A2 native results</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Implemented and passed - 22 July 2026</span>
+      <h1>The first native slice is exact and fast enough to continue.</h1>
+      <p class="hero-copy">A0 established the optional Windows C++ package. A1 proved that compact native state and game randomness preserve the Python engine exactly. A2 then passed 100,157 weighted transitions with no mismatch and ran the matched hard rules slice 5.84 times faster than scalar Python.</p>
+      <p><strong>Direction D3 - chunks A0, A1, and A2</strong><br><span class="muted">Design: <a href="D3-options-A-C-detailed-design.html">options A and C detailed design</a></span></p>
+    </div>
+    <aside class="status-board" aria-label="Decision">
+      <span class="board-label">Decision</span>
+      <strong>CONTINUE to A3 when separately authorized.</strong>
+      <p>The 3x continuation gate passed and the 5x design goal also passed. A3-A10 and option C remain unimplemented.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#result">Plain-English result</a>
+      <a href="#built">What was built</a>
+      <a href="#gates">Gate evidence</a>
+      <a href="#timing">Timing correction</a>
+      <a href="#limits">What remains</a>
+      <a href="#receipts">Receipts</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="result">
+        <span class="section-kicker">01 - Result</span>
+        <h2>A0, A1, and A2 all passed without an engine redesign.</h2>
+        <p class="lede">The difficult rule branches can be expressed as compact ordinary C++ while staying exactly aligned with the Python game. The measured speed is high enough to justify completing the single-game native engine in A3-A5.</p>
+        <div class="hybrid-stats" aria-label="Results summary">
+          <div class="hybrid-stat"><span>Exactness</span><strong>0</strong><small>mismatches in 100,157 transitions</small></div>
+          <div class="hybrid-stat"><span>Games</span><strong>20,032</strong><small>2-6 seats, five weighted modes</small></div>
+          <div class="hybrid-stat"><span>Rule speed</span><strong>5.84x</strong><small>median versus matched scalar</small></div>
+          <div class="hybrid-stat"><span>Decision</span><strong>GO</strong><small>A3 may proceed when authorized</small></div>
+        </div>
+      </section>
+
+      <section id="built">
+        <span class="section-kicker">02 - Implementation</span>
+        <h2>The work stays separate from the normal CPU package.</h2>
+        <ul>
+          <li><strong>A0:</strong> an optional <code>native/</code> package builds <code>heat_native._core</code> with MSVC in release or debug mode. Its opaque pool validates exact NumPy dtype, shape, contiguity, and writeability; exposes a versioned receipt; and releases the GIL around native waits.</li>
+          <li><strong>A1:</strong> fixed-capacity C++ state stores compact players, tracks, card tokens, zones, spin history, and the complete CPython MT19937 state. The test bridge round-trips through the existing D2/D0 semantic oracle.</li>
+          <li><strong>A2:</strong> native code advances cards to the first REACT decision and then handles React/boost movement, traffic, finish, slipstream, corners, heat payment, spin penalties, discard, replenishment, reshuffle, and continuation to the next real decision.</li>
+        </ul>
+        <p>The normal root <code>pyproject.toml</code> and CPU-only install remain compiler-free. Native code is installed separately only when this path is being developed or used.</p>
+      </section>
+
+      <section id="gates">
+        <span class="section-kicker">03 - Gates</span>
+        <h2>Correctness ran before performance.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Chunk</th><th>Required gate</th><th>Observed evidence</th><th>Result</th></tr></thead>
+            <tbody>
+              <tr><td>A0</td><td>Fresh release/debug builds; fixed numeric round-trip; GIL-release smoke.</td><td>Both MSVC variants built. Two focused API tests passed in each build.</td><td><strong>PASS</strong></td></tr>
+              <tr><td>A1</td><td>Exact generated 2-6 seat snapshots; exact Python RNG import/export.</td><td>Five seat-count round-trips plus transient state passed. RNG words, 53-bit floats, variable-width bits, rejection sampling, shuffles, and final state matched CPython 3.12.</td><td><strong>PASS</strong></td></tr>
+              <tr><td>A2 exactness</td><td>At least 100,000 weighted transitions and zero mismatch.</td><td>100,157 transitions, 20,032 games, five modes at about 4,006 games each, zero mismatch; 281.38 seconds.</td><td><strong>PASS</strong></td></tr>
+              <tr><td>A2 speed</td><td>Continue at 3x; 5x design goal.</td><td>Five-repeat medians: scalar 0.012700 s, native 0.002174 s for 1,278 transitions; 5.843x speedup.</td><td><strong>PASS</strong></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="timing">
+        <span class="section-kicker">04 - Measurement correction</span>
+        <h2>One invalid harness result was diagnosed and removed before the final receipt.</h2>
+        <p>The first timing attempt reported 0.032x. Profiling the call path showed that the test-only empty-discard wrapper rebuilt the complete tensor state for every game inside the timed block. That reconstruction is not native rule work and is forbidden from the production boundary. The wrapper now maps discard identities from immutable metadata and performs no state reconstruction.</p>
+        <p>The focused A2 suite passed after that correction. The full 100k correctness campaign was then rerun under the final source identity, followed by a fresh five-repeat benchmark. The authoritative result is 5.843x; the earlier number is retained here only as a transparent rejected measurement.</p>
+      </section>
+
+      <section id="limits">
+        <span class="section-kicker">05 - Boundaries</span>
+        <h2>This is a hard-slice result, not a complete collector.</h2>
+        <ul>
+          <li>A3 must add the remaining explicit single-game phases/program counters; A4 adds native observations, masks, rewards, bootstrap rows, and numeric receipts; A5 proves full races.</li>
+          <li>A6-A10 still own workers, queues, batched inference, trajectories, trainer integration, resume, soak testing, and the real trained-transitions-per-second adoption gate.</li>
+          <li>Observations, legal masks, and event receipts were deliberately not claimed by A2 because the design assigns them to A4.</li>
+          <li>No learned-policy generation, CUDA work, large training campaign, eight-hour rehearsal, or final 48-hour run was started.</li>
+        </ul>
+      </section>
+
+      <section id="receipts">
+        <span class="section-kicker">06 - Receipts</span>
+        <h2>The final exactness and timing artifacts share one source identity.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <tbody>
+              <tr><th>Source identity</th><td><code>c9e80c8711c13fa76718aae3becc4eee0469fed23fc88853981a8d8280bb454d</code></td></tr>
+              <tr><th>Correctness JSON</th><td><code>runs/direction_d/d3_a2_native_differential.json</code></td></tr>
+              <tr><th>Benchmark JSON</th><td><code>runs/direction_d/d3_a2_native_benchmark.json</code></td></tr>
+              <tr><th>Correctness command</th><td><code>.venv\Scripts\python.exe experiments\verify_direction_d3_native.py --transitions 100000 --batch-size 64 --timeout-seconds 3600</code></td></tr>
+              <tr><th>Benchmark command</th><td><code>.venv\Scripts\python.exe experiments\benchmark_direction_d3_native.py --games 256 --warmups 2 --repeats 5 --timeout-seconds 3600</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </article>
+  </div>
+</main>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="T2 design for paired StaticSearchV1 paradox replay and heuristic shadow comparison.">
+  <title>T2 — search-paradox replay</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">T2 complete · 36 exact replays</span>
+      <h1>The search often never sees its best line.</h1>
+      <p class="hero-copy">Across both sides of the paradox, the heuristic prior frequently prunes the candidate that the production rollout would prefer. Raw-progress ties and two-sample instability are real but materially smaller.</p>
+      <p><a href="static-bot-investigation-plan.html">Back to the static-bot plan</a><br><span class="muted">Design and results completed 17 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="T2 current state">
+      <span class="board-label">Current state</span>
+      <strong>Branching/prior first.<br>Leaf work second.</strong>
+      <p>The full-candidate rollout beats the top-six choice on 218 of 577 traced decisions, spanning every pair and both opponent styles.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#question">Question</a>
+      <a href="#design">Frozen design</a>
+      <a href="#trace">Trace contract</a>
+      <a href="#decision">Decision rules</a>
+      <a href="#results">Results</a>
+      <a href="#verification">Verification</a>
+    </nav>
+    <article class="hybrid-content">
+      <section id="question">
+        <span class="section-kicker">T2 · Investigation question</span>
+        <h2>Why can one fixed search policy win over repaired play and lose to weak play?</h2>
+        <p class="lede">The post-T1a T0 map contains exact matched coordinates where StaticSearchV1 finished first against a repaired field and did not finish first against a weak field. T2 replays both sides of those coordinates and records the search calculation, not just the terminal place.</p>
+        <div class="decision-banner"><strong>Primary hypothesis · 70% confidence</strong>The same one-round raw-progress objective creates recognisable errors on both sides of the paradox. Opponent style changes blocking and traffic enough to decide whether those errors are punished; extra depth or more determinizations is not assumed to be the first repair.</div>
+      </section>
+
+      <section id="design">
+        <span class="section-kicker">01 · Frozen design</span>
+        <h2>Use paired paradox coordinates and keep the run diagnostic-only.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Item</th><th>Frozen specification</th></tr></thead>
+            <tbody>
+              <tr><td>Source</td><td>Completed post-T1a artifact <code>runs/t0_static_matchup_map_post_t1a.json</code>.</td></tr>
+              <tr><td>Selection</td><td>For each default/tight × 2/4/6-seat stratum, select three coordinates where search beat the repaired field and lost to the weak field. Stable random sample seed <code>2717</code>: 18 coordinates, replayed against both fields, 36 races.</td></tr>
+              <tr><td>Matching</td><td>Within a pair, retain track seed, game seed, focal starting seat, and field size exactly. Only the homogeneous opponent policy changes.</td></tr>
+              <tr><td>Primary comparisons</td><td>Top-six chosen plan versus the full-candidate rollout argmax; raw-progress ties versus rank/heat outcomes; agreement across two determinizations; and the same search calculation under weak versus repaired traffic.</td></tr>
+              <tr><td>Heuristic shadows</td><td>At every search gear decision, ask fresh frozen weak and repaired heuristic shadows for their joint gear/card plan on a clone. Fresh instances prevent search-trajectory states from contaminating heuristic caches. Surface only semantic mistakes: repeated sampled spins, finish misses, or strict common-seed progress-and-resource dominance by the search plan.</td></tr>
+              <tr><td>Manual review</td><td>Render one paired baseline per stratum plus the highest-scoring unexplained pairs. Read complete paired narratives before naming a causal defect.</td></tr>
+              <tr><td>Code scope</td><td>One diagnostic harness, focused selection/trace/summary tests, and this report. No production agent, evaluator, search configuration, or benchmark band changes.</td></tr>
+              <tr><td>Compute</td><td>Expected under two minutes from T0 timings, with progress after every pair and a hard 600-second cap.</td></tr>
+              <tr><td>Stop rules</td><td>Stop immediately if either replay fails to reproduce its T0 place and terminal round, if a traced production plan differs from an uninstrumented StaticSearchV1 plan on the same state, or when the wall cap is reached.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="trace">
+        <span class="section-kicker">02 · Exact trace contract</span>
+        <h2>Retain enough detail to distinguish the four plausible causes.</h2>
+        <div class="config-panel" aria-label="T2 evidence flow">
+          <div><span>1 · Pair</span><strong>same coordinate<br>two opponent styles</strong></div>
+          <div><span>2 · Trace</span><strong>all candidate priors<br>two exact rollouts</strong></div>
+          <div><span>3 · Shadow</span><strong>weak and repaired<br>joint plans</strong></div>
+          <div><span>4 · Classify</span><strong>prune · leaf · chance<br>model · heuristic</strong></div>
+        </div>
+        <ul class="open-list">
+          <li><strong>Pruning.</strong><br>Score every distinct gear/speed candidate with the production rollout contract after allowing the real top-six choice to control the race.</li>
+          <li><strong>Leaf.</strong><br>For each determinization retain progress, rank, finish state, heat, and spins. Candidate scores use the production per-candidate seeds to reproduce the bot; a second common-seed trace supports fair resource, placement, and heuristic-shadow counterfactuals without inventing a replacement leaf weight.</li>
+          <li><strong>Chance.</strong><br>Keep both determinization rows. Disagreement remains a sampling warning rather than evidence that “more samples” must help.</li>
+          <li><strong>Opponent model.</strong><br>The production rollout always delegates unforced decisions to the weak heuristic. Comparing paired weak and repaired fields tests where this model matches reality and where it does not.</li>
+        </ul>
+      </section>
+
+      <section id="decision">
+        <span class="section-kicker">03 · Decision rules</span>
+        <h2>Choose the first search target from repeated, cross-style evidence.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Repeated evidence</th><th>First target</th></tr></thead>
+            <tbody>
+              <tr><td>Full rollout argmax is regularly outside the prior top six.</td><td>Branching/prior quality.</td></tr>
+              <tr><td>Chosen progress ties are rank- or resource-dominated across both determinizations.</td><td>Leaf evaluation.</td></tr>
+              <tr><td>The two determinizations frequently reverse candidate order without another repeated defect.</td><td>Determinization count or sampling.</td></tr>
+              <tr><td>Errors concentrate only when repaired opponents replace the rollout heuristic.</td><td>Rollout/opponent policy.</td></tr>
+              <tr><td>No coherent signature spans both matchup types.</td><td>Reject the single-bias hypothesis and retain multiple targeted leads.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Heuristic shadow findings do not select a heuristic repair in T2. A surfaced example becomes a later candidate only if it is semantically clear and repeated across opponent styles or field sizes.</p>
+      </section>
+
+      <section id="results">
+        <span class="section-kicker">04 · Results</span>
+        <h2>The narrow leaf hypothesis is rejected; candidate admission is the first target.</h2>
+        <p>All 36 replays reproduced the post-T1a T0 place and terminal round exactly. The traces contain 349 search decisions against weak fields and 228 against repaired fields. Production per-candidate seeds reproduce StaticSearchV1; common-seed counterfactuals support fair semantic comparisons.</p>
+        <div class="hybrid-stats" aria-label="T2 headline evidence">
+          <div class="hybrid-stat"><span>Replays</span><strong>36 / 36</strong><small>exact place and round</small></div>
+          <div class="hybrid-stat"><span>Decisions</span><strong>577</strong><small>all candidates traced</small></div>
+          <div class="hybrid-stat"><span>Pruned better</span><strong>37.8%</strong><small>218 decisions · every pair</small></div>
+          <div class="hybrid-stat"><span>Wall time</span><strong>36.1 s</strong><small>600-second cap</small></div>
+        </div>
+
+        <h3 class="table-title">The same admission defect appears on both sides of the paradox</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Signal</th><th>Weak field</th><th>Repaired field</th><th>Interpretation</th></tr></thead>
+            <tbody>
+              <tr><td>Full rollout best was outside top six</td><td>114 / 349<br><strong>32.7%</strong></td><td>104 / 228<br><strong>45.6%</strong></td><td>Present in both replays of all 18 pairs. First target: prior/branching.</td></tr>
+              <tr><td>Top-six per-sample argmax disagreed</td><td>47 / 349<br>13.5%</td><td>33 / 228<br>14.5%</td><td>Two samples are noisy, but this is smaller than the admission loss.</td></tr>
+              <tr><td>Raw-progress tie lost rank/heat value</td><td>20 / 349<br>5.7%</td><td>11 / 228<br>4.8%</td><td>Leaf blindness is real and spans 16 pairs, but only five pairs show it in both fields.</td></tr>
+              <tr><td>Suboptimal cached search plan reused</td><td>1 / 349</td><td>0 / 228</td><td>A separate small correctness repair, not the paradox explanation.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The missed full-candidate plan had median production-score advantage <strong>2.5 spaces</strong>; 147 misses were at least two spaces and 33 at least five. Its median prior rank was 13 (range 7–26). Fifteen misses across eight tight-track pairs and all 2/4/6-seat sizes were catastrophic under common seeds: the selected top-six plan spun in both traces while the pruned full-best plan did not.</p>
+        <div class="result-note"><strong>Hypothesis verdict: rejected in its narrow form.</strong> A repeated cross-style bias does exist, but it is primarily the <code>move_eval</code> prior/top-six admission seam, not the one-round raw-progress leaf. The rollout-policy mismatch cannot be first because the admission failure appears in every paired weak and repaired replay. More determinizations also cannot be first: only 23 of 577 selected top-six plans (4.0%) lost to another admitted candidate under the common-seed control.</div>
+
+        <h3 class="table-title">Concrete search failure: a safe line is pruned before rollout selection</h3>
+        <p>On tight track <code>915002</code>, two seats, game <code>1511202010</code>, focal seat 1, round 17, search led at lap 2 position 24 with zero heat. The admitted gear-3 speed-12 plan crossed the corner and spun back to position 22 in both common-seed traces, scoring −978. The prior-ranked-13 gear-1 speed-2 plan cleared the same corner without spinning and scored +202. The exact pattern recurred on both opponent styles; this is an admission defect, not an argument for more search depth.</p>
+
+        <h3 class="table-title">Heuristic mistakes surfaced by the common-seed shadows</h3>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Shadow finding</th><th>Frequency</th><th>Manual interpretation</th></tr></thead>
+            <tbody>
+              <tr><td>Weak plan spun in both fixed traces; search did not</td><td>16 decisions across 9 pairs</td><td>Repeated stochastic-risk mistake across both families and 2/4/6 seats.</td></tr>
+              <tr><td>Repaired plan spun in both fixed traces; search did not</td><td>22 decisions across 13 pairs</td><td>The guaranteed-spin guard is not enough for risky Stress choices that are not mathematically certain but fail under both retained samples.</td></tr>
+              <tr><td>Weak/repaired plan missed a finish that search reached</td><td>8 / 3 decisions</td><td>Promising dynamic traffic/react sequencing lead; audit lap/block/boost semantics before calling it a heuristic repair.</td></tr>
+              <tr><td>Search strictly dominated weak/repaired plan</td><td>128 / 148 decisions</td><td>Confirms broad one-round tactical value, but is too broad to define one narrow repair by itself.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><strong>Clear sampled example.</strong> On default track <code>715008</code>, two seats, game <code>1510208000</code>, round 7, the car was at lap 2 position 4 with zero heat. The repaired heuristic chose a Stress card; both common-seed traces resolved speed 2, crossed the corner starting at 4, and spun back to position 3. Search chose the fixed value-1 card, cleared without heat, and retained position 5. This is not proof that every Stress draw spins, but it is a repeated, controllable risk error worth a separate heuristic investigation.</p>
+        <p><strong>Finish-sequencing caution.</strong> Several search-only finishes exploit exact movement, blocking, and the later react phase. For example, on default track <code>715003</code> at lap 1 position 62, the search line was bounced to position 66 and then crossed on a boost, while the faster heuristic line crossed earlier and did not finish that round. Because this depends on lap/block/boost semantics, treat it as a rules/traffic audit lead rather than an immediate heuristic fix.</p>
+
+        <h3 class="table-title">Decision unlocked</h3>
+        <ul class="open-list">
+          <li><strong>First search target: candidate admission.</strong><br>Design a bounded safety-aware prior/top-six experiment. Preserve exact production rollout scoring and test whether safe candidates can enter the six-plan set without widening latency excessively.</li>
+          <li><strong>Second search target: leaf resources.</strong><br>After admission, test a small heat/rank tie-break on the preserved positions; do not start with a broad weight sweep.</li>
+          <li><strong>Separate correctness repair.</strong><br>The search turn signature reused one stale plan at tight two seats: selected score −978 versus current admitted best −389.5. A round/hand-aware cache identity should receive its own semantic test.</li>
+          <li><strong>Heuristic follow-up.</strong><br>Replay the repeated zero/low-heat Stress risks and audit finish sequencing. Do not infer universal superiority from the search shadow alone.</li>
+        </ul>
+      </section>
+
+      <section id="verification">
+        <span class="section-kicker">05 · Verification</span>
+        <h2>The diagnostic reproduced the bot before interpreting it.</h2>
+        <div class="file-grid">
+          <div class="file-card"><a href="../../experiments/diag_t2_search_paradox.py"><code>experiments/diag_t2_search_paradox.py</code></a>Paired selection, production and common-seed traces, fresh heuristic shadows, summaries, persistence, and narratives.</div>
+          <div class="file-card"><a href="../../tests/test_t2_search_paradox.py"><code>tests/test_t2_search_paradox.py</code></a>Balanced pairing, partial-input rejection, and trace/plan equivalence with uninstrumented StaticSearchV1.</div>
+          <div class="file-card"><code>runs/t2_search_paradox_replay.json</code>Ignored machine-readable evidence with all 18 pairs, 36 races, 577 decisions, candidates, samples, and events.</div>
+        </div>
+        <div class="verification-panel"><strong>Observed and verified</strong><br>Four focused T2 tests pass; targeted Ruff is clean. A six-pair smoke reproduced all 12 expected terminal outcomes. The final run reproduced all 36 T0 places and rounds in 36.1 seconds, below the 600-second cap. Twelve complete paired narratives were read: one baseline per family/seat stratum and six highest remaining semantic scores. No production bot or evaluator was changed.</div>
+      </section>
+    </article>
+  </div>
+</main>
+<footer class="hybrid-footer"><strong>Static-agent strength · T2 search-paradox replay</strong></footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

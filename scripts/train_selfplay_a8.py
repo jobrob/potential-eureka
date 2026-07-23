@@ -22,6 +22,14 @@ from heat.ml.selfplay.policy import PPOPolicy
 from heat.ml.selfplay.snapshots import SnapshotAgent
 
 
+def _positive_int(value: str) -> int:
+    """Parse a strictly positive integer for resource-count options."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
 def _legacy_strong() -> StrongHeuristicAgent:
     """Build the pre-H1 opponent retained for matched S1/S2 measurement."""
     return StrongHeuristicAgent(avoid_certain_spins=False)
@@ -71,9 +79,45 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument(
         "--collector",
-        choices=["scalar", "phase"],
+        choices=["scalar", "phase", "lanes", "native"],
         default="scalar",
-        help="Rollout action collection mode (scalar reference or phase batching).",
+        help="Rollout mode (scalar reference, diagnostics, or D3 native).",
+    )
+    parser.add_argument(
+        "--lane-count",
+        type=int,
+        default=8,
+        help="Independent games used when --collector lanes (default: 8).",
+    )
+    parser.add_argument(
+        "--native-workers",
+        type=int,
+        default=48,
+        help="Native active-game slots/admission helpers (A10 default: 48).",
+    )
+    parser.add_argument(
+        "--native-ready-capacity",
+        type=int,
+        default=288,
+        help="Maximum complete ready rows in one native lease (A10 default: 288).",
+    )
+    parser.add_argument(
+        "--native-refill-reserve-factor",
+        type=float,
+        default=1.3,
+        help="Manifest-v2 unfinished-row reserve multiplier (default: 1.3).",
+    )
+    parser.add_argument(
+        "--torch-threads",
+        type=_positive_int,
+        default=None,
+        help="Override Torch intra-op CPU threads (native default: 8).",
+    )
+    parser.add_argument(
+        "--torch-interop-threads",
+        type=_positive_int,
+        default=None,
+        help="Override Torch inter-op CPU threads (native default: 2).",
     )
     parser.add_argument("--save", type=str, default=None, metavar="PATH")
     parser.add_argument("--checkpoint-dir", type=str, default=None, metavar="DIR")
@@ -103,8 +147,25 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _resolve_torch_threads(args: argparse.Namespace) -> tuple[int | None, int | None]:
+    """Apply the adopted A10 CPU runtime only to native collection."""
+    resolved_torch_threads = args.torch_threads
+    resolved_torch_interop_threads = args.torch_interop_threads
+    if args.collector == "native":
+        resolved_torch_threads = resolved_torch_threads or 8
+        resolved_torch_interop_threads = resolved_torch_interop_threads or 2
+    return resolved_torch_threads, resolved_torch_interop_threads
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    resolved_torch_threads, resolved_torch_interop_threads = (
+        _resolve_torch_threads(args)
+    )
+    if resolved_torch_threads is not None:
+        torch.set_num_threads(resolved_torch_threads)
+    if resolved_torch_interop_threads is not None:
+        torch.set_num_interop_threads(resolved_torch_interop_threads)
     config = A8Config(
         total_timesteps=args.timesteps,
         n_steps=args.n_steps,
@@ -116,6 +177,10 @@ def main(argv: list[str] | None = None) -> int:
         track_base_seed=args.track_base_seed,
         anchor_share=args.anchor_share,
         collector_mode=args.collector,
+        lane_count=args.lane_count,
+        native_workers=args.native_workers,
+        native_ready_capacity=args.native_ready_capacity,
+        native_refill_reserve_factor=args.native_refill_reserve_factor,
         device=args.device,
         head="masked",
         encoder="flat",
@@ -166,7 +231,9 @@ def main(argv: list[str] | None = None) -> int:
         "A8 full-rules pilot: "
         f"timesteps={args.timesteps} n_steps={args.n_steps} seats={args.seats} "
         f"training_namespace={args.track_base_seed} seed={args.seed} "
-        f"collector={args.collector}"
+        f"collector={args.collector} lane_count={args.lane_count} "
+        f"torch_threads={torch.get_num_threads()} "
+        f"torch_interop_threads={torch.get_num_interop_threads()}"
     )
     started = time.perf_counter()
     checkpoint_paths: list[tuple[int, Path]] = []
@@ -244,10 +311,12 @@ def main(argv: list[str] | None = None) -> int:
         phase_rows = sum(record["available_phase_rows"] for record in records)
         phase_count = sum(record["available_phase_count"] for record in records)
         calls = sum(record["action_inference_calls"] for record in records)
+        histogram_limit = max(6, args.lane_count if args.collector == "lanes" else 1)
         batch_histogram = {
             size: int(sum(record[f"action_batch_{size}_calls"] for record in records))
-            for size in range(1, 7)
+            for size in range(1, histogram_limit + 1)
         }
+        drain_rows = sum(record["drain_action_rows"] for record in records)
         print(
             "collector summary: "
             f"simultaneous_share="
@@ -255,6 +324,8 @@ def main(argv: list[str] | None = None) -> int:
             f"mean_available_batch="
             f"{(phase_rows / phase_count if phase_count else 0.0):.2f} "
             f"action_calls={int(calls)} live_rows={int(live_decisions)} "
+            f"mean_action_batch={(live_decisions / calls if calls else 0.0):.2f} "
+            f"drain_rows={int(drain_rows)} "
             f"batch_histogram={batch_histogram}",
             flush=True,
         )

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Direction D3 A10 replacement one-hour soak result</title>
+  <style>
+    :root { color-scheme:light; --ink:#17212b; --muted:#526170; --line:#d7dee5; --panel:#f6f8fa; --good:#0b6b3a; --warn:#8a5a00; --accent:#2457a6; --bad:#a12622; }
+    body { margin:0; font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:1000px; margin:auto; padding:40px 24px 64px; }
+    h1 { font-size:clamp(2rem,5vw,3.35rem); line-height:1.05; margin:.25rem 0 1rem; }
+    h2 { margin-top:2.3rem; font-size:1.45rem; }
+    h3 { margin-top:1.6rem; }
+    .status { color:var(--good); font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
+    .lede { font-size:1.15rem; max-width:820px; }
+    .banner,.card { border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin:18px 0; background:var(--panel); }
+    .banner { border-left:5px solid var(--warn); }
+    .good { border-left:5px solid var(--good); }
+    table { width:100%; border-collapse:collapse; margin:14px 0; }
+    th,td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:10px 8px; }
+    th { font-size:.83rem; text-transform:uppercase; color:var(--muted); }
+    code { font-family:ui-monospace,"Cascadia Code",monospace; }
+    .pass { color:var(--good); font-weight:700; }
+    .fail { color:var(--bad); font-weight:700; }
+    .muted { color:var(--muted); }
+    .number { white-space:nowrap; font-weight:700; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="status">Replacement one-hour soak passes every gate - 23 July 2026</p>
+  <h1>The 48-slot, Torch-8 configuration is operationally ready.</h1>
+  <p class="lede">The replacement configuration trained 21.18 million real transitions in 3,605.28 seconds at 5,875.53/s. Its slowest sixth was 98.84% of the median, and duration, throughput, stability, progress, memory, CPU performance, and checkpoint gates all passed.</p>
+
+  <div class="banner good"><strong>Decision: pass the A10 operational gate and adopt this native performance configuration.</strong> Native-specific trainer defaults now resolve to 48/288 and Torch 8/2; scalar training remains unchanged. This does not authorize the separate learning-quality campaign or eight-hour rehearsal.</div>
+
+  <h2>Replacement one-hour receipt</h2>
+  <div class="card good"><code>collector=native, active slots=48, ready capacity=288, n_steps=32,768, refill reserve=1.30, Torch threads=8/2, PPO batch=256, epochs=5, hidden=256x256</code></div>
+  <table>
+    <thead><tr><th>Gate</th><th>Result</th><th>Decision</th></tr></thead>
+    <tbody>
+      <tr><td>One-hour duration</td><td class="number">3,605.28 seconds</td><td class="pass">Pass</td></tr>
+      <tr><td>Sustained trained rate</td><td>5,875.53/s; 21,182,927 actual rows</td><td class="pass">Pass: need 5,000/s</td></tr>
+      <tr><td>Six-window stability</td><td>5,806.34/s minimum; 5,874.56/s median; 98.84%</td><td class="pass">Pass: need at least 90%</td></tr>
+      <tr><td>Forward progress</td><td>616 PPO updates; zero recorded stalls</td><td class="pass">Pass</td></tr>
+      <tr><td>Memory</td><td>21.1 MiB / 5.05% post-warm-up growth; transient checkpoint peaks recovered</td><td class="pass">Pass</td></tr>
+      <tr><td>CPU performance</td><td>Late/early ratio 99.26%; process execution-speed throttling inactive</td><td class="pass">Pass</td></tr>
+      <tr><td>Safe checkpoint</td><td>Update 616 independently reloaded through SHA, recipe, source, and complete-state checks</td><td class="pass">Pass</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Original one-hour receipt</h2>
+  <div class="card"><code>collector=native, active slots=32, ready capacity=192, n_steps=32,768, refill reserve=1.30, Torch threads=2/2, PPO batch=256, epochs=5, hidden=256x256</code></div>
+  <table>
+    <thead><tr><th>Gate</th><th>Result</th><th>Decision</th></tr></thead>
+    <tbody>
+      <tr><td>One-hour duration</td><td class="number">3,600.20 seconds</td><td class="pass">Pass</td></tr>
+      <tr><td>Sustained trained rate</td><td>4,667.12/s; 725.8M projected rows in 48 h at 90% uptime</td><td class="fail">Fail: need 5,000/s</td></tr>
+      <tr><td>Stability</td><td>3,988.74/s minimum block; 4,815.52/s median; 82.83%</td><td class="fail">Fail: need at least 90%</td></tr>
+      <tr><td>Forward progress</td><td>482 PPO updates; 12.36 s longest; no recorded 60 s stall</td><td class="pass">Pass</td></tr>
+      <tr><td>Safe checkpoint</td><td>Update 482 loaded through SHA, recipe, source, and complete-state checks</td><td class="pass">Pass</td></tr>
+    </tbody>
+  </table>
+
+  <h2>What the diagnostics found</h2>
+  <p>Snapshot iterations were the first repeatable logical penalty. They averaged 4,245/s versus 5,196/s for current-policy iterations. Their action batches averaged 16.07 rows rather than 26.87, and inference cost was about twice as high per row. This explains why a three-iteration startup benchmark looked better than the mature 50% snapshot workload.</p>
+  <p>It was not a thermal or Windows power-throttling failure. During the continuous diagnostic, active-core performance stayed around 103-108% of nominal and Windows reported no execution-speed throttling, even as throughput dropped. Rollout, policy inference, and PPO update costs all rose, which points to insufficient CPU parallelism plus mixed-policy batch fragmentation rather than one bad native rule kernel.</p>
+  <table>
+    <thead><tr><th>Diagnostic</th><th>Measured result</th><th>Conclusion</th></tr></thead>
+    <tbody>
+      <tr><td>Historical soak split by opponent</td><td>Current 5,196/s; snapshot 4,245/s</td><td>Snapshot batches are the persistent slow path.</td></tr>
+      <tr><td>Concurrent current/snapshot forwards</td><td>1.001x median; exact output</td><td>Rejected: below the predeclared 1.10x gate.</td></tr>
+      <tr><td>32 slots, Torch 2, 10 min</td><td>3,336/s; stable CPU performance counters</td><td>Reproduced sustained slowdown without clock collapse.</td></tr>
+      <tr><td>32 slots, Torch 4, 5 min</td><td>3,992/s</td><td>More PPO CPU capacity helps.</td></tr>
+      <tr><td>32 slots, Torch 8, 5 min</td><td>4,713/s</td><td>Best bounded thread arm.</td></tr>
+      <tr><td>48 slots versus 32 after snapshot warm-up</td><td>5,127/s versus 4,995/s</td><td>Small 2.64% gain alone; useful with eight threads.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Replacement candidate selection</h2>
+  <div class="card good"><code>collector=native, active slots=48, ready capacity=288, n_steps=32,768, refill reserve=1.30, Torch threads=8/2</code></div>
+  <table>
+    <thead><tr><th>Gate</th><th>Ten-minute result</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr><td>Sustained trained rate</td><td class="number">5,266.42/s; 3,179,192 rows</td><td class="pass">Pass</td></tr>
+      <tr><td>Six-window stability</td><td>4,822.26/s minimum; 5,231.35/s median; 92.18%</td><td class="pass">Pass</td></tr>
+      <tr><td>Progress</td><td>89 completed PPO updates; no 90 s stall</td><td class="pass">Pass</td></tr>
+      <tr><td>Memory</td><td>12.6 MiB post-warm-up growth; 3.16%</td><td class="pass">Pass</td></tr>
+      <tr><td>CPU performance</td><td>Late/early active-core performance ratio 99.02%</td><td class="pass">Pass</td></tr>
+      <tr><td>Safe checkpoint</td><td>SHA-256 and complete-state digest verified at update 89</td><td class="pass">Pass</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Remaining decisions</h2>
+  <p>The operational performance gate is now complete. The separate 32K learning-quality gate is still required because rollout size and runtime configuration form part of the learned-policy recipe. The eight-hour rehearsal also remains separately authorized work; neither it nor a registered campaign was started by this soak.</p>
+
+  <p class="muted">Primary pass receipt: <code>runs/direction_d/d3_a10_48x8_soak_1h_20260723.json</code>. Checkpoint SHA-256: <code>a3c22fd4ebcdda4addf062cc0936573a9aeb234b5efe206d8cced7e016ca532f</code>. Complete-state digest: <code>3a0926006d34b3c8996d040468cd611e9430462b2897498917bcfc0e816f1aac</code>. See the <a href="D3-A10-performance-diagnostics.html">full diagnostic record</a>.</p>
+</main>
+</body>
+</html>

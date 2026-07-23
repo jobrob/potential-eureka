@@ -82,7 +82,7 @@ from heat.ml.opponents import opponent_action
 #: Turn signature: identifies the planning context so a cached plan is only
 #: reused within the same turn for the same player. Mirrors the strong
 #: heuristic's ``_TurnSig``.
-_TurnSig = tuple[int, int, int, int, int]
+_TurnSig = tuple[int, ...]
 
 #: Default penalty (in spaces) charged per spin-out observed in the rollout's
 #: *later* rounds (rollout-policy-driven). Sized comparably to

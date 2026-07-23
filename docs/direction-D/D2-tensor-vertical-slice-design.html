@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Results from Direction D2's exact tensor slice and the gated D2-R compiled-numeric redesign.">
+  <title>Direction D2 - exact tensor slice and compiled redesign</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">D2-R stopped after exact R2 missed the CPU speed gate - 20 July 2026</span>
+      <h1>D2: turn the exact slice into one compiled numeric step.</h1>
+      <p class="hero-copy">The first D2 implementation proved exactness but ran about nine times slower than scalar. D2-R proved that a compiled common core can be fast, then stopped when the complete non-reshuffle rules fell to 0.839x scalar speed. Exact RNG work was not started.</p>
+      <p><strong>Direction D - implementation design</strong><br><span class="muted">Decision source: <a href="D1-next-step-options.html">two ways forward after D1</a></span></p>
+    </div>
+    <aside class="status-board" aria-label="D2 boundary">
+      <span class="board-label">Boundary</span>
+      <strong>Exact implementation retained; expansion stopped.</strong>
+      <p>R0, R1, and R2 are implemented. R2 is exact across 10,240 transitions but too slow, so R3-R6, CUDA training, a full tensor race, and learned-policy work remain unstarted.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#goal">Goal</a>
+      <a href="#shape">Slice shape</a>
+      <a href="#chunks">Chunks</a>
+      <a href="#redesign">D2-R plan</a>
+      <a href="#files">Files</a>
+      <a href="#tests">Correctness</a>
+      <a href="#benchmark">Benchmark</a>
+      <a href="#decision">Decision</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="goal">
+        <span class="section-kicker">01 - Goal</span>
+        <h2>Answer one question before rewriting more rules.</h2>
+        <p class="lede">Can Heat's exact rules run well as batched tensors? D2 should answer this with one complete path through real state, legal actions, random draws, movement, and the next policy decision.</p>
+        <div class="hybrid-stats">
+          <div class="hybrid-stat"><span>Correctness</span><strong>Zero differences</strong><small>legacy engine is the oracle</small></div>
+          <div class="hybrid-stat"><span>Speed target</span><strong>5x kernel</strong><small>continue from 3x</small></div>
+          <div class="hybrid-stat"><span>Training impact</span><strong>None</strong><small>D2 is a shadow path</small></div>
+        </div>
+        <div class="decision-banner">
+          <strong>Simple rule:</strong> correctness comes first. A fast result with one unexplained state, observation, legal-action, reward, or random-draw difference is a failure.
+        </div>
+      </section>
+
+      <section id="shape">
+        <span class="section-kicker">02 - The vertical slice</span>
+        <h2>Start with cards and finish at the first react decision.</h2>
+        <p>The representative slice begins with legal card choices ready for every active seat. It applies those card choices, reveals speed, moves the cars, applies automatic adrenaline, and stops when the first real react decision is ready.</p>
+        <pre><code>batched game states
+        |
+  apply chosen cards
+        |
+ reveal speed and move
+        |
+ automatic adrenaline
+        |
+first REACT observation + legal mask</code></pre>
+        <p>This slice is useful because it touches private hands, card state, random stress draws, track geometry, traffic, movement, turn order, observations, and legal actions. It is large enough to teach us whether tensors fit the game, but much smaller than a full race.</p>
+        <p>Gear selection is implemented first as a simpler proving step. The cards-to-react slice is the real D2 result.</p>
+      </section>
+
+      <section id="chunks">
+        <span class="section-kicker">03 - Work chunks</span>
+        <h2>Six chunks, each able to stop the project safely.</h2>
+
+        <h3>Chunk 1 - Tensor state and bridge - implemented</h3>
+        <p>Create fixed-shape tensors for a batch of games: players, hands, decks, heat, positions, laps, tracks, corners, phases, active masks, and stable game identities. Add a test-only bridge that converts a legacy <code>GameState</code> into tensor state and back into a comparable semantic snapshot.</p>
+        <ul>
+          <li><strong>Gate:</strong> round-trip snapshots have zero differences across 2-6 seats and generated tracks.</li>
+          <li><strong>Estimate:</strong> 300-450 lines, 1-2 working days.</li>
+        </ul>
+        <div class="result-note">
+          <strong>Chunk 1 PASS - 20 July 2026.</strong> Fixed tensors now preserve every field in the D0 semantic oracle, including ordered card identities, transient turn state, spin history, turn order, the stress counter, and the complete Python random state. Nine focused tests pass: exact generated-track round trips for 2-6 seats, capacity failures without clipping, repeat packing, batch sizes 1/8/32/256, lane reorder/add/remove independence, an early-finished lane, and tensor save/reload. The implementation is about 800 source lines rather than the 300-450 estimate because the estimate did not account for the complete D0 oracle and random-state bridge. This is contained bridge/state work; no rule-kernel scope has been pulled forward.
+        </div>
+
+        <h3>Chunk 2 - Observations and legal masks - implemented</h3>
+        <p>Build observations and legal-action masks directly from tensor state. Start with gear and card decisions. Compare every row with the existing encoder and action codec.</p>
+        <ul>
+          <li><strong>Gate:</strong> observations and masks are exactly equal on the frozen D0 fixtures and new randomized states.</li>
+          <li><strong>Estimate:</strong> 200-350 lines, about 1 working day.</li>
+        </ul>
+        <div class="result-note">
+          <strong>Chunk 2 PASS - 20 July 2026.</strong> The tensor path now builds all 104 observation values and all 516 GEAR/CARDS mask bits directly from batched state. It shares only the codec's frozen 494-row card-multiset enumeration; it does not reconstruct Python game objects or call the legacy encoder, rule helpers, or mask builder. Exact array equality passes at the D0 coordinates for 2-6 seats, through three seeded rounds on five generated tracks, for forced-Heat and empty-hand branches, at batch sizes 1/8/32/256, and after lane reordering with different neighbours. The implementation is about 500 source lines rather than the 200-350 estimate because the estimate did not include all 104 existing feature branches and the exact forced-card codec cases. Chunks 3-6 remain unchanged in scope.
+        </div>
+
+        <h3>Chunk 3 - Exact gear phase - implemented</h3>
+        <p>Apply a batch of chosen gear actions with masks instead of looping through Python player objects. Update gear and heat fields and emit the next card decisions.</p>
+        <ul>
+          <li><strong>Gate:</strong> state, events, observations, and card legal masks match the legacy engine after every gear phase.</li>
+          <li><strong>Estimate:</strong> 200-350 lines, 1-2 working days.</li>
+        </ul>
+        <div class="result-note">
+          <strong>Chunk 3 PASS - 20 July 2026.</strong> The functional tensor kernel now validates one legal gear choice for every active seat, applies paid Heat from the front of the Heat pile, preserves forced gear 1 for spun cars, emits exact ordered events, and returns the next CARDS rows. Readable 2/4/6-seat fixtures cover paid Heat, spin, and an already-finished seat. A 256-game campaign compared 1,022 gear transitions with the scalar engine and found zero state, event, observation, or legal-mask differences, including after reversing lane order. The kernel and shared result types are about 250 source lines, within the estimate.
+        </div>
+
+        <h3>Chunk 4 - Cards-to-react core kernel - implemented</h3>
+        <p>Implement the real vertical slice: apply cards, resolve stress draws, reveal speed, move cars, apply adrenaline, and stop at the first react decision. Use phase masks so lanes that need different work can stay in one tensor batch.</p>
+        <ul>
+          <li><strong>Gate:</strong> every intermediate semantic snapshot and final react observation matches the legacy engine.</li>
+          <li><strong>Estimate:</strong> 450-700 lines, 2-3 working days.</li>
+        </ul>
+        <div class="result-note">
+          <strong>Chunk 4 core PASS - 20 July 2026.</strong> The tensor path now applies the full simultaneous card choice, consumes explicit recorded stress draws, reveals speed, resolves traffic and lap crossing, applies automatic adrenaline, and emits the first REACT row without reconstructing Python game objects. Readable stress/traffic/lap fixtures and a 256-game campaign compared 1,022 card transitions with zero final-state, ordered-event, REACT-observation, or legal-mask differences. Repeating identical inputs, reversing lanes, and running a focal game alone all produce the same result. The implementation is about 750 source lines, slightly above the estimate because explicit draw validation and exact card-identity handling were included here.
+          <br><br><strong>Historical boundary, now closed by Chunk 5:</strong> the Chunk 4 gate deliberately excluded draw-pile reshuffles and lanes whose first car had to replenish. Chunk 5 added both paths without changing the completed Chunk 4 semantics.
+        </div>
+
+        <h3>Chunk 5 - Random draws and wide differential tests - implemented</h3>
+        <p>Make random inputs explicit per game. At first, both engines consume the same recorded draw inputs. Then add the exact per-lane random-state update needed by the tensor path. Run many different tracks, seats, hands, traffic patterns, and stress draws.</p>
+        <ul>
+          <li><strong>Gate:</strong> zero mismatches across at least 100,000 randomized state transitions. Draw counts and next random state also match.</li>
+          <li><strong>Estimate:</strong> 250-400 lines, 1-2 working days.</li>
+        </ul>
+        <div class="result-note">
+          <strong>Chunk 5 PASS - 20 July 2026.</strong> Each tensor lane now restores and advances its own stored Python random state when a deck reshuffles. Stress draws can cross a reshuffle, and phase buckets continue past cluttered or newly finished cars by performing exact replenishment before stopping at the next real REACT decision. The bounded campaign compared 100,349 randomized card-choice transitions across 25,088 games and found zero state, ordered-event, observation, legal-mask, draw-count, or next-random-state differences. It covered 12,032 stress draws, 40,136 replenish draws, and 5,018 lanes whose RNG advanced. Repeat, save/resume, lane reorder, and focal-lane isolation checks also passed. Provenance: <code>.venv\Scripts\python.exe experiments\verify_direction_d2_differential.py --transitions 100000 --batch-size 256 --timeout-seconds 1800 --output runs\direction_d\d2_chunk5_differential.json</code>; source identity <code>4b5592b14242ccd7c6e42a52db8a30428283d263451855c8d2222238bd77f8fa</code>; CPU wall time 146.0 seconds.
+        </div>
+
+        <h3>Chunk 6 - Kernel benchmark and end-to-end estimate - completed, REDESIGN</h3>
+        <p>Benchmark the legacy slice and tensor slice at batch sizes 1, 8, 32, 64, 128, and 256. Report conversion time separately so bridge work cannot hide in the result. Use D1's measured training times to estimate the complete training gain.</p>
+        <ul>
+          <li><strong>Gate:</strong> target at least 5x kernel speed at a useful batch. Continue from 3x only when the measured D1-based end-to-end estimate is at least 1.5x.</li>
+          <li><strong>Estimate:</strong> 150-250 lines and less than one hour of compute after correctness passes.</li>
+        </ul>
+        <div class="result-note">
+          <strong>Chunk 6 REDESIGN - 20 July 2026.</strong> The benchmark completed in 13.1 seconds after accepting the matching zero-mismatch Chunk 5 receipt. The best useful arm was batch 64 at <strong>0.112x</strong> scalar kernel speed: the tensor slice was about 8.9x slower before conversion. Its conversion-inclusive result was 0.034x, and the deliberately optimistic D1-based projection was only 0.252x end to end. Every useful arm was below 0.113x, so neither the 3x continuation floor nor the 5x target was close. Repeat spread was high in some arms, but the gap is too large for that variance to change the decision. Exactness remains a PASS; this representation and eager CPU kernel shape do not earn expansion into D3.
+        </div>
+        <div class="result-note">
+          <strong>Profiling follow-up complete.</strong> The <a href="D2-cpu-profiling-results.html">full CPU profiling report</a> times scalar and tensor work on the same prepared games and shows that the rule kernel is 98.0% of batch-256 slice time. Clone, validation, and observation/mask work are too small to rescue it. Batches 64 and 256 perform roughly 365-367 tensor selects and 148-153 tensor-to-Python scalar reads per game, proving that the lane work remains effectively linear. A full-graph compile probe fails on the first data-dependent validation branch. Close the eager PyTorch design; any retry must use a pure compiled numeric step or a native CPU kernel.
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Batch</th><th>Scalar games/s</th><th>Tensor games/s</th><th>Kernel vs scalar</th><th>With conversion</th></tr></thead>
+            <tbody>
+              <tr><td>1</td><td>14,025</td><td>176</td><td>0.013x</td><td>0.010x</td></tr>
+              <tr><td>8</td><td>13,182</td><td>495</td><td>0.038x</td><td>0.019x</td></tr>
+              <tr><td>32</td><td>13,101</td><td>913</td><td>0.070x</td><td>0.025x</td></tr>
+              <tr><td>64</td><td>8,994</td><td>1,009</td><td>0.112x</td><td>0.034x</td></tr>
+              <tr><td>128</td><td>13,239</td><td>1,066</td><td>0.081x</td><td>0.025x</td></tr>
+              <tr><td>256</td><td>13,757</td><td>1,145</td><td>0.083x</td><td>0.027x</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p><strong>Receipt:</strong> <code>.venv\Scripts\python.exe experiments\benchmark_direction_d2.py --batch-sizes 1 8 32 64 128 256 --warmups 2 --repeats 5 --timeout-seconds 3600 --correctness-artifact runs\direction_d\d2_chunk5_differential.json --output runs\direction_d\d2_chunk6_benchmark.json</code>. Source identity and correctness-source identity both equal <code>4b5592b14242ccd7c6e42a52db8a30428283d263451855c8d2222238bd77f8fa</code>. Tensor state storage was 47,662 bytes per game.</p>
+
+        <div class="decision-banner">
+          <strong>Historical estimate:</strong> the original plan expected about 1,500-2,300 production and focused-test lines over 7-12 working days. Chunks 1-6 are now complete; their correctness result is retained as the oracle for D2-R.
+        </div>
+      </section>
+
+      <section id="redesign">
+        <span class="section-kicker">04 - D2-R redesign</span>
+        <h2>Make the entire hot slice one compiled numeric program.</h2>
+        <p class="lede">Do not tune the eager kernel or merely raise its batch size. Its work is still almost linear per game. Rebuild the cards-to-REACT boundary as a pure function with fixed numeric inputs and outputs, then require <code>torch.compile(fullgraph=True)</code> to capture the whole operation without returning to Python.</p>
+
+        <div class="decision-banner">
+          <strong>Selected route:</strong> retain PyTorch and the exact D2 tensor contract, but replace Python-led lane execution with one compiled, functional step. This follows the successful Pgx and JaxMARL shape while avoiding a second JAX runtime beside the existing PyTorch policy. A native CPU kernel is the hard fallback if the first full-graph feasibility gate fails.
+        </div>
+
+        <pre><code>Python setup and debug boundary
+  actions + fixed numeric state + per-game numeric RNG
+                         |
+                         v
+              torch.compile(fullgraph=True)
+            pure_cards_to_react(state, actions, rng)
+              - fixed-shape masks and updates
+              - static or structured control flow
+              - compact numeric event receipts
+              - observations and legal masks
+                         |
+                         v
+       next state + decisions + receipts + RNG state
+                         |
+             Python materializer for tests and UI only</code></pre>
+
+        <h3>What this copies from working systems</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Observed method</th><th>D2-R equivalent</th><th>Why it matters here</th></tr></thead>
+            <tbody>
+              <tr><td><a href="https://papers.nips.cc/paper_files/paper/2023/file/8f153093758af93861a74a1305dfdc18-Paper-Datasets_and_Benchmarks.pdf">Pgx</a> uses a pure functional game <code>step</code>, then combines <code>jit</code> and <code>vmap</code> over large batches.</td><td>One pure cards-to-REACT function compiled over the batch, with no Python object calls inside it.</td><td>The compiler sees the complete rules calculation and can fuse work instead of launching hundreds of small operations per game.</td></tr>
+              <tr><td><a href="https://papers.neurips.cc/paper_files/paper/2024/file/5aee125f052c90e326dcf6f380df94f6-Paper-Datasets_and_Benchmarks_Track.pdf">JaxMARL</a> compiles the whole environment and shows that a single environment can be slower while 100 or 10,000 environments expose large parallel gains.</td><td>Test the scaling curve through batches 256, 512, and 1,024, but only after the compiled batch-256 affordability gate passes.</td><td>Large batches can amortize fixed work, but increasing the batch cannot rescue the present per-game Python dispatch.</td></tr>
+              <tr><td><a href="https://arxiv.org/abs/2108.10470">Isaac Gym</a> keeps simulation, observations, rewards, and policy work on the same device at thousands of environments.</td><td>Produce observations and legal masks inside the same compiled step. Consider same-device policy inference only in a later permission-gated D4 experiment.</td><td>Avoids rebuilding a host/device or Python boundary between rules and policy.</td></tr>
+              <tr><td><a href="https://envpool.readthedocs.io/en/stable/content/benchmark.html">EnvPool</a> and <a href="https://arxiv.org/abs/2406.12905">PufferLib</a> accelerate branch-heavy environments with native workers and pooling rather than tensorizing Python one lane at a time.</td><td>If the full-graph gate fails, compare a native CPU kernel behind the same D0/D1 interface.</td><td>This is the credible fallback for Heat's branch-heavy exact rules; it is not mixed into D2-R speculatively.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>These examples do not justify a promised speed-up. They identify a shared implementation shape: large batches help after the complete hot operation is compiled or native. The original D2 had tensor storage, but its Python control flow, scalar reads, event objects, and many tiny tensor operations prevented that shape.</p>
+
+        <h3>The compiled boundary</h3>
+        <ul>
+          <li><strong>Fixed numeric state:</strong> preserve the existing bounded tensors for 2-6 seats and generated tracks. Capacity overflow remains an explicit error.</li>
+          <li><strong>Pure functional update:</strong> inputs determine all outputs. No mutation of Python game objects, callbacks, strings, dictionaries, global RNG, or hidden caches.</li>
+          <li><strong>No scalar escape:</strong> no per-lane <code>.item()</code>, <code>.tolist()</code>, Python <code>bool</code>, or Python list construction inside the compiled function.</li>
+          <li><strong>Numeric receipts:</strong> events use fixed integer codes, numeric fields, a fixed-capacity buffer, and a length per game. Canonical Python event objects are reconstructed outside the hot path for parity tests, debugging, and UI consumers.</li>
+          <li><strong>Exact random state:</strong> each lane retains an independent stream. D2-R may not silently replace Python's random sequence with a statistically similar generator.</li>
+          <li><strong>Stable observations:</strong> keep the already-fast tensor observation and mask logic inside the compiled result rather than redesigning its semantics.</li>
+        </ul>
+
+        <h3>D2-R0 - Freeze the compiled ABI and numeric receipts - implemented</h3>
+        <p>Define the exact input/output tensor shapes, dtypes, capacities, and event-code table. Add a materializer that turns numeric receipts back into the current ordered canonical events. Freeze the existing differential and benchmark artifacts as the comparison baseline.</p>
+        <ul>
+          <li><strong>Gate:</strong> numeric receipts materialize into exactly the same events for every focused D2 fixture, including field values and order. Overflow fails clearly.</li>
+          <li><strong>Estimate:</strong> 150-250 production and focused-test lines, about 1 working day.</li>
+        </ul>
+        <div class="result-note"><strong>R0 PASS - 20 July 2026.</strong> Fixed per-game numeric buffers now encode all six cards-to-REACT event types, scalar fields, card payloads, and cross-lane ordering. Cold-path materialization exactly reproduces focused eager D2 event streams, and overflow fails explicitly at the 64-event lane capacity.</div>
+
+        <h3>D2-R1 - Prove full-graph feasibility on the common core - implemented</h3>
+        <p>Implement normal card play, recorded stress inputs, movement, traffic, automatic adrenaline, and final observations/masks as one pure function. Leave reshuffling and difficult replenish cases out of this first affordability screen; they remain rejected inputs, not approximations.</p>
+        <ul>
+          <li><strong>Compile gate:</strong> <code>torch.compile(fullgraph=True)</code> succeeds with zero graph breaks or recompiles for the frozen shapes. The compiled body contains no per-lane Python scalar extraction or event objects.</li>
+          <li><strong>Correctness gate:</strong> zero state, receipt, observation, and mask differences on the supported fixtures and at least 1,000 recorded-input transitions.</li>
+          <li><strong>Speed gate:</strong> at batch 256, run at least 10x faster than the eager D2 kernel and at least 1.0x the scalar engine after warm-up. Also report batches 64 and 256 and compile time separately.</li>
+          <li><strong>Stop rule:</strong> if either compile or speed gate fails, stop the PyTorch redesign and design the native CPU comparison. Do not try to rescue it with a larger batch or CUDA.</li>
+          <li><strong>Estimate:</strong> 300-500 lines, 1-2 working days, less than 30 minutes of bounded measurement.</li>
+        </ul>
+        <div class="result-note"><strong>R1 PASS - 20 July 2026.</strong> The normal/traffic path compiles as one graph with zero graph breaks or same-shape recompiles. It matched 1,280 randomized transitions exactly. At batch 256 it ran 20.049x faster than eager D2 and 2.765x faster than scalar; batch 64 reached 13.915x and 1.619x respectively. Receipt generation, observations, and masks are inside the timed graph. First-call compile time was 6.7 seconds for the cached batch-256 graph.</div>
+
+        <h3>D2-R2 - Complete deterministic rules and compact events - implemented, speed STOP</h3>
+        <p>Add every non-reshuffle cards-to-REACT path, including stress sequences, traffic, crossings, finishes, automatic adrenaline, replenishment continuation, and all compact event receipts.</p>
+        <ul>
+          <li><strong>Gate:</strong> zero differences over at least 10,000 recorded-input transitions; batch order, focal-lane isolation, and save/resume remain exact; the function still compiles as one graph and remains at least as fast as scalar at batch 256.</li>
+          <li><strong>Estimate:</strong> 400-700 lines, 2-3 working days.</li>
+        </ul>
+        <div class="result-note"><strong>R2 exactness PASS; affordability FAIL - 20 July 2026.</strong> A fixed six-turn schedule adds forced-Heat clutter, non-reshuffle stress, finish and clutter replenishment, continuation to the first real REACT seat, and every compact receipt. It matched 10,240 randomized transitions with zero differences, including 604 stress draws and 5,120 replenish draws. Repeat and tensor save/resume checks passed; the batch-256 body remained one graph with zero breaks. Warm execution reached 12,254 games/s versus scalar's 14,603 games/s: <strong>0.839x scalar speed</strong>. This fails the required 1.0x continuation floor, so R3-R6 are not started.</div>
+
+        <h3>D2-R3 - Implement exact compiled RNG and reshuffling - not started</h3>
+        <p>Reproduce Python's stored MT19937 state, integer sampling, draw order, and shuffle behaviour with numeric operations that remain inside the compiled graph. This is the highest-risk chunk because changing the generator or consumption order would change game behaviour.</p>
+        <ul>
+          <li><strong>Gate:</strong> exact draw sequences, deck order, draw counts, and next random state for frozen RNG fixtures and randomized reshuffle cases. Lane reorder, add/remove neighbour, and early-finished-lane checks remain identical.</li>
+          <li><strong>Stop rule:</strong> if exact Python-compatible RNG cannot be compiled cleanly or erases the speed gain, stop and move to the native CPU design; do not adopt an approximate RNG contract inside D2.</li>
+          <li><strong>Estimate:</strong> 350-650 lines, 2-4 working days.</li>
+        </ul>
+
+        <h3>D2-R4 - Repeat the full differential gate</h3>
+        <p>Run the completed compiled slice against the scalar oracle using the same breadth and replay receipts as original D2.</p>
+        <ul>
+          <li><strong>Gate:</strong> zero mismatches across at least 100,000 transitions, including reshuffles, replenishment, batch-size changes, lane reordering, focal isolation, and resume.</li>
+          <li><strong>Estimate:</strong> 150-250 experiment/test lines and less than one hour of CPU compute.</li>
+        </ul>
+
+        <h3>D2-R5 - Measure compiled scaling and training value</h3>
+        <p>Benchmark batches 1, 8, 32, 64, 128, 256, 512, and 1,024. Separate first compile time, warm compiled execution, numeric receipt generation, optional Python event materialization, bridge work, and memory. Use the frozen D1 timing model for the end-to-end estimate.</p>
+        <ul>
+          <li><strong>Adoption gate:</strong> at least 3x scalar kernel speed at a batch the collector can actually supply and at least 1.5x projected end-to-end training. A 5x kernel remains the target.</li>
+          <li><strong>Batch-supply gate:</strong> if the gain exists only at 512 or 1,024, first demonstrate that the collector can sustain that decision batch without D1-style drain losses.</li>
+          <li><strong>Estimate:</strong> 150-250 experiment lines and less than one hour of CPU compute with progress logging and timeouts.</li>
+        </ul>
+
+        <h3>D2-R6 - Prepare, but do not start, the accelerator handoff</h3>
+        <p>Only after D2-R5 passes, write the D4 experiment boundary for batches such as 1,024 and 4,096 with environment state, observations, policy inference, and rollout tensors kept on one device. CUDA installation, GPU measurement, and training remain separate permission-gated work.</p>
+
+        <h3>Main risks and explicit responses</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Risk</th><th>Response in the plan</th></tr></thead>
+            <tbody>
+              <tr><td>Python-compatible RNG is awkward or slow in a compiled graph.</td><td>Defer it until the common core earns continuation, then require exact sequence and state parity. Fall back to native code rather than change semantics.</td></tr>
+              <tr><td>Event counts need dynamic Python lists.</td><td>Use a fixed-capacity numeric buffer with lengths and explicit overflow; materialize objects outside the hot path.</td></tr>
+              <tr><td>Data-dependent branches create graph breaks.</td><td>Use masks and fixed loops first, structured tensor control flow only where needed, and make <code>fullgraph=True</code> a hard gate.</td></tr>
+              <tr><td>Compilation is fast only for one shape or recompiles frequently.</td><td>Freeze bounded shapes, log compile/recompile counts, and time first-call and warm execution separately.</td></tr>
+              <tr><td>Large synthetic batches cannot be supplied during training.</td><td>Require a collector supply check before accepting a gain found only at batch 512 or 1,024.</td></tr>
+              <tr><td>A faster implementation subtly changes the game.</td><td>Reuse the original exact D2 oracle, receipts, fixtures, and 100,000-transition zero-mismatch gate.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="decision-banner">
+          <strong>Implemented boundary:</strong> R0-R2 are complete as a correctness/reference implementation. The R2 speed gate stopped the plan before exact compiled RNG, the 100,000-transition R4 campaign, scaling/projection work, or accelerator preparation. The expanded <a href="D3-post-d2-architecture-options.html">post-D2 architecture options</a> now compare the native CPU path with process actors, GPU acceleration, a full device rewrite, actor/learner algorithms, and learned simulation.
+        </div>
+      </section>
+
+      <section id="files">
+        <span class="section-kicker">05 - Files</span>
+        <h2>Preserve the exact reference and isolate the compiled path.</h2>
+        <div class="file-grid">
+          <div class="file-card"><code>src/heat/ml/vector_env/state.py</code>Fixed-shape tensor state, masks, capacities, and validation.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/bridge.py</code>Legacy-to-tensor conversion and test-only semantic snapshots.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/observations.py</code>Tensor observations and legal-action masks.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/random_inputs.py</code>Per-lane random draw inputs, counters, and state receipts.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/kernels/gear.py</code>Exact batched gear update.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/kernels/cards_to_react.py</code>The representative D2 rules slice.</div>
+          <div class="file-card"><code>tests/test_direction_d2_state.py</code>Shape, bridge, round-trip, and capacity checks.</div>
+          <div class="file-card"><code>tests/test_direction_d2_observations.py</code>Exact observation and legal-mask comparisons.</div>
+          <div class="file-card"><code>tests/test_direction_d2_kernels.py</code>Focused fixture and phase-by-phase differential checks.</div>
+          <div class="file-card"><code>tests/test_direction_d2_determinism.py</code>Seed, batch-order, batch-size, lane-isolation, and resume checks.</div>
+          <div class="file-card"><code>tests/test_direction_d2_completeness.py</code>Internal lockstep, exact batch matrix, branch coverage, invariants, and replay-receipt checks.</div>
+          <div class="file-card"><code>experiments/verify_direction_d2_differential.py</code>Bounded randomized equivalence campaign with replayable failures.</div>
+          <div class="file-card"><code>experiments/benchmark_direction_d2.py</code>Bounded kernel benchmark and D1-based projection.</div>
+          <div class="file-card"><code>experiments/profile_direction_d2.py</code>Bounded component, Python-call, and PyTorch-operator profiling.</div>
+          <div class="file-card"><code>docs/direction-D/D2-cpu-profiling-results.html</code>Measured root cause, external comparison, and redesign boundary.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/compiled/receipts.py</code>Planned fixed numeric event codes, fields, lengths, and overflow checks.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/compiled/cards_to_react.py</code>Planned pure full-graph cards-to-REACT function.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/compiled/rng.py</code>Planned exact Python-compatible numeric RNG and shuffle operations.</div>
+          <div class="file-card"><code>src/heat/ml/vector_env/compiled/materialize.py</code>Planned cold-path conversion from numeric receipts to canonical Python events.</div>
+          <div class="file-card"><code>tests/test_direction_d2r_compiled.py</code>Planned full-graph, receipt, fixture, and exact-RNG checks.</div>
+          <div class="file-card"><code>experiments/verify_direction_d2r_differential.py</code>Planned compiled-versus-scalar randomized campaign.</div>
+          <div class="file-card"><code>experiments/benchmark_direction_d2r.py</code>Planned compile, warm-kernel, materialization, scaling, memory, and projection benchmark.</div>
+        </div>
+        <p>The compiled receipt, materializer, R1, and R2 files are implemented beside the unchanged eager D2 oracle. The planned RNG file and R3-R6 experiment work were not created because R2 failed its speed gate.</p>
+      </section>
+
+      <section id="tests">
+        <span class="section-kicker">06 - Correctness strategy</span>
+        <h2>Determinism is a required gate.</h2>
+        <p class="lede">The tensor engine must not merely produce a valid game. Given the same state, actions, and random inputs, it must produce the same game as the legacy engine. Packing a game into a batch must not change it.</p>
+
+        <h3>Test 1 - State and observation parity</h3>
+        <p>Convert legacy states into tensors and compare them using the existing D0 semantic snapshot. Compare observations with exact array equality and compare every legal-action mask bit. Cover 2-6 seats, generated track limits, empty and full card piles, heat, finished cars, and spun cars.</p>
+        <div class="result-note"><strong>Implemented.</strong> Round-trip, capacity, 2-6 seat, generated-state, observation, and legal-mask tests use exact equality and reject overflow rather than clipping it.</div>
+
+        <h3>Test 2 - Lockstep rule replay</h3>
+        <ol>
+          <li>Create or capture one exact legacy state.</li>
+          <li>Convert it to tensor state.</li>
+          <li>Give both engines the same legal actions and random draw inputs.</li>
+          <li>Compare state after every internal step, not only at the end.</li>
+          <li>Compare events, observations, masks, and next random state. Compare rewards and terminal flags once the tensor path produces complete transitions in D3.</li>
+        </ol>
+        <p>For the D2 slice, comparison points include chosen cards, each stress draw, revealed speed, movement, automatic adrenaline, and the first react decision.</p>
+        <div class="result-note"><strong>Implemented for the D2 boundary.</strong> An opt-in trace compares scalar and tensor state after chosen cards, every stress resolution, speed reveal, movement, adrenaline, and the resulting REACT row. This test found and fixed a turn-start position/lap ordering difference. Rewards and terminal-transition flags are explicitly deferred because this slice ends at REACT and does not yet emit a complete environment transition.</div>
+
+        <h3>Test 3 - Repeatability and batch independence</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Check</th><th>Pass condition</th><th>Bug it catches</th></tr></thead>
+            <tbody>
+              <tr><td>Repeat the same seed</td><td>The complete trace hash is identical.</td><td>Hidden use of global or unseeded randomness.</td></tr>
+              <tr><td>Change batch size</td><td>A game is identical in batches 1, 8, 32, and 256.</td><td>Random draws or rules tied to padding and batch width.</td></tr>
+              <tr><td>Reorder lanes</td><td>Results remain identical after sorting by stable game identity.</td><td>Randomness tied to lane position.</td></tr>
+              <tr><td>Add or remove another game</td><td>The original game's trace does not change.</td><td>One lane consuming another lane's random draws.</td></tr>
+              <tr><td>Finish one lane early</td><td>Other lanes remain unchanged.</td><td>Active masks changing random consumption.</td></tr>
+              <tr><td>Stop and resume</td><td>The resumed trace equals the uninterrupted trace.</td><td>Missing tensor state, draw counters, or random state.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Each game needs its own random state or stable keyed draw stream. One shared tensor random stream is unsafe because lane order and finished lanes can change which game receives the next value.</p>
+        <div class="result-note"><strong>Implemented.</strong> Exact kernel results are checked at batch sizes 1, 8, 32, and 256, along with repeat, lane reorder, add/remove neighbor, early-finished neighbor, and save/resume isolation.</div>
+
+        <h3>Test 4 - Small branch fixtures</h3>
+        <p>Keep a small, readable fixture for each important branch: normal cards, upgrade cards, heat cards, one and several stress draws, draw-pile reshuffle, traffic, a corner crossing, lap or finish crossing, automatic adrenaline, a finished car, and both 2-seat and 6-seat games. These fixtures should be easy to replay when a later change fails.</p>
+        <div class="result-note"><strong>Implemented.</strong> Focused fixtures now cover the listed card, stress, reshuffle, traffic, crossing, adrenaline, finished-car, and seat-count branches. The internal lockstep fixture deliberately combines an upgrade, multiple stress cards, and a corner crossing.</div>
+
+        <h3>Test 5 - Random differential campaign</h3>
+        <p>The frozen D0 corpus remains the first oracle. Random states expand it but never replace it. Any mismatch is saved with the seed, game identity, phase, actions, random inputs, and both snapshots so it can be replayed exactly.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>When</th><th>Work</th><th>Required result</th></tr></thead>
+            <tbody>
+              <tr><td>Normal development</td><td>Focused fixtures and D0 cases.</td><td>Zero differences; intended to finish in seconds.</td></tr>
+              <tr><td>End of a rule chunk</td><td>At least 1,000 randomized transitions, plus batch-order and batch-size checks.</td><td>Zero differences; bounded to a short local run.</td></tr>
+              <tr><td>Before benchmarking</td><td>At least 100,000 randomized transitions and stop/resume replay.</td><td>Zero differences. Only then measure speed.</td></tr>
+              <tr><td>D3 graduation</td><td>Complete legacy-versus-tensor races through terminal state.</td><td>Same decisions, events, state trace, finish order, and random-state trace.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="result-note"><strong>D2 campaign implemented.</strong> The 100,349-transition gate passes with zero differences. A mismatch now writes a single-game replay payload containing the campaign and game seeds, game identity, case and mode, phase, flat actions, recorded stress and replenish draws, both snapshots, and both event streams. The complete-race D3 graduation row remains future work.</div>
+
+        <h3>Useful safety checks</h3>
+        <p>Also check simple invariants such as card conservation, unique card identities, valid track positions, legal masks that contain an action when a decision is required, and valid finish order. These help locate failures, but they do not replace direct comparison with the legacy engine.</p>
+        <p>Capacity errors must fail clearly. A generated track, hand, or player field that does not fit the frozen tensor shape must never be silently cut off.</p>
+        <div class="result-note"><strong>Implemented.</strong> Dedicated checks cover card conservation, per-player card identity uniqueness, position bounds, consecutive finish order, nonempty masks at decision points, and clear capacity rejection.</div>
+        <h3>D2-R compile-specific checks</h3>
+        <p>The redesign adds structural tests that the eager implementation did not need: full-graph capture must succeed; compile/recompile counts must stay within the frozen-shape contract; numeric receipts must round-trip to exact canonical events; overflow must fail; and source checks must reject scalar escapes or Python object construction inside the compiled module. These checks supplement semantic comparison rather than replacing it.</p>
+        <div class="decision-banner">
+          <strong>Boundary:</strong> D2-R must re-prove exactness for its compiled vertical slice. Full-race determinism remains the main D3 gate before any tensor engine can replace the legacy rules path.
+        </div>
+      </section>
+
+      <section id="benchmark">
+        <span class="section-kicker">07 - Benchmark rules</span>
+        <h2>Measure compilation, warm execution, and usable batches separately.</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Measure</th><th>Why it matters</th></tr></thead>
+            <tbody>
+              <tr><td>Legacy states per second</td><td>The exact scalar reference.</td></tr>
+              <tr><td>Tensor states per second</td><td>The direct kernel gain.</td></tr>
+              <tr><td>Conversion time</td><td>Prevents a fast kernel hiding a slow bridge.</td></tr>
+              <tr><td>Batch-size curve</td><td>Shows where useful speed begins and where it stops scaling.</td></tr>
+              <tr><td>Memory</td><td>Shows whether padded tracks and hands remain affordable.</td></tr>
+              <tr><td>D1-based projection</td><td>Turns kernel speed into an estimated full training result.</td></tr>
+              <tr><td>First compile and recompiles</td><td>Prevents warm timing from hiding startup cost or unstable graph specialization.</td></tr>
+              <tr><td>Receipt materialization</td><td>Shows the production numeric path separately from optional debug/UI event objects.</td></tr>
+              <tr><td>Collector-supplied batch</td><td>Prevents a synthetic batch-1,024 result from being treated as a training gain the scheduler cannot feed.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The first redesign benchmark is CPU only. D2-R1 measures batches 64 and 256 as an affordability gate; D2-R5 expands the curve only after full correctness. CUDA is not tested until the exact compiled CPU slice earns continuation and the user authorizes a separate D4 experiment.</p>
+      </section>
+
+      <section id="decision">
+        <span class="section-kicker">08 - Current decision</span>
+        <h2>D2-R stops before exact RNG because complete deterministic rules are slower than scalar.</h2>
+        <ul class="gate-grid">
+          <li><strong>CONTINUE D2-R.</strong><br>D2-R1 has zero graph breaks and semantic differences, is at least 10x faster than eager D2, and reaches at least scalar speed at batch 256.</li>
+          <li><strong>ADOPT FOR D3.</strong><br>The completed D2-R has zero differences, at least 3x kernel speed at a supplyable batch, and at least 1.5x projected end-to-end training.</li>
+          <li><strong>NATIVE FALLBACK.</strong><br>Full-graph compilation fails, exact RNG erases the gain, or only unsupplyable batches are fast. Keep scalar as default and design a bounded native CPU comparison.</li>
+        </ul>
+        <div class="decision-banner">
+          <strong>Current decision - STOP D2-R AT R2:</strong> R0 receipts and the R1 common core passed. R2 also stayed exact and full-graph, but its 0.839x scalar speed failed the frozen affordability floor. Keep scalar as the production default and retain compiled R0-R2 as measured reference code. Do not begin R3 exact RNG, R4-R6, D3 implementation, CUDA work, a learned-policy campaign, or a large compute run without a new design decision. See the <a href="D3-post-d2-architecture-options.html">expanded architecture comparison</a> for the proposed native-first route and the larger alternatives.
+        </div>
+      </section>
+    </article>
+  </div>
+</main>
+</body>
+</html>

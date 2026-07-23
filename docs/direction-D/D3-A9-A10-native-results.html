@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Direction D3 A9-A10 native integration results</title>
+  <style>
+    :root { color-scheme:light; --ink:#17212b; --muted:#526170; --line:#d7dee5; --panel:#f6f8fa; --good:#0b6b3a; --warn:#8a5a00; --bad:#a12622; }
+    body { margin:0; font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:#fff; }
+    main { max-width:980px; margin:auto; padding:40px 24px 64px; }
+    h1 { font-size:clamp(2rem,5vw,3.4rem); line-height:1.05; margin:.25rem 0 1rem; }
+    h2 { margin-top:2.3rem; font-size:1.45rem; }
+    .status { color:var(--bad); font-weight:700; letter-spacing:.04em; text-transform:uppercase; }
+    .lede { font-size:1.15rem; max-width:800px; }
+    .banner,.card { border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin:18px 0; background:var(--panel); }
+    .banner { border-left:5px solid var(--bad); }
+    .good { border-left:5px solid var(--good); }
+    .warning { border-left:5px solid var(--warn); }
+    table { width:100%; border-collapse:collapse; margin:14px 0; }
+    th,td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:10px 8px; }
+    th { font-size:.85rem; text-transform:uppercase; color:var(--muted); }
+    code { font-family:ui-monospace,"Cascadia Code",monospace; }
+    .muted { color:var(--muted); }
+  </style>
+</head>
+<body>
+<main>
+  <p class="status">A9 integrated - A10 operational gate passes - 23 July 2026</p>
+  <h1>The replacement native configuration passes its full hour.</h1>
+  <p class="lede"><code>collector_mode="native"</code> now completes real A8 PPO iterations with snapshots, keyed policy sampling, native trajectories, policy-version barriers, continuous slot refill, and safe-boundary resume. The selected 32-slot, 32,768-row manifest-v2 arm sustained 5,308 trained transitions/s with 0.33% spread and 13.6% total overshoot.</p>
+
+  <div class="banner good"><strong>Decision: pass A10 operations and adopt the 48-slot, capacity-288, Torch-8/2 native configuration.</strong> It sustained 5,875.53/s for one hour with 98.84% minimum-to-median stability and every operational subgate green. See the <a href="D3-A10-soak-results.html">soak result</a> and <a href="D3-A10-performance-diagnostics.html">diagnostics</a>.</div>
+
+  <h2>A9 - trainer integration</h2>
+  <div class="card">
+    <p>The A8 trainer can now choose the native collector. Each iteration freezes the live policy version, resolves current and snapshot rows through the A7 coordinator, advances complete native races, closes per-seat rewards, and bulk-finalizes the current-policy rows through the A8 arena before PPO mutates the policy.</p>
+    <ul>
+      <li>Repeated identical manifests produced byte-identical PPO tensors.</li>
+      <li>Snapshot rows used their frozen policy but did not enter the live-policy PPO batch.</li>
+      <li>A complete two-iteration smoke updated the policy and preserved snapshot-controller counters.</li>
+      <li>The checkpoint records native manifest identity, next game and lease IDs, rows-per-game estimate, build/compiler receipt, worker count, and capacities.</li>
+    </ul>
+  </div>
+
+  <div class="banner warning"><strong>Architecture complication.</strong> The result is a simpler bridge than the original design. <code>NativePool</code> workers currently validate and admit native manifests, while the Python coordinator thread calls the native rule methods for active games between batched policy calls. The rules themselves remain C++, but workers do not yet own and park live games at ready/action boundaries. Therefore A9 proves trainer integration, not completion of the originally drawn worker-owned hot loop.</div>
+
+  <h2>A10 - exact resume passes</h2>
+  <p>One uninterrupted run, one run with a process stop, and one run with two process stops all finished with the same complete-state SHA-256:</p>
+  <div class="card"><code>ae6a087f088f0a3acdef0965c667ca3bbbb1dce2cd5f3e8af5cf8d6f17a015ca</code></div>
+  <p>Policy, optimizer, controller, snapshot pool, Python and Torch RNGs, seat schedule, progress, records, native collector state, and the native runtime receipt also matched component by component. Each segment ran in a fresh Python process and loaded through the production recipe, source-identity, and checkpoint-receipt gates.</p>
+
+  <h2>A10 - bounded throughput rate passes adoption</h2>
+  <p>The initial tuning scope used worker/slot counts 1, 2, 4, 8, and 12; Torch CPU thread counts 1, 2, 4, and 8; and rollout dispatch sizes 1,024, 4,096, and 8,192. The follow-up analysis correctly treated slots as bridge batch width and extended that grid to 24 slots and 16,384 rows. Both arms used the normal 256-by-256 flat masked policy, PPO batch 256, five epochs, the full 2-6 seat schedule, snapshot sampling, two Torch threads, and one discarded warm-up.</p>
+  <table>
+    <thead><tr><th>Initial 12-slot arm</th><th>Measured result</th><th>Gate</th></tr></thead>
+    <tbody>
+      <tr><td>12 slots, ready capacity 72</td><td>107,558 actual trained rows per repeat</td><td>Actual rows, not the 100,000 request</td></tr>
+      <tr><td>Trained throughput</td><td><strong>3,638.10/s median</strong></td><td>Continue at 4,000/s; adopt at 5,000/s</td></tr>
+      <tr><td>Repeat spread</td><td><strong>0.14%</strong></td><td>Pass: below 5%</td></tr>
+      <tr><td>Rollout throughput</td><td>6,283.12/s median</td><td>Diagnostic only; adoption uses end to end</td></tr>
+      <tr><td>Policy batches</td><td>4.71 rows mean; p50 3, p95 16, max 72</td><td>Real current/snapshot traffic</td></tr>
+      <tr><td>Against D0</td><td>2.43x the 1,495.97/s scalar baseline</td><td>Improved, but below the absolute target</td></tr>
+    </tbody>
+  </table>
+  <p>A follow-up three-repeat arm using 24 slots, ready capacity 144, 16,384-row rollouts, and two Torch threads reached <strong>4,146.48/s</strong> with <strong>0.43%</strong> spread. That is 14.0% above the original best and projects about 645 million transitions in 48 hours at 90% useful uptime. It passes the engineering continuation threshold, but still misses the safer 800-million target. Because the larger rollout changes PPO update cadence, it needs a new policy-generation recipe and learning-quality gate before campaign use.</p>
+
+  <p>Manifest-v2 continuous refill then replaced finished slots using an unfinished-row forecast. The selected 32-slot, ready-capacity-192, 32,768-row, reserve-1.30 arm reached <strong>5,307.75/s median</strong> with <strong>0.33%</strong> spread across three measured repeats. Each repeat trained 113,590 actual rows; total overshoot was 13.6%. Mean policy batch rose to 17.11 rows, with p50 9 and p95 48. The 48-hour projection at 90% useful uptime is about 825 million transitions.</p>
+
+  <h2>A10 - one-hour operational soak misses adoption</h2>
+  <p>The authorized soak held the selected configuration for 3,600.20 seconds, completed 482 PPO updates, and trained 16,802,559 transitions. Sustained throughput was <strong>4,667.12/s</strong>, below the 5,000/s adoption gate. Six equal iteration blocks had a 4,815.52/s median; the slowest reached only 3,988.74/s, or 82.83% of that median, so the 90% stability gate also failed.</p>
+  <p>The atomic checkpoint passed its SHA-256 and complete-state validation, no 60-second stall was recorded, and the longest PPO iteration was 12.36 seconds. Final RSS was 431.5 MiB and the 817.4 MiB peak was associated with transient checkpoint serialization. A post-run reporter bug lost the complete in-memory clock and memory series, so those two subgates are deliberately not called passes. The recovered receipt and limitation are recorded in the <a href="D3-A10-soak-results.html">soak result</a>.</p>
+
+  <h2>A10 - bounded diagnosis selects a replacement</h2>
+  <p>The mature hour split nearly evenly between current and snapshot opponents. Current-policy iterations averaged 5,196/s, while snapshot iterations averaged 4,245/s because mixed-policy dispatch reduced the mean action batch from 26.87 to 16.07 and doubled inference cost per row. A continuous telemetry run reproduced the broader slowdown without CPU clock collapse or Windows power throttling. Increasing Torch intra-op threads from two to eight materially reduced PPO cost; widening from 32 to 48 slots added a smaller steady-state batching gain.</p>
+  <p>The combined 48-slot, capacity-288, Torch-8/2 candidate trained 3,179,192 rows in 603.67 seconds, or <strong>5,266.42/s</strong>. Its minimum six-window rate was 92.18% of the median, memory grew by only 3.16% after warm-up, CPU performance remained stable, no stall occurred, and the safe-boundary checkpoint passed. A concurrent-forward prototype was exact but only 1.001x at median, so it was removed.</p>
+
+  <h2>A10 - replacement one-hour soak passes</h2>
+  <p>The replacement trained <strong>21,182,927 transitions in 3,605.28 seconds</strong>, or <strong>5,875.53/s</strong>. Its six-window median was 5,874.56/s and the slowest window reached 5,806.34/s, or 98.84% of the median. It completed 616 PPO updates with no stall; post-warm-up memory growth was 21.1 MiB; the late/early CPU performance ratio was 99.26%; and the final checkpoint passed an independent SHA, recipe, source, and complete-state reload.</p>
+
+  <h2>What would be needed to continue</h2>
+  <p>The operational configuration can now be frozen at 48 slots, ready capacity 288, and Torch 8/2. The new-generation learning-quality gate is still required because the 32K rollout changes PPO update cadence. The eight-hour rehearsal, original worker-owned protocol, and CUDA/Option C remain separate decisions.</p>
+
+  <h2>Verification receipt</h2>
+  <table>
+    <thead><tr><th>Check</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr><td>A9 focused trainer tests</td><td>4 native integration/resume tests passed; combined A8 selection was 15 tests passed.</td></tr>
+      <tr><td>Native and D0/D1 regression selection</td><td>75 tests passed in the final rerun.</td></tr>
+      <tr><td>Fresh-process resume</td><td>Pass across uninterrupted, one-stop, and two-stop manifest-v2 paths in 19.2 seconds.</td></tr>
+      <tr><td>Final benchmark</td><td>Three measured repeats per final configuration after a discarded warm-up; hard timeout and progress heartbeats enabled.</td></tr>
+      <tr><td>One-hour soak</td><td>16,802,559 transitions in 3,600.20 seconds; throughput and stability failed, checkpoint and no-stall gates passed.</td></tr>
+      <tr><td>Diagnostic confirmation</td><td>3,179,192 transitions in 603.67 seconds; 5,266/s, 92.18% stability, checkpoint/memory/CPU/no-stall gates passed.</td></tr>
+      <tr><td>Replacement one-hour soak</td><td>21,182,927 transitions in 3,605.28 seconds; 5,875.53/s, 98.84% stability, every operational gate passed.</td></tr>
+      <tr><td>Scoped Ruff and strict typing</td><td>Ruff passed; <code>mypy src</code> passed across 84 source files.</td></tr>
+    </tbody>
+  </table>
+  <p class="muted">Primary artifacts: <code>runs/direction_d/d3_a10_native_resume_refill.json</code>, <code>d3_a10_native_refill_benchmark.json</code>, <code>d3_a10_native_soak.json</code>, <code>d3_a10_48x8_confirmation.json</code>, and <code>d3_a10_48x8_soak_1h_20260723.json</code>. No CUDA change, registered policy generation, learning-quality campaign, eight-hour rehearsal, or final run was started.</p>
+</main>
+</body>
+</html>

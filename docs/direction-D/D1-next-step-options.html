@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Simple high-level options for continuing Direction D after the D1 lane throughput stop.">
+  <title>Direction D - two ways forward after D1</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Option B selected - 20 July 2026</span>
+      <h1>Two sensible ways forward after D1.</h1>
+      <p class="hero-copy">D1 proved that we can batch policy decisions correctly. It missed its speed gate because the Python game engine still performed too much extra work. The next solution should either run several exact engines at the same time, or make the engine itself much faster.</p>
+      <p><strong>Direction D - design choices</strong><br><span class="muted">Evidence: <a href="D1-exact-lane-collector.html">D1 implementation and benchmark</a></span></p>
+    </div>
+    <aside class="status-board" aria-label="Current decision">
+      <span class="board-label">Current state</span>
+      <strong>Scalar stays trusted.</strong>
+      <p>Do not tune the rejected lane counts again. Choose one new idea, give it a small gate, and stop if it does not earn the next step.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#lesson">D1 lesson</a>
+      <a href="#workers">Option A</a>
+      <a href="#tensor">Option B</a>
+      <a href="#compare">Comparison</a>
+      <a href="#recommendation">Recommendation</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="lesson">
+        <span class="section-kicker">01 - What must change</span>
+        <h2>Batching worked. Extra game work was the problem.</h2>
+        <p class="lede">At 16 lanes, policy inference fell from about 41 seconds to 6.5 seconds. But closing unfinished seat actions added about 49,000 extra game actions for every 99,000 actions kept for training. We saved inference time, then spent much of it moving the games to safe stopping points.</p>
+        <div class="hybrid-stats">
+          <div class="hybrid-stat"><span>Batching</span><strong>Worked</strong><small>useful batches were available</small></div>
+          <div class="hybrid-stat"><span>Best stable gain</span><strong>1.118x</strong><small>below the 1.3x stop line</small></div>
+          <div class="hybrid-stat"><span>Main cost</span><strong>Game steps</strong><small>especially safe draining</small></div>
+        </div>
+      </section>
+
+      <section id="workers">
+        <span class="section-kicker">02 - Option A</span>
+        <h2>Several CPU workers, one shared learner.</h2>
+        <p><strong>Simple idea:</strong> keep the current exact game engine. Freeze one copy of the policy, send it to three worker processes, and let each worker play complete games. Bring all their trajectories back and perform one PPO update in the main process.</p>
+        <pre><code>one frozen policy
+       |
+       +-- worker 1 plays complete games --+
+       +-- worker 2 plays complete games --+--> one PPO update
+       +-- worker 3 plays complete games --+</code></pre>
+        <h3>Why it may work</h3>
+        <ul>
+          <li>Complete games avoid D1's bridge-action drain.</li>
+          <li>Terminal rewards remain common and easy to understand.</li>
+          <li>The rules engine is unchanged, so semantic risk is low.</li>
+          <li>The project already measured about 2.7x throughput from three independent workers. This is not the same design, but it shows the machine can use three workers well.</li>
+          <li>Training checkpoints remain simple because workers finish before the PPO update and only central training state is saved.</li>
+        </ul>
+        <h3>Main risks</h3>
+        <ul>
+          <li>Moving trajectories and policy weights between Windows processes has a cost.</li>
+          <li>Worker seeds and result ordering must be exact for segmented resume.</li>
+          <li>Each worker still performs scalar policy inference, so the final gain may be smaller than the earlier independent-worker result.</li>
+          <li>This may be a good CPU solution without reaching Direction D's full long-term target.</li>
+        </ul>
+        <div class="decision-banner">
+          <strong>Small gate:</strong> build a three-worker synchronous prototype using the current engine and one frozen policy version. Compare one and three workers on three matched 20k-transition development runs. Continue at 1.5x or better; stop below 1.3x. Estimated code: 500-900 lines. Estimated compute: under 30 minutes.
+        </div>
+      </section>
+
+      <section id="tensor">
+        <span class="section-kicker">03 - Option B</span>
+        <h2>Build one exact tensor-engine slice.</h2>
+        <p><strong>Simple idea:</strong> keep the D1 collector and its policy batches, but replace one slow part of the Python rules engine with batched PyTorch state and rule operations. Start with one complete phase-to-phase slice, not the whole game.</p>
+        <pre><code>many game states as tensors
+            |
+      one exact phase kernel
+            |
+   batched observations and decisions
+            |
+        existing D1 collector</code></pre>
+        <h3>Why it may work</h3>
+        <ul>
+          <li>D1 proved that large policy batches are available.</li>
+          <li>The remaining measured cost is mostly game simulation, which this option directly attacks.</li>
+          <li>Tensor state makes the current extra drain actions much cheaper.</li>
+          <li>An explicit phase state is easier to save and resume than a hidden Python generator.</li>
+          <li>This is the clearest route toward larger CPU batches and, later, CUDA.</li>
+        </ul>
+        <h3>Main risks</h3>
+        <ul>
+          <li>It is a much larger rules rewrite.</li>
+          <li>Every rule must match the legacy engine exactly.</li>
+          <li>A fast small kernel may still fail to improve the complete training loop.</li>
+          <li>The first slice may reveal that Heat's branch-heavy rules do not map cleanly to tensors.</li>
+        </ul>
+        <div class="decision-banner">
+          <strong>Small gate:</strong> implement one representative exact phase slice with fixed-shape state and differential tests against the legacy engine. Continue only with zero semantic differences, at least 3x kernel speed, and a D1-based projection of at least 1.5x end-to-end. Target 5x kernel speed. Estimated code: 1,200-2,000 lines. Estimated compute: under one hour after correctness passes.
+        </div>
+      </section>
+
+      <section id="compare">
+        <span class="section-kicker">04 - Simple comparison</span>
+        <h2>The choice is lower risk now versus higher potential later.</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Question</th><th>Option A - CPU workers</th><th>Option B - tensor slice</th></tr></thead>
+            <tbody>
+              <tr><td>Size</td><td>Medium</td><td>Large</td></tr>
+              <tr><td>Rules risk</td><td>Low; current engine stays authoritative</td><td>High; rules are reimplemented behind parity tests</td></tr>
+              <tr><td>Time to first answer</td><td>Several working days</td><td>One to two weeks</td></tr>
+              <tr><td>Expected ceiling</td><td>Moderate CPU gain</td><td>High CPU gain and a route to GPU</td></tr>
+              <tr><td>Fixes D1 drain?</td><td>Yes, by collecting complete games</td><td>Makes drain cheaper; explicit state may later remove it</td></tr>
+              <tr><td>Resume complexity</td><td>Manageable at completed worker batches</td><td>Large initially, cleaner once phase state is explicit</td></tr>
+              <tr><td>Best reason to choose it</td><td>Cheapest credible next measurement</td><td>Best long-term architecture</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="recommendation">
+        <span class="section-kicker">05 - Recommendation</span>
+        <h2>Option B has been selected.</h2>
+        <p class="lede">The project will pursue the more ambitious tensor-engine route. The <a href="D2-tensor-vertical-slice-design.html">detailed D2 design</a> splits it into six gated chunks, starting with tensor state and ending with a bounded kernel benchmark.</p>
+        <p>Option A remains a fallback if the tensor representation cannot preserve exact rules or cannot reach its kernel speed gate.</p>
+        <div class="decision-banner">
+          <strong>Not recommended now:</strong> more 8/16/32-lane tuning, more phase-only batching, or a full tensor-engine rewrite in one step. D1 already answered the first two, and the last is too large without a vertical-slice gate.
+        </div>
+      </section>
+    </article>
+  </div>
+</main>
+</body>
+</html>

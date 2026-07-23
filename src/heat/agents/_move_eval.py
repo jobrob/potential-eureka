@@ -318,9 +318,16 @@ def project_solvency(
     worst_shortfall = 0.0
 
     pos = end_position
+    progress = end_lap * track.length + end_position
+    finish_progress = (track.laps + 1) * track.length
     for _ in range(horizon_corners):
         corner, dist = rules.distance_to_next_corner(track, pos)
         if corner is None:
+            break
+        corner_progress = progress + dist
+        # A modulo track coordinate can point at the first corner of a lap
+        # that will never be driven. Do not conserve heat beyond the finish.
+        if corner_progress >= finish_progress:
             break
         # Credit cooldown only if there is room for a slow turn before the
         # corner (the car can decelerate / take a low gear). One turn's worth,
@@ -338,7 +345,9 @@ def project_solvency(
         if heat < worst_shortfall:
             worst_shortfall = heat
         # Advance past this corner for the next iteration.
-        pos = (corner.end + 1) % track.length
+        corner_span = corner.end - corner.start + 1
+        progress = corner_progress + corner_span
+        pos = progress % track.length
 
     if worst_shortfall < 0:
         # Risk of a future forced spin: penalise the shortfall only.

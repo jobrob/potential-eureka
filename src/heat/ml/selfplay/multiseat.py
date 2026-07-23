@@ -111,6 +111,10 @@ class CollectorTiming:
     bootstrap_inference_calls: int = 0
     available_phase_count: int = 0
     available_phase_rows: int = 0
+    recorded_action_rows: int = 0
+    drain_action_rows: int = 0
+    completed_transition_rows: int = 0
+    lane_count: int = 0
     action_batch_histogram: dict[int, int] = field(default_factory=dict)
 
     def reset(self) -> None:
@@ -125,6 +129,10 @@ class CollectorTiming:
         self.bootstrap_inference_calls = 0
         self.available_phase_count = 0
         self.available_phase_rows = 0
+        self.recorded_action_rows = 0
+        self.drain_action_rows = 0
+        self.completed_transition_rows = 0
+        self.lane_count = 0
         self.action_batch_histogram.clear()
 
     def record_action_call(self, batch_size: int) -> None:

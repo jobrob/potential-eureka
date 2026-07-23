@@ -470,6 +470,44 @@ class TestLapBug:
         assert stale < 0.0  # demonstrates the bug the fix removes
 
 
+class TestSolvencyFinishBoundary:
+    """Forward heat planning must not inspect a lap after the race ends."""
+
+    def test_next_lap_corner_is_ignored_only_on_final_straight(self) -> None:
+        """The same wrapped corner is relevant one lap earlier, not at finish."""
+        spaces = [Space(index, lanes=2) for index in range(10)]
+        corner = Corner(start=2, end=2, speed_limit=1)
+        track = Track("Finish boundary", spaces, [corner], [0, 1], laps=2)
+        state = GameState.create(track, 2, logging_enabled=False, seed=1)
+        player = state.get_player(0)
+
+        final_straight = ME.project_solvency(
+            state,
+            player,
+            end_position=5,
+            end_lap=2,
+            heat_after_turn=0,
+            planned_gear=2,
+            expected_speed=4.0,
+            horizon_corners=1,
+            heat_price=ME.DEFAULT_HEAT_PRICE,
+        )
+        earlier_lap = ME.project_solvency(
+            state,
+            player,
+            end_position=5,
+            end_lap=1,
+            heat_after_turn=0,
+            planned_gear=2,
+            expected_speed=4.0,
+            horizon_corners=1,
+            heat_price=ME.DEFAULT_HEAT_PRICE,
+        )
+
+        assert final_straight == 0.0
+        assert earlier_lap < 0.0
+
+
 # ---------------------------------------------------------------------------
 # Block behaviour (P3) -- real projection via resolve_blocked_position
 # ---------------------------------------------------------------------------

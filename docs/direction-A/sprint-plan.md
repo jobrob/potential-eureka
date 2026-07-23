@@ -6,6 +6,8 @@
 > sprints with go/no-go gates. **High-level only** — each sprint gets a detailed design
 > when we reach it. Grounded in the current code (`src/heat/ml/{env,model,features,
 > action_codec}.py`) and the C6 feasibility findings.
+> The committed next phase is
+> [Direction D's affordable-substrate design](../direction-D/D0-big-picture-design.html).
 
 ## What "complete Direction A" means
 

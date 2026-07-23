@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Evidence-first plan for investigating Heat's fixed heuristic and search bots.">
+  <title>Static-bot strength — investigation plan</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Stream T · T2a adopted</span>
+      <h1>Static-bot strength: build reliable fixed opponents.</h1>
+      <p class="hero-copy">Investigate the heuristic, repaired heuristic, lookahead, and search bots as deterministic strategy systems—not as extensions of the learned-policy training plan.</p>
+      <p><a href="S0-investigation-plan.html">Back to the strength-track index</a><br><span class="muted">Started 17 July 2026</span></p>
+    </div>
+    <aside class="status-board" aria-label="Current static-bot conclusion">
+      <span class="board-label">Current state</span>
+      <strong>V2 repairs adopted.<br>V1 evidence preserved.</strong>
+      <p>All three V2 bots race faster against unchanged fields; StaticSearchV2 also gains substantial placement strength without more depth or samples.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#scope">Scope</a>
+      <a href="#inventory">Current bots</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#unknowns">Unknowns</a>
+      <a href="#investigations">Investigations</a>
+      <a href="T0-static-matchup-map.html">T0 matchup map</a>
+      <a href="T1-heuristic-loss-replay.html">T1 loss replay</a>
+      <a href="T1a-finish-aware-solvency-repair.html">T1a repair</a>
+      <a href="T2-search-paradox-replay.html">T2 search replay</a>
+      <a href="T2a-static-v2-repair.html">T2a V2 repair</a>
+      <a href="#sequence">Starting sequence</a>
+      <a href="#boundary">Boundary</a>
+    </nav>
+    <article class="hybrid-content">
+      <section id="scope">
+        <span class="section-kicker">T01 · Scope</span>
+        <h2>This stream studies agents whose behavior is fixed by code and configuration.</h2>
+        <p class="lede">Its goal is to understand and improve scripted reasoning, state evaluation, determinization, and search while preserving reproducibility and practical latency. It does not tune PPO, change learned representations, or judge a static change solely by whether G0002 finds it harder to beat.</p>
+        <div class="decision-banner"><strong>T2a implementation adopted</strong>The first evidence-backed repair is now versioned as the V2 static population. Search depth, determinization count, leaf evaluator, and rollout policy remain unchanged; wider tuning is still deferred.</div>
+      </section>
+
+      <section id="inventory">
+        <span class="section-kicker">T02 · Current bot inventory</span>
+        <h2>The bots cover several styles, but only the floor has a simple role.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Bot</th><th>Current role</th><th>Strength evidence</th><th>Limitation</th></tr></thead>
+            <tbody>
+              <tr><td><strong>RandomAgent</strong></td><td>Legality and smoke-test floor.</td><td>Detects total policy or engine failure.</td><td>No strategic claim.</td></tr>
+              <tr><td><strong>HeuristicAgent</strong><br>weak ruler</td><td>Fast scripted competence floor.</td><td>Stable enough for frequent evaluation across tracks and seats.</td><td>Local rules are exploitable and deliberately not a completion bar.</td></tr>
+              <tr><td><strong>StrongHeuristicAgent</strong><br>repaired heuristic</td><td>Opponent-aware economy and safety style.</td><td>Joint planning and a guaranteed-spin guard; the guard removed repeated sampled recovery locks.</td><td>Failed fresh universal-strength gates at two and four seats; class name is retained only for compatibility.</td></tr>
+              <tr><td><strong>StaticSearchV1</strong></td><td>Frozen one-round determinized search ruler.</td><td>Beat repaired heuristic fields across 2/4/6 seats; 6.29 ms median six-seat decision cost.</td><td>Negative placement reward against weak fields at every tested seat count.</td></tr>
+              <tr><td><strong>Static V2 population</strong></td><td>Recommended development weak, repaired, and search bots.</td><td>Against unchanged V1 fields, all three used fewer rounds; StaticSearchV2 gained +0.217 placement reward and cut paired planning time 23.8%.</td><td>Evidence uses consumed development coordinates; V2 is not a universal total ordering or a fresh final-band result.</td></tr>
+              <tr><td><strong>LookaheadAgent</strong></td><td>Configurable exact-simulation research agent.</td><td>Supports horizons, determinizations, candidate limits, and alternative leaf values.</td><td>No configuration has earned universal-strength promotion.</td></tr>
+              <tr><td><strong>MCTSAgent</strong></td><td>General stochastic search infrastructure and historical research path.</td><td>Substantial chance/search machinery already exists.</td><td>No current full-rules, any-track, 2–6-seat frozen strength result; cost can be high.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="evidence">
+        <span class="section-kicker">T03 · What the data establishes</span>
+        <h2>Two local successes did not produce a total difficulty ladder.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Finding</th><th>Evidence</th><th>Consequence</th></tr></thead>
+            <tbody>
+              <tr><td>Repaired recovery behavior</td><td>Sampled spin events fell from 202 to 13; repeated locks fell from nine to zero.</td><td>Keep the safety guard, but do not infer universal strength.</td></tr>
+              <tr><td>Repaired heuristic remains uncalibrated</td><td>Fresh two- and four-seat strength gates failed.</td><td>Label it “repaired heuristic,” not “strong ruler,” in reports.</td></tr>
+              <tr><td>Static search beats repaired heuristic</td><td>B1 passed this comparison at 2/4/6 seats.</td><td>Search captures a style the hand-written evaluator misses.</td></tr>
+              <tr><td>Static search loses to weak fields</td><td>Placement rewards −0.130, −0.087, and −0.062 at 2/4/6 seats.</td><td>More simulation is not automatically stronger; the leaf/model can create systematic errors.</td></tr>
+              <tr><td>Extra approximate depth can hurt</td><td>Two-round lookahead underperformed the selected one-round configuration in exploration.</td><td>Search-depth scaling needs its own diagnostic, not an assumption.</td></tr>
+              <tr><td>Current latency is practical</td><td>StaticSearchV1 six-seat median 6.29 ms and p95 7.97 ms.</td><td>There is room for bounded experiments, but latency remains a first-class metric.</td></tr>
+              <tr><td>T2 repairs improve speed without more search</td><td>StaticSearchV2 reduced paired rounds 12.8%, decisions 20.5%, clones 25.1%, planning seconds 23.8%, and ms/decision 4.2% while gaining +0.217 reward.</td><td>Use V2 for new development comparisons; retain V1 only where historical identity is required.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="unknowns">
+        <span class="section-kicker">T04 · Blocking unknowns</span>
+        <h2>We do not yet know whether the main defect is strategy, evaluation, or approximation.</h2>
+        <ul class="open-list">
+          <li><strong>Weak-field paradox.</strong><br>Which decisions let StaticSearchV1 beat repaired play yet lose to the weaker heuristic style?</li>
+          <li><strong>Leaf quality.</strong><br>Does progress evaluation reward intended movement, unsafe traffic lines, or short-term gains that exact future play reverses?</li>
+          <li><strong>Hidden-information handling.</strong><br>Are two determinizations enough, biased, or irrelevant compared with evaluator error?</li>
+          <li><strong>Heuristic failure distribution.</strong><br>After the spin fix, which recurring errors dominate: gear, cards, traffic, slipstream, heat, or finish timing?</li>
+          <li><strong>Track and seat regimes.</strong><br>Do failures concentrate in limit-1 corners, clustered corners, multi-lane tracks, pack traffic, or large fields?</li>
+          <li><strong>Search frontier.</strong><br>What is the best strength attainable at 1, 5, 10, 25, and 100 ms per decision?</li>
+          <li><strong>Exploitability.</strong><br>Are apparent improvements broad or narrow counters to one fixed opponent?</li>
+          <li><strong>Reference quality.</strong><br>Without humans or a trusted oracle, when is a static bot genuinely better rather than merely different?</li>
+        </ul>
+      </section>
+
+      <section id="investigations">
+        <span class="section-kicker">T05 · Investigation queue</span>
+        <h2>Replay the paradox before tuning either bot.</h2>
+        <p>These are indicative scopes, not approved experiments. Each receives a separate design with fixed seeds, development tracks, hypotheses, confidence, runtime, logging, and stop rules.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>ID</th><th>Investigation</th><th>Working hypothesis</th><th>Indicative evidence</th><th>Decision unlocked</th></tr></thead>
+            <tbody>
+              <tr><td><strong><a href="T0-static-matchup-map.html">T0 · Static matchup map</a></strong><br>Implemented</td><td>Cross-play all frozen static configurations by seat, track family, and starting position.</td><td>Partly supported: repeatable regime reversals exist, but no stable three-way style cycle appeared.</td><td>1,728 matched races across 36 cells, with raw starting-seat and latency slices.</td><td>Keep all three static styles; use default-vs-tight search cells and six-seat field-composition cells for T1/T2.</td></tr>
+              <tr><td><strong><a href="T1-heuristic-loss-replay.html">T1 · Heuristic-loss replay</a></strong><br>Implemented</td><td>Replay fixed repaired-heuristic losses against several opponent styles, then combine quantitative classification with manual log review.</td><td>Supported with a narrower cause: forward-solvency prices the first corner of a nonexistent next lap, suppressing final-straight gears.</td><td>60 fixed T0 losses, 408 affected decisions, 18 full narratives, and a no-future-corner score counterfactual across weak/search, default/tight, and 2/4/6 seats.</td><td>Implemented and rerun in T1a.</td></tr>
+              <tr><td><strong><a href="T1a-finish-aware-solvency-repair.html">T1a · Finish-aware solvency</a></strong><br>Implemented</td><td>Stop shared solvency lookahead at the finish, then repeat the complete T0/T1 investigations on preserved artifacts.</td><td>Passed: post-finish drag fell from 60/60 to 0/60 losses; repaired focal wins rose from 113 to 181 over 576 matched races.</td><td>1,728 post-fix T0 races, 60 post-fix T1 replays, 18 refreshed manual logs, focused semantic tests, and exact T0-driver replay.</td><td>Adopt the finish guard. Consider hand-aware cache identity as a separate small correctness repair.</td></tr>
+              <tr><td><strong><a href="T2-search-paradox-replay.html">T2 · Search-paradox replay</a></strong><br>Implemented</td><td>Compare StaticSearchV1 decisions in paired wins over repaired play and losses to weak play.</td><td>Narrow leaf hypothesis rejected: prior/top-six admission is the repeated cross-style defect.</td><td>36 exact replays, 577 decisions, all candidates, production/common-seed samples, and fresh heuristic shadows.</td><td>Target safety-aware candidate admission first; leaf resources second. Separately audit the one stale search cache hit and repeated heuristic Stress risks.</td></tr>
+              <tr><td><strong><a href="T2a-static-v2-repair.html">T2a · Static V2 repair</a></strong><br>Implemented and adopted</td><td>Repair cache identity, search admission safety, and avoidable heuristic Stress risk without increasing search depth or samples.</td><td>Supported: every isolated V2 focal bot finished matched races faster; repaired strength held and search reward rose by 0.217.</td><td>Two exact 1,728-race comparisons, a paired 576-race search timing replay, one-track smoke, and focused semantic contracts.</td><td>Use the V2 static population for new development comparisons; retain V1 identities and artifacts for replay.</td></tr>
+              <tr><td><strong>T3 · Component contribution</strong></td><td>Measure which existing heuristic/search components actually change outcomes.</td><td>Several nominally “strong” features are inert, redundant, or harmful in specific regimes. Medium confidence, ~60%.</td><td>Small predeclared ablations on development data; no broad weight sweep.</td><td>Remove dead complexity before adding new strategy.</td></tr>
+              <tr><td><strong>T4 · Track/seat robustness</strong></td><td>Relate each static bot’s failures to geometry and congestion.</td><td>Ruler ordering changes predictably with tight corners and six-seat traffic. Medium-high confidence, ~70%.</td><td>Existing generated-track metadata plus matched missing cells.</td><td>Decide whether one general bot or a diverse static population is the realistic goal.</td></tr>
+              <tr><td><strong>T5 · Search quality/latency frontier</strong></td><td>Compare depth, determinizations, candidate width, and leaf families at fixed decision budgets.</td><td>A better evaluator dominates raw depth; useful gains exist below 25 ms. Medium confidence, ~65%.</td><td>Small position suite first, then bounded races only for Pareto candidates.</td><td>Select one search candidate for a later full promotion design—or stop.</td></tr>
+              <tr><td><strong>T6 · Exploitability screen</strong></td><td>Challenge candidate static improvements against a diverse fixed population rather than their tuning opponent.</td><td>Some apparent gains disappear outside the originating matchup. High confidence, ~80%.</td><td>Multi-ruler cross-play with per-style preservation; fresh development tracks.</td><td>Distinguish broad improvement from counter-strategy.</td></tr>
+              <tr><td><strong>T7 · Human/static reference</strong></td><td>Record competent human decisions or games on reproducible states if available.</td><td>Humans reveal strategic errors shared by all current fixed bots. Confidence unknown.</td><td>Small protocol pilot; qualitative evidence until sampling is sufficient.</td><td>Calibrate which static style is closer to competent play.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="sequence">
+        <span class="section-kicker">T06 · Starting order</span>
+        <h2>Begin with T0, then replay both sides of the non-transitive cycle.</h2>
+        <ol class="step-line" aria-label="Static-bot sequence">
+          <li><strong>T0</strong><br>freeze the matchup graph</li>
+          <li><strong>T1</strong><br>classify heuristic losses</li>
+          <li><strong>T2</strong><br>explain the search paradox</li>
+          <li><strong>Choose</strong><br>one heuristic or search investigation</li>
+        </ol>
+      </section>
+
+      <section id="boundary">
+        <span class="section-kicker">T07 · Boundary</span>
+        <h2>T2a converted the repeated defects into a faster V2 population.</h2>
+        <div class="verification-panel"><strong>Status: T0, T1, T1a, T2, and T2a complete.</strong><br>The <a href="T1a-finish-aware-solvency-repair.html">finish-aware repair</a> remains adopted. <a href="T2a-static-v2-repair.html">T2a</a> implemented round/hand-aware cache identity, safety-aware search admission, and avoidable Stress-risk guards. Against unchanged V1 fields, weak V2 used 0.5% fewer rounds with essentially flat reward, repaired V2 used 5.7% fewer rounds with +0.006 reward, and StaticSearchV2 used 12.8% fewer rounds with +0.217 reward. A paired timing replay reduced search planning time by 23.8% and milliseconds per decision by 4.2%. V1 remains frozen for historical replay; V2 is the recommended development static population.</div>
+      </section>
+    </article>
+  </div>
+</main>
+<footer class="hybrid-footer">Static-bot strength · explain non-transitivity before tuning</footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>
