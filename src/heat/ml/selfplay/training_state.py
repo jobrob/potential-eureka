@@ -49,9 +49,39 @@ def recipe_sha256(recipe: dict[str, Any]) -> str:
 
 
 def checkpoint_receipt_path(path: str | Path) -> Path:
-    """Return the SHA-256 sidecar path for a training-state checkpoint."""
+    """Return the SHA-256 sidecar path for one checkpoint file."""
     checkpoint = Path(path)
     return checkpoint.with_suffix(checkpoint.suffix + ".sha256")
+
+
+def _generations_dir(logical: Path) -> Path:
+    """Return the sibling directory that holds immutable generations."""
+    return logical.with_name(logical.name + ".generations")
+
+
+def _latest_pointer_path(logical: Path) -> Path:
+    """Return the pointer replaced only after a generation pair is complete."""
+    return logical.with_name(logical.name + ".latest")
+
+
+def _is_single_filename(name: str) -> bool:
+    """Reject pointer values that are empty or leave the generations directory."""
+    return bool(name) and name == Path(name).name and name not in {".", ".."}
+
+
+def _parse_generation_filename(name: str, suffix: str) -> int | None:
+    """Return the generation number in ``name``, or None when it is not one."""
+    if not _is_single_filename(name):
+        return None
+    if suffix:
+        if not name.endswith(suffix):
+            return None
+        stem = name[: -len(suffix)]
+    else:
+        stem = name
+    if not stem.isascii() or not stem.isdigit():
+        return None
+    return int(stem)
 
 
 def _sha256_file(path: Path) -> str:
@@ -77,15 +107,43 @@ def _atomic_bytes(path: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def save_training_state(path: str | Path, payload: dict[str, Any]) -> str:
-    """Atomically write one checkpoint and its SHA-256 receipt.
+def _pointer_text(logical: Path) -> str | None:
+    """Return the stripped latest-pointer text, or None when it is absent."""
+    pointer = _latest_pointer_path(logical)
+    if not pointer.is_file():
+        return None
+    try:
+        text = pointer.read_text(encoding="ascii")
+    except (OSError, UnicodeError) as exc:
+        raise TrainingStateError(f"cannot read checkpoint pointer: {pointer}") from exc
+    stripped = text.strip()
+    return stripped or None
 
-    The checkpoint replacement happens before the receipt replacement. A crash
-    between them leaves a safe hash mismatch rather than silently accepting an
-    unreceipted state.
-    """
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
+
+def _allocate_generation(logical: Path) -> Path:
+    """Pick the next generation path without reusing or replacing an older one."""
+    directory = _generations_dir(logical)
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = logical.suffix
+    highest = 0
+    for child in directory.iterdir():
+        number = _parse_generation_filename(child.name, suffix)
+        if number is not None:
+            highest = max(highest, number)
+    number = highest + 1
+    while True:
+        candidate = directory / f"{number:06d}{suffix}"
+        if not candidate.exists() and not checkpoint_receipt_path(candidate).exists():
+            return candidate
+        number += 1
+
+
+def _write_new_checkpoint(destination: Path, payload: dict[str, Any]) -> str:
+    """Flush one new generation file and return the digest of those bytes."""
+    if destination.exists() or checkpoint_receipt_path(destination).exists():
+        raise TrainingStateError(
+            f"refusing to replace checkpoint generation: {destination}"
+        )
     temporary = destination.with_name(
         f".{destination.name}.{secrets.token_hex(8)}.tmp"
     )
@@ -95,12 +153,91 @@ def save_training_state(path: str | Path, payload: dict[str, Any]) -> str:
             handle.flush()
             os.fsync(handle.fileno())
         digest = _sha256_file(temporary)
+        if destination.exists():
+            raise TrainingStateError(
+                f"refusing to replace checkpoint generation: {destination}"
+            )
         os.replace(temporary, destination)
-        receipt = f"{digest}  {destination.name}\n".encode("ascii")
-        _atomic_bytes(checkpoint_receipt_path(destination), receipt)
         return digest
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _publish_checkpoint_receipt(checkpoint: Path, digest: str) -> None:
+    """Atomically write the SHA-256 receipt beside one new generation file."""
+    receipt_path = checkpoint_receipt_path(checkpoint)
+    if receipt_path.exists():
+        raise TrainingStateError(f"refusing to replace checkpoint receipt: {receipt_path}")
+    receipt = f"{digest}  {checkpoint.name}\n".encode("ascii")
+    _atomic_bytes(receipt_path, receipt)
+
+
+def _publish_latest_pointer(logical: Path, generation_name: str) -> None:
+    """Replace the latest pointer after both generation files are complete."""
+    _atomic_bytes(
+        _latest_pointer_path(logical),
+        f"{generation_name}\n".encode("ascii"),
+    )
+
+
+def _checkpoint_name_for_entry(name: str, suffix: str) -> str | None:
+    """Map a generation file or its receipt back to the checkpoint filename."""
+    if _parse_generation_filename(name, suffix) is not None:
+        return name
+    if name.endswith(".sha256"):
+        checkpoint_name = name[: -len(".sha256")]
+        if _parse_generation_filename(checkpoint_name, suffix) is not None:
+            return checkpoint_name
+    return None
+
+
+def _retain_published_generations(logical: Path, previous_name: str | None) -> None:
+    """Keep the newly published generation and the previous pointer target.
+
+    Older generation files are removed only after the pointer has moved. The
+    current and previous pointer names are never deleted.
+    """
+    current_name = _pointer_text(logical)
+    keep = {
+        name
+        for name in (current_name, previous_name)
+        if name is not None and _is_single_filename(name)
+    }
+    directory = _generations_dir(logical)
+    if not directory.is_dir() or not keep:
+        return
+    for child in list(directory.iterdir()):
+        if not child.is_file():
+            continue
+        checkpoint_name = _checkpoint_name_for_entry(child.name, logical.suffix)
+        if checkpoint_name is None or checkpoint_name in keep:
+            continue
+        child.unlink(missing_ok=True)
+
+
+def save_training_state(path: str | Path, payload: dict[str, Any]) -> str:
+    """Publish the next immutable generation, then move the latest pointer.
+
+    The checkpoint and its receipt are written under ``<name>.generations``
+    and never replace an older generation. ``<name>.latest`` is replaced only
+    after the receipt matches the checkpoint bytes. A crash before that pointer
+    move leaves the previous published pair loadable; a partial new generation
+    may remain on disk but is not selected. After the pointer moves, the new
+    pair and the previously published pair are kept and older generations are
+    deleted. Legacy bytes already stored at ``path`` are not overwritten.
+    """
+    logical = Path(path)
+    previous_name = _pointer_text(logical)
+    generation = _allocate_generation(logical)
+    digest = _write_new_checkpoint(generation, payload)
+    _publish_checkpoint_receipt(generation, digest)
+    if _read_verified_digest(generation) != digest:
+        raise TrainingStateError(
+            f"checkpoint receipt did not match published bytes: {generation}"
+        )
+    _publish_latest_pointer(logical, generation.name)
+    _retain_published_generations(logical, previous_name)
+    return digest
 
 
 def _read_verified_digest(path: Path) -> str:
@@ -113,12 +250,38 @@ def _read_verified_digest(path: Path) -> str:
         raise TrainingStateError(f"missing checkpoint receipt: {receipt_path}") from exc
     if separator != "  " or filename != path.name or len(expected) != 64:
         raise TrainingStateError(f"invalid checkpoint receipt: {receipt_path}")
-    actual = _sha256_file(path)
+    try:
+        actual = _sha256_file(path)
+    except OSError as exc:
+        raise TrainingStateError(f"cannot read checkpoint: {path}") from exc
     if actual != expected:
         raise TrainingStateError(
             f"checkpoint SHA-256 mismatch: expected {expected}, got {actual}"
         )
     return actual
+
+
+def published_checkpoint_path(path: str | Path) -> Path:
+    """Return the checkpoint file a later load of ``path`` would verify.
+
+    New saves publish a generation and a latest pointer. Older saves are the
+    logical file itself. Callers that need the bytes or the receipt should use
+    this path, not assume the bytes were written at the logical name.
+    """
+    return _resolve_load_path(Path(path))
+
+
+def _resolve_load_path(logical: Path) -> Path:
+    """Return the pointer's generation, or a legacy checkpoint when no pointer exists."""
+    pointer = _latest_pointer_path(logical)
+    if pointer.is_file():
+        name = _pointer_text(logical)
+        if name is None or _parse_generation_filename(name, logical.suffix) is None:
+            raise TrainingStateError(f"invalid checkpoint pointer: {pointer}")
+        return _generations_dir(logical) / name
+    if logical.is_file():
+        return logical
+    raise TrainingStateError(f"missing training checkpoint: {logical}")
 
 
 def load_training_state(
@@ -129,12 +292,16 @@ def load_training_state(
     source_identity: str,
     anchor_identity: str | None,
 ) -> dict[str, Any]:
-    """Verify and deserialize a compatible training checkpoint.
+    """Verify and deserialize the newest published training checkpoint.
 
-    All byte-, schema-, recipe-, campaign-, source-, anchor-, and structural
-    checks happen before the caller receives the payload and mutates a trainer.
+    A ``<name>.latest`` pointer selects the generation. Without one, the legacy
+    ``path`` plus ``path.sha256`` pair is used. Receipt, schema, recipe,
+    campaign, source, anchor, and structural checks then run unchanged, before
+    the caller receives the payload and mutates a trainer.
     """
-    source = Path(path)
+    source = _resolve_load_path(Path(path))
+    if not source.is_file():
+        raise TrainingStateError(f"missing training checkpoint: {source}")
     _read_verified_digest(source)
     try:
         loaded = torch.load(str(source), map_location="cpu", weights_only=False)

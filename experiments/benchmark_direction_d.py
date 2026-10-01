@@ -41,6 +41,7 @@ from heat.ml.selfplay.semantic_contract import (
 from heat.ml.selfplay.training_state import (
     TrainingStateError,
     checkpoint_receipt_path,
+    published_checkpoint_path,
     load_training_state,
     recipe_sha256,
     resolved_recipe,
@@ -242,8 +243,13 @@ def _invalid_checkpoint_probes(
     """Prove damaged bytes, receipts, and source identities fail closed."""
     results: dict[str, bool] = {}
     truncated = directory / "truncated.pt"
-    shutil.copy2(control, truncated)
-    shutil.copy2(checkpoint_receipt_path(control), checkpoint_receipt_path(truncated))
+    published = published_checkpoint_path(control)
+    shutil.copy2(published, truncated)
+    source_receipt = checkpoint_receipt_path(published).read_text(encoding="ascii")
+    digest = source_receipt.split("  ", 1)[0].strip()
+    checkpoint_receipt_path(truncated).write_text(
+        f"{digest}  {truncated.name}\n", encoding="ascii"
+    )
     data = truncated.read_bytes()
     truncated.write_bytes(data[: max(1, len(data) // 3)])
     try:
@@ -259,7 +265,7 @@ def _invalid_checkpoint_probes(
         results["truncated_rejected"] = False
 
     bad_receipt = directory / "bad_receipt.pt"
-    shutil.copy2(control, bad_receipt)
+    shutil.copy2(published_checkpoint_path(control), bad_receipt)
     checkpoint_receipt_path(bad_receipt).write_text(
         f"{'0' * 64}  {bad_receipt.name}\n", encoding="ascii"
     )

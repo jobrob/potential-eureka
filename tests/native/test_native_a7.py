@@ -98,8 +98,10 @@ def test_actions_are_independent_of_batch_order_and_policy_partition() -> None:
 def test_value_only_rows_and_real_batch_telemetry() -> None:
     """Bootstrap rows skip sampling while sharing one value batch."""
     ready = _ready(value_only=True)
+    original_masks = ready.legal_masks.copy()
     coordinator = CpuPolicyCoordinator(_policies(), sampling_seed=456)
     submission = coordinator.dispatch(ready)
+    np.testing.assert_array_equal(ready.legal_masks, original_masks)
     assert submission.actions[-1] == -1
     assert submission.logps[-1] == 0.0
     assert submission.sampling_words[-1] == 0

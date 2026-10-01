@@ -39,7 +39,13 @@ std::uint64_t fnv1a64(const py::bytes& payload) {
 }
 
 constexpr std::uint32_t kProtocolVersion = 1;
-constexpr const char* kSchemaHash = "d3-a5-v3-r104-a516-p6-r200-c424-t90";
+constexpr const char* kSchemaHash = "d3-a5-v4-r104-a516-p6-r200-c424-t90";
+constexpr double kSpeedLimitScale = 5.0;
+constexpr double kCornerLengthScale = 90.0;
+constexpr double kLaneScale = 3.0;
+constexpr double kTrackLengthScale = 120.0;
+constexpr double kCornerSpeedScale = 12.0;
+constexpr double kHeatCostScale = 6.0;
 constexpr std::size_t kPlayers = 6;
 constexpr std::size_t kZones = 6;
 constexpr std::size_t kCardsPerZone = 424;
@@ -728,6 +734,13 @@ private:
     void credit_movement(CompactPlayer& player, std::int16_t amount);
     bool slipstream_eligible(const CompactPlayer& player) const;
     void check_corner(CompactPlayer& player);
+    // Public heat bill for one geometric path. Matches rules.corners_crossed.
+    std::int32_t path_heat_cost(
+        std::int16_t start_pos,
+        std::int16_t end_pos,
+        std::int32_t spaces_moved,
+        std::int32_t speed
+    ) const;
     std::size_t player_slot(std::int16_t player_id) const;
     py::dict advance_to_react_after(std::size_t completed_turn_index);
     py::dict decision_result(
@@ -981,6 +994,45 @@ void NativeState::check_corner(CompactPlayer& player) {
         throw py::value_error("spin log exceeds fixed capacity");
     }
     player.spins[player.spin_length++] = {static_cast<std::int16_t>(state_.round), first_corner_start};
+}
+
+std::int32_t NativeState::path_heat_cost(
+    std::int16_t start_pos,
+    std::int16_t end_pos,
+    std::int32_t spaces_moved,
+    std::int32_t speed
+) const {
+    const auto length = static_cast<std::int32_t>(state_.track.length);
+    if (length == 0 || spaces_moved <= 0) {
+        return 0;
+    }
+    auto overlaps = [](
+        std::int16_t corner_start,
+        std::int16_t corner_end,
+        std::int32_t range_start,
+        std::int32_t range_end
+    ) {
+        return corner_end >= corner_start
+            && corner_end >= range_start
+            && corner_start <= range_end;
+    };
+    std::int32_t heat = 0;
+    for (std::size_t index = 0; index < state_.track.corner_count; ++index) {
+        const auto& corner = state_.track.corners[index];
+        bool crossed = false;
+        if (spaces_moved >= length) {
+            crossed = overlaps(corner[0], corner[1], 0, length - 1);
+        } else if (end_pos > start_pos) {
+            crossed = overlaps(corner[0], corner[1], start_pos + 1, end_pos);
+        } else {
+            crossed = overlaps(corner[0], corner[1], start_pos + 1, length - 1)
+                || overlaps(corner[0], corner[1], 0, end_pos);
+        }
+        if (crossed) {
+            heat += std::max<std::int32_t>(0, speed - corner[2]);
+        }
+    }
+    return heat;
 }
 
 std::size_t NativeState::player_slot(std::int16_t player_id) const {
@@ -1710,19 +1762,6 @@ py::array_t<float> NativeState::observation(
                 < forward_distance(state_.track.corners[right][0]);
         }
     );
-    std::int16_t max_limit = 1;
-    std::int16_t max_corner_length = 1;
-    std::uint8_t max_lanes = 1;
-    for (std::size_t index = 0; index < state_.track.corner_count; ++index) {
-        const auto& corner = state_.track.corners[index];
-        max_limit = std::max(max_limit, corner[2]);
-        max_corner_length = std::max<std::int16_t>(
-            max_corner_length, static_cast<std::int16_t>(corner[1] - corner[0] + 1)
-        );
-    }
-    for (std::size_t index = 0; index < state_.track.length; ++index) {
-        max_lanes = std::max(max_lanes, state_.track.lanes[index]);
-    }
     for (std::size_t index = 0; index < kCorners; ++index) {
         if (index >= state_.track.corner_count) {
             write(0.0); write(0.0); write(0.0); write(0.0);
@@ -1731,15 +1770,23 @@ py::array_t<float> NativeState::observation(
         const auto& corner = state_.track.corners[corner_order[index]];
         const auto entry_lanes = corner[0] >= 0 && corner[0] < state_.track.length
             ? state_.track.lanes[corner[0]] : 1;
+        const auto corner_len = static_cast<std::int16_t>(corner[1] - corner[0] + 1);
         write(clip01(static_cast<double>(forward_distance(corner[0])) / length));
-        write(clip01(static_cast<double>(corner[2]) / max_limit));
-        write(clip01(static_cast<double>(corner[1] - corner[0] + 1) / max_corner_length));
-        write(clip01(static_cast<double>(entry_lanes) / max_lanes));
+        write(clip01(static_cast<double>(corner[2]) / kSpeedLimitScale));
+        write(clip01(static_cast<double>(corner_len) / kCornerLengthScale));
+        write(clip01(static_cast<double>(entry_lanes) / kLaneScale));
     }
-    write(clip01(static_cast<double>(laps - player.lap) / laps));
     const auto total_length = static_cast<std::int32_t>(length) * laps;
-    const auto absolute_position = static_cast<std::int32_t>(player.lap) * length + player.position;
-    write(clip01(static_cast<double>(total_length - absolute_position) / total_length));
+    if (player.finished || player.lap > laps) {
+        write(0.0);
+        write(0.0);
+    } else {
+        const auto current_lap = std::max<std::int16_t>(player.lap, 1);
+        write(clip01(static_cast<double>(laps - current_lap + 1) / laps));
+        const auto completed = (static_cast<std::int32_t>(current_lap) - 1) * length
+            + player.position;
+        write(clip01(static_cast<double>(total_length - completed) / total_length));
+    }
     write(clip01(static_cast<double>(player.zones[3].length) / 6.0));
     write(clip01(static_cast<double>(player.position) / length));
 
@@ -1804,6 +1851,47 @@ py::array_t<float> NativeState::observation(
         }
     }
     output[phase_start + 9] = static_cast<float>(clip01(state_.round / 50.0));
+    const auto speed = static_cast<std::int32_t>(player.speed_cards)
+        + player.speed_boost + player.speed_adrenaline;
+    const auto moved = static_cast<std::int32_t>(player.lap - player.turn_start_lap) * length
+        + (static_cast<std::int32_t>(player.position) - player.turn_start_position);
+    const auto extended = moved + 2;
+    std::int16_t extended_end = player.position;
+    if (extended > 0) {
+        auto raw_end = static_cast<std::int32_t>(player.turn_start_position) + extended;
+        auto wrapped = raw_end % static_cast<std::int32_t>(length);
+        if (wrapped < 0) {
+            wrapped += length;
+        }
+        extended_end = static_cast<std::int16_t>(wrapped);
+    }
+    output[phase_start + 10] = static_cast<float>(
+        clip01(static_cast<double>(speed) / kCornerSpeedScale)
+    );
+    output[phase_start + 11] = static_cast<float>(
+        clip01(static_cast<double>(player.turn_start_position) / length)
+    );
+    output[phase_start + 12] = static_cast<float>(clip_signed(
+        static_cast<double>(player.lap - player.turn_start_lap) / laps
+    ));
+    output[phase_start + 13] = static_cast<float>(clip01(
+        static_cast<double>(path_heat_cost(
+            player.turn_start_position, player.position, moved, speed
+        )) / kHeatCostScale
+    ));
+    output[phase_start + 14] = static_cast<float>(clip01(
+        static_cast<double>(path_heat_cost(
+            player.turn_start_position, player.position, moved, speed + 1
+        )) / kHeatCostScale
+    ));
+    output[phase_start + 15] = static_cast<float>(clip01(
+        static_cast<double>(path_heat_cost(
+            player.turn_start_position, extended_end, extended, speed
+        )) / kHeatCostScale
+    ));
+    output[phase_start + 16] = static_cast<float>(
+        clip01(static_cast<double>(state_.track.length) / kTrackLengthScale)
+    );
     cursor += 19;
     if (cursor != kObservationDim) {
         throw std::logic_error("native observation layout drifted");
@@ -1965,21 +2053,51 @@ double NativeState::reward(
 }
 
 double NativeState::terminal_margin(std::int16_t player_id) const {
-    if (state_.starting_player_count <= 1) {
+    const auto& player = state_.players[player_slot(player_id)];
+    auto field = state_.starting_player_count;
+    if (field == 0) {
+        for (const auto& other : state_.players) {
+            if (other.present) {
+                ++field;
+            }
+        }
+    }
+    if (field <= 1) {
         return 0.0;
     }
-    const auto& player = state_.players[player_slot(player_id)];
     const auto length = state_.track.length == 0 ? 1 : state_.track.length;
     const auto laps = state_.track.laps == 0 ? 1 : state_.track.laps;
-    const auto total_length = length * laps;
+    const auto total_length = static_cast<std::int32_t>(length) * laps;
+    bool any_opponent = false;
+    bool ranked = player.finished && player.finish_order > 0;
+    std::int16_t best_order = std::numeric_limits<std::int16_t>::max();
+    for (const auto& other : state_.players) {
+        if (!other.present || other.player_id == player_id) {
+            continue;
+        }
+        any_opponent = true;
+        if (other.finished && other.finish_order > 0) {
+            best_order = std::min(best_order, other.finish_order);
+        } else {
+            ranked = false;
+        }
+    }
+    if (!any_opponent) {
+        return 0.0;
+    }
+    if (ranked) {
+        return clip_signed(
+            static_cast<double>(best_order - player.finish_order) / (field - 1)
+        );
+    }
     auto remaining = [&](const CompactPlayer& item) {
         if (item.finished) {
             return 0.0;
         }
-        return std::max(
-            0.0,
-            static_cast<double>(total_length - (item.lap * length + item.position))
-        );
+        const auto current_lap = std::max<std::int16_t>(item.lap, 1);
+        const auto completed = (static_cast<std::int32_t>(current_lap) - 1) * length
+            + item.position;
+        return std::max(0.0, static_cast<double>(total_length - completed));
     };
     auto best_opponent = std::numeric_limits<double>::infinity();
     for (const auto& other : state_.players) {
@@ -2168,7 +2286,7 @@ public:
         py::dict result;
         result["protocol_version"] = kProtocolVersion;
         result["state_schema_hash"] = kSchemaHash;
-        result["codec_version"] = 3;
+        result["codec_version"] = 4;
         result["rng_version"] = 1;
         result["receipt_version"] = 1;
         result["row_capacity"] = row_capacity_;

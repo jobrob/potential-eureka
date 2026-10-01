@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HEAT performance and test review — 7 September 2026</title>
+<style>
+:root{color-scheme:light;--ink:#172b3a;--muted:#506575;--line:#d7e1e7;--accent:#17645b}
+*{box-sizing:border-box}body{font:17px/1.6 system-ui,sans-serif;color:var(--ink);background:#f4f7f8;margin:0}
+main{max-width:1050px;margin:auto;padding:42px 28px 70px}h1,h2,h3{line-height:1.22}h1{font-size:2.3rem;margin:10px 0 20px}h2{margin-top:36px}h3{margin-top:0}
+p{margin:12px 0}.muted,small{color:var(--muted)}.card{background:white;border:1px solid var(--line);border-radius:10px;padding:23px;margin:18px 0}.lead{border-left:5px solid var(--accent)}
+table{border-collapse:collapse;width:100%;font-size:.95rem}th,td{text-align:left;vertical-align:top;padding:13px;border-bottom:1px solid var(--line)}th{background:#eaf1f3}code{font-size:.87em;overflow-wrap:anywhere}a{color:#126a83}li{margin:9px 0}.scroll{overflow:auto}.tag{font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;color:var(--accent);font-weight:700}
+@media(max-width:650px){main{padding:24px 16px}h1{font-size:1.85rem}.card{padding:17px}th,td{padding:9px}}
+</style>
+</head>
+<body><main>
+<p class="tag">Implemented · Independent review pending</p>
+<h1>Small runtime wins, and tests worth simplifying</h1>
+<p class="muted">7 September 2026 · Current source revision <code>73c07fdd35a3c07b38e6a601e85bec4364080b46</code>. Existing uncommitted user changes were preserved.</p>
+<div class="card lead"><p><strong>The clearest cleanup is in the tests.</strong> Two search tests duplicate the implementation they claim to check, three other test pairs repeat identical checks, and a default-worker test runs entire races without actually proving serial execution. Runtime opportunities also exist, but the measured gains here are modest.</p>
+<p>The original review was followed by implementation at the user’s request. Probes and evidence are under <code>.scratch/performance-review-2026-09-07/</code>. No training campaign was run.</p></div>
+
+<h2>Implementation results</h2>
+<div class="card lead"><p><strong>All eight recommendations are implemented.</strong> The native collector delays observations for forced moves; policy inference avoids redundant copies; evaluation skips rollout allocation and transition rewards using the existing race driver. Checkpoint compatibility has one shared helper in <code>training.py</code>, with the old exception import retained for callers.</p>
+<p>The duplicated horizon tests now have one independent one-round reference and an explicit depth assertion. Three other duplicate pairs were consolidated. Worker-default dispatch uses stubs, the two real multiprocessing comparisons are marked slow, and metadata tests no longer train models. The value-loading integration test uses a saved random-weight model.</p>
+<p>Retained: worker determinism, optimized/reference equivalence tests, specialized checkpoint behavior, and the vector modules required by native conversion. Experimental backend deletion and broader inference redesign were not recommendations to implement.</p></div>
+<div class="scroll"><table><thead><tr><th>Fresh implemented-path benchmark</th><th>Before → after</th><th>Interpretation</th></tr></thead><tbody>
+<tr><td>Native collection: forced observations and copy removal together</td><td>1.1173 → 1.0727 seconds</td><td>4.2% higher throughput; 4.0% less time. Three alternating pairs after warmup, 6,502 actual rows per run.</td></tr>
+<tr><td>Six-race outcome-only evaluation</td><td>0.4268 → 0.4011 seconds</td><td>6.4% higher throughput; 6.0% less time. Five alternating pairs after warmup.</td></tr>
+</tbody></table></div>
+<p>Both comparisons preserved all checked receipts. Native checks included every returned rollout tensor, episode returns, NumPy random state, and continuation counters. Evaluation checks included final game state and Torch/NumPy random states. These are short CPU measurements with frozen random policies, not estimates of full training throughput or learning quality. The native result includes both optimizations, so it does not isolate their individual benefits.</p>
+<p>The hypothesis was that avoiding unused observations, copying, and training bookkeeping would reduce runtime without changing behavior. Confidence is high in the avoided work and checked equality, moderate in a modest speed gain, and low in extrapolating exact percentages. Scope was the small Python changes listed above, with under a minute of benchmark compute and a two-minute cap per probe mode. No weights were trained during benchmarking.</p>
+<ul>
+<li><strong>Tests:</strong> 315 affected fast tests passed in 22.22 seconds. The three deselected slow tests had already passed in the preceding broader run, including both byte-identical worker comparisons.</li>
+<li><strong>Mutation check:</strong> deliberately simulating two rounds now fails both horizon-zero cases; the original four cases accepted that error.</li>
+<li><strong>Evaluation parity:</strong> normal and time-limit endings match with stateful opponents at two/six seats. Storage tripwires reject buffer allocation/writes. CPU passed; CUDA cases are enabled when available but this host has CPU-only Torch.</li>
+<li><strong>Test isolation repair:</strong> training tests leave global reward shaping enabled. The environment/collector comparison now explicitly sets zero shaping with automatic restoration. The failure was reproduced using the pre-change collector methods before repair.</li>
+<li><strong>Static checks:</strong> strict type checking passed for all 84 source files; lint passed for every changed Python file. Repository-wide lint still reports 88 findings outside those files. The full repository test suite was not run.</li>
+<li><strong>Independent review:</strong> pending; findings will be resolved before final delivery.</li>
+</ul>
+<p>Fresh evidence: <a href="../../.scratch/performance-review-2026-09-07/implemented-native.json">native results</a> · <a href="../../.scratch/performance-review-2026-09-07/implemented-eval.json">evaluation results</a> · <a href="../../.scratch/performance-review-2026-09-07/implementation-fast-tests.txt">315 passing tests</a> · <a href="../../.scratch/performance-review-2026-09-07/implementation-tests.txt">earlier broader run including slow tests</a> · <a href="../../.scratch/performance-review-2026-09-07/mutation-after.txt">mutation rejection</a>.</p>
+<p class="muted">The original review below is retained as the rationale. Its earlier benchmark numbers and source line numbers describe the pre-implementation snapshot; use the implementation results above for current status.</p>
+
+<h2>Performance opportunities</h2>
+<div class="card"><h3>1. Delay observation creation until a move needs a policy decision — Implemented</h3>
+<p><strong>Small change; high confidence that it removes wasted work; limited confidence in the exact speed gain.</strong></p>
+<p><code>src/heat/ml/native_env/collector.py:333</code> creates an observation before checking the legal-action mask. If only one action is legal, the observation is discarded. Move observation creation below that check. The source boundary is the native collector; the native rules and sampling algorithm need no change.</p>
+<p>A temporary version produced identical rollout tensors, episode returns, NumPy random state, and collector continuation state. Both versions produced 6,502 actual rows from a 4,096-row target. Median collection time was <strong>1.170 seconds → 1.128 seconds</strong>: about <strong>3.7% higher throughput</strong>, or 3.6% less elapsed time.</p>
+<p>There were three alternating measured pairs after warmup. The samples overlap and baseline timing drifted, so this is a promising small optimization, not a reliable prediction of training speed. A full training update was not timed.</p></div>
+
+<div class="card"><h3>2. Avoid training-buffer allocation when evaluation only needs the race outcome — Implemented</h3>
+<p><strong>Measured opportunity; medium confidence; keep the game-playing behavior shared.</strong></p>
+<p><code>src/heat/ml/selfplay/eval_harness.py:344</code> runs a training collector for each learned-policy evaluation race. <code>multiseat.py:317</code> allocates rollout arrays for every seat, including scripted opponents whose arrays stay empty. Evaluation then uses the final race state rather than those training arrays.</p>
+<p>A policy-backed version of the existing scripted race runner took <strong>0.406 seconds instead of 0.446 seconds</strong> across six races: about <strong>9.9% higher throughput</strong>, or 9.0% less time. Final game-state hashes and Torch random-state hashes matched. The existing route allocated <strong>23.16 MB of rollout arrays in total across the six races</strong>; this is cumulative allocation, not peak memory.</p>
+<p>Use a small shared race-driving path or explicit outcome-only mode. Do not introduce another copy of the rules. Before adopting it, also verify truncation, stateful opponents, and supported devices; this probe used CPU, a random policy, a weak heuristic, and two/six-seat games.</p></div>
+
+<div class="card"><h3>3. Remove definite extra copies before redesigning inference — Implemented</h3>
+<p><strong>Confirmed redundant operation; end-to-end benefit unmeasured.</strong></p>
+<p><code>src/heat/ml/native_env/coordinator.py:184</code> uses <code>ready.legal_masks[indices].copy()</code>. Integer-array indexing already produces an independent array, so the explicit copy copies the same masks again. The later <code>astype(np.float32)</code> calls also copy float32 outputs by default; consider <code>copy=False</code> where dtype conversion must remain supported.</p>
+<p>The earlier 5 September profile identified coordinator dispatch as a substantial collection cost. I rechecked the current code but did not rerun that profile or measure these copy changes. Start with these simple removals, then measure grouping or distribution work separately. Preserve frozen keyed sampling, action legality, policy-version checks, and value-only rows. Broadly disabling validation is not justified by this review.</p></div>
+
+<h2>Tests that should change</h2>
+<div class="card"><h3>4. Replace the duplicated horizon-zero reference — Implemented</h3>
+<p><strong>Highest-priority test finding: confirmed by deliberately introducing a wrong behavior.</strong></p>
+<p><code>tests/test_search_agent.py:209</code> and <code>tests/test_search_agent_learned.py:287</code> contain the same test body, each expanded over two leaf-value modes. Their reference helpers call <code>agent._score_plan()</code>, which the real selection path also calls. The claim that this is an independent one-round simulation is therefore inaccurate.</p>
+<p>In a temporary process-only mutation, I replaced <code>rounds = max(1, self.horizon)</code> with <code>rounds = 2</code>. <strong>All four comparison cases still passed.</strong> Both sides agree on the same broken scorer. This demonstrates a gap in these four cases, not that the entire search suite misses the change.</p>
+<p>Keep one owner for the two leaf modes and replace its reference with an independently driven single forced round, or a focused assertion on the actual number of rounds simulated. Retain the separate learned-value tests. Sharing the existing reference helper alone would reduce duplication without repairing the coverage gap.</p></div>
+
+<div class="card"><h3>5. Consolidate three exact duplicate pairs — Implemented</h3>
+<div class="scroll"><table><thead><tr><th>Duplicate checks</th><th>Recommendation</th></tr></thead><tbody>
+<tr><td><code>test_ml_training.py:688</code> and <code>test_sweep.py:479</code>: both assert dimensions 104/516 and codec version ≥ 2.</td><td>Keep one centrally owned compatibility check. The version inequality cannot prove that a layout stayed unchanged or that a version increment accompanied it; retain real codec/sidecar compatibility tests.</td></tr>
+<tr><td><code>test_rules.py:300</code> and <code>:315</code>: identical hand, gear, and cluttered-hand assertion.</td><td>Keep the descriptively named boundary case; remove the duplicate.</td></tr>
+<tr><td><code>test_rules.py:740</code> and <code>:760</code>: identical player at position 28 on a length-30 final lap.</td><td>Keep the exact-boundary case. Remove the duplicate or turn it into a distinct overshoot case.</td></tr>
+</tbody></table></div>
+<p>The audit compared parsed test bodies, then checked the candidates manually. These duplicates are cheap; removing them primarily reduces maintenance noise, not suite runtime.</p></div>
+
+<div class="card"><h3>6. Test the worker default without generating whole races — Implemented</h3>
+<p><code>tests/test_c7_throughput.py:134</code> deletes the workers argument, generates a dataset, and only checks that it has rows. It took <strong>3.91 seconds</strong>. A changed default of four workers could still satisfy that assertion, despite the test being named <code>test_workers_default_is_serial</code>.</p>
+<p>Exercise the actual dispatch branch with stub game results and assert that no process pool is used when the argument is missing. Do not merely copy the default expression into a test. Keep the real serial-versus-parallel output comparisons: they protect deterministic dataset generation.</p>
+<p>The solo and two-player parallel tests took 9.41 and 18.70 seconds. They lack the <code>slow</code> marker even though subprocess tests are the documented example of that marker. Marking them slow would move about 28 seconds out of the fast gate while preserving them in the full gate. These durations come from one focused run; startup briefly overlapped a probe, so they are approximate.</p></div>
+
+<div class="card"><h3>7. Stop training a value model to test metadata — Implemented</h3>
+<p><code>tests/test_search_agent_learned.py:312</code> builds a dataset and trains for two epochs to supply a checkpoint fixture. The valid/mismatched metadata cases at lines 343 and 350 only call <code>_validate_value_meta()</code>, which reads the JSON sidecar.</p>
+<p>Give those cases tiny sidecar files directly. Keep a separate real save/load/inference integration case. A random-weight checkpoint may also be sufficient for that integration case because it checks loading and legal execution, not learning improvement.</p>
+<p>This is unnecessary setup by inspection; I did not time this fixture. Since it is shared with an integration test, splitting the metadata cases alone may not reduce the whole module's runtime.</p></div>
+
+<h2>Production-code maintenance</h2>
+<div class="card"><h3>8. Give checkpoint compatibility one owner — Implemented</h3>
+<p><code>src/heat/agents/ml_agent.py:105</code>, <code>search_agent.py:310</code>, and <code>mcts_agent.py:696</code> repeat the same sidecar lookup and dimension/version comparison pattern.</p>
+<p>Extract one small compatibility helper at the existing checkpoint-metadata boundary, retaining useful caller-specific error context. Keep specialized loading, normalization, and value-mode behavior in each agent. This is a maintenance improvement, not a runtime optimization.</p></div>
+<p><strong>Do not delete the entire vector environment as “old code”.</strong> The native bridge still imports its state and conversion modules (<code>src/heat/ml/native_env/bridge.py:12</code>, <code>:514</code>). The separate compiled experiment code has verification and benchmark callers. It is a candidate for an explicitly agreed archival decision, not proven dead code.</p>
+<p>Likewise, keep the C8/C9/C11 equivalence tests that compare optimized code with older reference behavior, native sampling-order tests, and worker determinism tests. Similar-looking tests can protect distinct contracts. This review found concrete duplication; it does not support wholesale test deletion.</p>
+
+<h2>Evidence and limits</h2>
+<ul>
+<li><strong>Baseline verification:</strong> 19 focused tests passed in 36.77 seconds. Scope: C7, the horizon-zero groups, the two codec guards, and native A7.</li>
+<li><strong>Mutation check:</strong> all four horizon-zero comparison cases passed with deliberately wrong two-round behavior. The patch existed only in the probe process.</li>
+<li><strong>Benchmark hypothesis:</strong> avoiding unused observation/buffer work should reduce time without changing outputs. Confidence was high in avoiding work, moderate in equivalence, and low-to-moderate in a stable timing benefit. Probe code was confined to scratch files; each measurement took seconds, with visible progress and fixed repetition counts.</li>
+<li><strong>Clean native timing:</strong> the reported native result was rerun after the focused tests completed, replacing an initial overlapping measurement. It used one warmup pair and three alternating measured pairs, an untrained frozen policy, four seats, 48 slots, and 8/2 Torch threads.</li>
+<li><strong>Review scope:</strong> native collection/inference, scalar evaluation, selected search/checkpoint paths, and an exact-body scan across Python tests. This was not an exhaustive line-by-line audit of the entire Python/C++ repository, a full-suite run, a learning experiment, or a production performance guarantee.</li>
+</ul>
+<p>Evidence: <a href="../../.scratch/performance-review-2026-09-07/native-results.json">native benchmark</a> · <a href="../../.scratch/performance-review-2026-09-07/eval-results.json">evaluation benchmark</a> · <a href="../../.scratch/performance-review-2026-09-07/tests.txt">focused test output</a> · <a href="../../.scratch/performance-review-2026-09-07/test-audit.json">duplicate and mutation audit</a>.</p>
+<p><strong>Suggested order:</strong> repair the horizon-zero test, consolidate exact duplicates, replace the default-worker test, then adopt the forced-observation change with focused parity checks. Consider outcome-only evaluation next if evaluation is a significant part of the workload. Leave broader inference changes and experimental-backend removal for separate evidence-backed decisions.</p>
+</main></body></html>

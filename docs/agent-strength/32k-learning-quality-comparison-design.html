@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Revised design for a HEAT native 32K learning comparison. The campaign is not authorized.">
+  <title>32K learning comparison, revised</title>
+  <link rel="stylesheet" href="../design-doc.css">
+</head>
+<body class="hybrid">
+<header class="hybrid-hero">
+  <div class="hybrid-shell hybrid-hero-grid">
+    <div>
+      <span class="status">Revised 1 October 2026 · campaign not started · G0005 not allocated</span>
+      <h1>Pick the question before any 32K run.</h1>
+      <p class="hero-copy">The 5 September review kept this comparison, and changed what it is allowed to mean. Thirty large updates are a pilot of one declared recipe. They are not a human-strength test, and they are not the same learning schedule as G0002.</p>
+      <p><a href="L0-learned-strength-map.html">Start from the L0 evidence map</a> · <a href="../reviews/2026-09-05-code-and-design-review.html">5 September review</a><br><span class="muted">First drafted 3 August 2026. Revised after that review; not implemented.</span></p>
+    </div>
+    <aside class="status-board" aria-label="Design decision">
+      <span class="board-label">Decision sought</span>
+      <strong>Choose one question,<br>then register it.</strong>
+      <p>Runtime adoption keeps the legacy observation. A corrected observation is a different generation. Neither run is authorized by this revision.</p>
+    </aside>
+  </div>
+</header>
+
+<main class="hybrid-main">
+  <div class="hybrid-layout">
+    <nav class="hybrid-nav" aria-label="Document contents">
+      <strong>Contents</strong>
+      <a href="#claim">Claim</a>
+      <a href="#recipe">Registered recipe</a>
+      <a href="#training">Training contract</a>
+      <a href="#screen">Evaluation matrices</a>
+      <a href="#races">Race provenance</a>
+      <a href="#gates">Adoption gates</a>
+      <a href="#execution">Execution plan</a>
+      <a href="#failure">Failure investigation</a>
+      <a href="#implementation">Implementation</a>
+      <a href="#boundary">Authorization boundary</a>
+    </nav>
+
+    <article class="hybrid-content">
+      <section id="claim">
+        <span class="section-kicker">Q01 · Question and evidence role</span>
+        <h2>Two questions. Only one of them is a runtime-adoption gate.</h2>
+        <div class="decision-banner"><strong>Choose before registration</strong><br>Question A asks whether the native 32K collector preserves G0002-level learning when the observation is still codec v3. Question B asks whether codec v4, with absolute corner scales and the missing react context, learns better. Question B changes the inputs and the runtime together. It must not be reported as “the same policy, faster.” G0005 stays unallocated until one question is written down as its own recipe.</div>
+        <div class="data-panel table-wrap">
+          <table>
+            <tbody>
+              <tr><td>Question A</td><td>Does the native 32K runtime, with the legacy codec v3 observation, preserve G0002-level learning at the 1M scale well enough to be a substrate for later work?</td></tr>
+              <tr><td>Question B</td><td>Does a new recipe that trains on codec v4 beat the preserved G0002 baseline on the same races? Report it as an input change plus a runtime change.</td></tr>
+              <tr><td>Hypothesis for A</td><td>The candidate passes the aggregate, matched-run, breadth, and collapse guards. Those guards are an engineering tolerance for a three-seed pilot, not a precise non-inferiority claim.</td></tr>
+              <tr><td>Prior confidence</td><td>Medium, 60%, for question A. The one-hour soak is strong. Thirty updates, a coarser opponent refresh, and seed instability remain real risks. Question B has no learning evidence yet.</td></tr>
+              <tr><td>Positive result means</td><td>For A: later work may keep this runtime and the legacy observation. For B: later work may keep the corrected observation. Neither result means the car is near a skilled human.</td></tr>
+              <tr><td>Positive result does not mean</td><td>The candidate is the final training method, or that equal transition counts made the two schedules the same.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="decision-banner"><strong>Evidence streams stay separate</strong><br>The one-hour native soak proves operational throughput and stability. Static V2 agents are evaluation rulers. Only this registered campaign can supply the missing 32K learning-quality evidence.</div>
+      </section>
+
+      <section id="recipe">
+        <span class="section-kicker">Q02 · Provisional generation</span>
+        <h2>The next generation is not allocated, and it cannot change inputs quietly.</h2>
+        <p>The next unused identity is still <code>G0005</code>. Do not allocate it in this revision. When it is allocated, the parent is <code>G0002</code> for lineage only. Runs start from fresh weights, not from G0002. Question A must pin codec v3 so historical G0002 observations stay the training input. Question B must pin codec v4 and say so in the registry. Loading a v3 checkpoint under v4, or the reverse, is a contract error.</p>
+        <div class="config-panel" aria-label="Frozen native runtime">
+          <div><span>Collector</span><strong>native</strong></div>
+          <div><span>Slots / ready</span><strong>48 / 288</strong></div>
+          <div><span>Rollout</span><strong>32,768</strong></div>
+          <div><span>Reserve</span><strong>1.30</strong></div>
+          <div><span>Torch</span><strong>8 / 2 · CPU</strong></div>
+        </div>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Area</th><th>Frozen value</th><th>Relationship to G0002</th></tr></thead>
+            <tbody>
+              <tr><td>Runs</td><td><code>G0005-R00</code>, <code>R01</code>, <code>R02</code>; seeds 0, 1, 2</td><td>Same run seeds; fresh initialization</td></tr>
+              <tr><td>PPO</td><td>5 epochs; batch 256; learning rate 0.0003; gamma 0.999; GAE 0.95; clip 0.2; value coefficient 0.5; max gradient norm 0.5</td><td>Unchanged</td></tr>
+              <tr><td>Policy</td><td>Flat 104-value observation; fixed masked 516-action head; hidden 256×256. Question A uses codec v3. Question B uses codec v4.</td><td>Width unchanged. v4 changes the meaning of corner scales, race progress, and the previously empty phase slots.</td></tr>
+              <tr><td>Reward</td><td>Sparse placement reward; margin coefficient 0</td><td>Unchanged</td></tr>
+              <tr><td>Entropy</td><td>Base 0.01; floor 0.40; scale up 1.5; scale down 0.98; maximum 0.10</td><td>Unchanged</td></tr>
+              <tr><td>Self-play</td><td>Pool probability 0.5; capacity 5; no anchor; push a snapshot after every update</td><td>Snapshot interval changes from 10 updates to 1</td></tr>
+              <tr><td>Training domain</td><td>Seats 2–6; random seats; default generated tracks; namespace 80008</td><td>Unchanged</td></tr>
+              <tr><td>Sampling</td><td>Native identity-keyed categorical draws</td><td>Training-affecting native contract</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Five epochs over batch-256 minibatches keep roughly the same number of times each collected row is reused. That is not the same learning schedule as G0002. G0002 took a PPO step about every 1,024 rows, so a 1M run had on the order of a thousand updates and many updates at each seat count. Thirty updates of 32,768 rows is about six updates per seat count. Snapshot spacing, how long an opponent copy stays in the pool, and how fast the entropy controller can react all change. Say that in the report. Do not fold optimizer, reward, anchor, curriculum, track-distribution, precision, CUDA, or model-size tuning into the same comparison.</p>
+        <p>The trainer now logs <code>rollout_entropy</code> separately from <code>update_entropy</code>, plus approximate KL, clip fraction, and value explained variance. Those are measurements. They are not a new early-stop rule. The collapse guard reads <code>rollout_entropy</code>, which is the value the controller saw, not the entropy averaged inside the optimizer.</p>
+      </section>
+
+      <section id="training">
+        <span class="section-kicker">Q03 · Training and checkpoints</span>
+        <h2>Stop on actual transitions, with a hard cap.</h2>
+        <ol class="step-line" aria-label="Training sequence">
+          <li><strong>Fresh</strong><br>seeded policy initialization</li>
+          <li><strong>Large updates</strong><br>32,768 requested rows each</li>
+          <li><strong>First crossing</strong><br>300K, 500K, 750K, and 1M actual rows</li>
+          <li><strong>1M selected</strong><br>the first update that crosses 1M</li>
+        </ol>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Contract</th><th>Frozen behavior</th></tr></thead>
+            <tbody>
+              <tr><td>Stopping rule</td><td>Thirty requested updates of 32,768 rows are 983,040 rows. That does not guarantee 1,000,000 actual transitions. Stop at the first completed update whose actual row count is at least 1,000,000. Also stop at 40 updates or at the per-run time cap, whichever comes first. A run that hits a cap before 1M is an operational fault, not a selected checkpoint.</td></tr>
+              <tr><td>Actual rows</td><td>Native collection drains admitted games, so a completed update can record more rows than it requested. Every checkpoint stores the threshold it was asked to cross and the exact actual count.</td></tr>
+              <tr><td>Milestones</td><td>The first completed update that crosses 300K, 500K, 750K, and 1M actual recorded transitions. Diagnostic scores cannot replace the 1M checkpoint after the scores are known.</td></tr>
+              <tr><td>Selection</td><td>The 1M first-crossing checkpoint represents every run in promotion. Earlier scores cannot replace it.</td></tr>
+              <tr><td>Snapshots</td><td>One policy snapshot after each update. Only the latest five stay in the rolling opponent pool.</td></tr>
+              <tr><td>Recovery</td><td>Full-state save every five updates and at completion. The save publishes a latest pointer only after the checkpoint and its receipt both exist, and it keeps the previous pair. A failed save must leave the last good pair loadable. The normal gap is still five completed updates.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The resumable state includes policy, optimizer, entropy controller, snapshot pool, schedule, private RNGs, Torch RNG, native collector state, recipe and source identities, counters, emitted milestones, and diagnostic rows. A disposable two-update fresh-process smoke must prove that snapshot use and complete-state resume remain valid before registration.</p>
+      </section>
+
+      <section id="screen">
+        <span class="section-kicker">Q04 · Fresh development comparison</span>
+        <h2>Promotion decides adoption. The milestone screen is only a check for collapse.</h2>
+        <p>Use 40 fresh default-generated tracks at seeds <code>1,415,000..1,415,039</code>. This is a development band, not an untouched final test. The historical A8 final band remains closed. Every matrix receives its own frozen game-seed namespace so promotion does not reuse milestone races. Run promotion even when the milestone screen looks weak. The old 10,800-race milestone screen is larger than the decision it supports. The revised screen below is the one to build. Its wall-clock estimate is not established until someone times the actual V2 rulers.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Matrix</th><th>Contenders</th><th>Rulers</th><th>Seats</th><th>Scale</th></tr></thead>
+            <tbody>
+              <tr><td>Milestone screen</td><td>12 candidate checkpoints: three runs × four milestones</td><td><code>HeuristicWeakV2</code> and <code>G0002-R00@1000K</code> only</td><td>2 / 4 / 6</td><td>40 races/cell; 2,880 races. Diagnostic.</td></tr>
+              <tr><td>Promotion</td><td>Three selected 1M checkpoints plus G0002-R00–R02@1000K</td><td><code>HeuristicWeakV2</code>, <code>HeuristicRepairedV2</code>, <code>StaticSearchV2</code>, and <code>G0002-R00@1000K</code></td><td>2 / 4 / 6</td><td>200 races/cell; 14,400 races. This is the adoption decision.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <ul class="open-list">
+          <li><strong>Same-band baseline.</strong><br>G0002 is not retrained. Its three hashed selected policies run as contenders on the same promotion coordinates as G0005.</li>
+          <li><strong>Matched randomness.</strong><br>Track, game seed, focal seat, and repeat coordinates are identical across contenders within every ruler-seat cell.</li>
+          <li><strong>Starts rotate inside each track.</strong><br>Track index is <code>g % track_count</code>. The repeat count for that track sets the focal seat to <code>(track_index + repeat) % seat_count</code>. Global seat totals can still look fair while one track sees only one seat; the old <code>g % seat_count</code> pairing did that, and it is retired for new cells. Five repeats cannot cover six seats, so a 200-race, 40-track, 6-seat cell still misses one seat on each track. Record that omission. Do not add races just to fill it.</li>
+          <li><strong>No score-based truncation.</strong><br>Every technically valid campaign completes promotion even when milestone results look weak.</li>
+        </ul>
+      </section>
+
+      <section id="races">
+        <span class="section-kicker">Q05 · Auditable race rows</span>
+        <h2>Persist the fields L0 could not recover.</h2>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Group</th><th>Required fields</th></tr></thead>
+            <tbody>
+              <tr><td>Identity</td><td>schema version, matrix ID, race-coordinate ID, contender agent/generation/run/checkpoint IDs, training seed, checkpoint path/size/SHA-256, ruler ID</td></tr>
+              <tr><td>Race coordinate</td><td>seat count, focal starting seat, track family, track seed, track SHA-256, game seed, repeat index</td></tr>
+              <tr><td>Realized track</td><td>length, laps, actual corner count, corner start/end/limits, lane counts or lane fraction, start grid</td></tr>
+              <tr><td>Outcome</td><td>finish position, placement reward, completion state, terminal round count</td></tr>
+              <tr><td>Receipt</td><td>source identity, resolved evaluation config hash, ruler implementation identity, cell completion timestamp and elapsed seconds</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>A coordinate is independent of contender identity. Resume may skip a stored race or cell only when its complete coordinate, policy, ruler, source, and configuration identities match. Raw rows remain the source of every aggregate, slice, confidence interval, and failure investigation.</p>
+      </section>
+
+      <section id="gates">
+        <span class="section-kicker">Q06 · Small predeclared gate set</span>
+        <h2>Every adoption guard must pass.</h2>
+        <p>For each run, compute an equal-weight mean across the 12 ruler × seat promotion cells. Recipe scores are medians across the three runs. Ruler and seat slices first average equally within each run and then take the three-run median.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Guard</th><th>Pass condition</th><th>Purpose</th></tr></thead>
+            <tbody>
+              <tr><td>Aggregate skill</td><td><code>median(G0005) − median(G0002) ≥ −0.030</code></td><td>Preserve practical recipe-level skill.</td></tr>
+              <tr><td>Matched runs</td><td>At least two of three same-seed deltas are ≥ −0.030; no delta is &lt; −0.100.</td><td>Prevent one lucky run from hiding a failed trajectory.</td></tr>
+              <tr><td>Breadth</td><td>Each of four ruler-level and three seat-level G0005 medians is within −0.050 of G0002.</td><td>Prevent aggregate compensation across styles or field sizes.</td></tr>
+              <tr><td>Collapse</td><td>All values finite; all milestones valid; no run records <code>rollout_entropy</code> below 0.40 while the entropy coefficient is already 0.10, for three consecutive completed updates. <code>update_entropy</code> does not count.</td><td>Reject persistent diversity loss after the controller has applied its maximum correction.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="result-note"><strong>Confidence intervals are descriptive.</strong> Report deterministic 95% paired, ruler/seat-stratified bootstrap intervals over race coordinates. They do not override the point gates because thousands of races cannot remove uncertainty from only three independent training runs. Make no superiority claim or p-value decision.</div>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Disposition</th><th>Meaning</th></tr></thead>
+            <tbody>
+              <tr><td class="metric-good">PASS</td><td>Evidence is valid and every gate passes. Adopt only the question that was registered. Question A adopts the runtime with the legacy observation. Question B adopts the corrected observation. Three seeds make this a pilot, not a tight statistical claim. Keep the full run × ruler × seat table visible.</td></tr>
+              <tr><td class="metric-bad">FAIL</td><td>Evidence is valid and at least one gate fails. Do not adopt the exact recipe; trigger the offline failure investigation.</td></tr>
+              <tr><td class="metric-warn">NO DECISION</td><td>Evidence, provenance, hashes, or matrix completion cannot be validated. Repair evidence production before making a learning claim.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Track, exact starting seat, individual milestone, entropy, loss, opponent-mixture, and overshoot slices remain diagnostic unless they satisfy one of the explicit guards above. Interesting slices can motivate a new generation; they cannot rescue a failed G0005 verdict.</p>
+      </section>
+
+      <section id="execution">
+        <span class="section-kicker">Q07 · Bounded execution</span>
+        <h2>Time the V2 rulers before treating 75 minutes as the plan.</h2>
+        <p>The old 75–80 minute figure assumed the larger milestone screen and was never timed on the V2 rulers. Promotion is the decision and should be scheduled first. The smaller milestone screen is second. Recalibrate the expected column with one short V2 timing run before a real campaign. The hard caps below still bound a runaway job. Three hours remains the overall ceiling.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Stage</th><th>Expected</th><th>Hard cap</th><th>Progress and stop rule</th></tr></thead>
+            <tbody>
+              <tr><td>Disposable resume/integrity smoke</td><td>&lt;5 min</td><td>10 min</td><td>Two updates, snapshot/pool exercise, forced fresh-process load, equal complete-state receipt.</td></tr>
+              <tr><td>Three sequential runs</td><td>9–12 min total</td><td>15 min each</td><td>Heartbeat after every update; atomic recovery every five; stop after 60 seconds without a completed update.</td></tr>
+              <tr><td>Promotion matrix</td><td>Retimed on V2 before launch</td><td>90 min</td><td>Run this before the milestone screen. Complete it for every evidence-valid campaign regardless of scores.</td></tr>
+              <tr><td>Milestone screen</td><td>Retimed on V2 before launch</td><td>30 min</td><td>Diagnostic only. Atomic persistence after every cell; resumable only on exact identity.</td></tr>
+              <tr><td>Analysis and receipts</td><td>&lt;5 min</td><td>10 min</td><td>Validate completeness before calculating any gate.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>Run the three campaigns sequentially because one 48-slot native run already uses the intended CPU configuration. Parallel seed launches would change resource conditions for little wall-time benefit. Any stage-cap breach is an operational fault. The overall three-hour cap includes ordinary setup and resume overhead.</p>
+      </section>
+
+      <section id="failure">
+        <span class="section-kicker">Q08 · Required response to FAIL</span>
+        <h2>A failed gate starts analysis, not automatic retuning.</h2>
+        <p>An evidence-valid FAIL automatically authorizes a bounded offline investigation using the completed artifacts. Reproduce the failed gate from raw rows; localize it by seed, milestone, ruler, seat, track, and start; inspect entropy/controller history, PPO losses, opponent sources, snapshots, actual rows, and overshoot; then rank plausible causes.</p>
+        <div class="data-panel table-wrap">
+          <table>
+            <thead><tr><th>Failure pattern</th><th>First investigation branch</th></tr></thead>
+            <tbody>
+              <tr><td>All seeds and rulers weak from early milestones</td><td>Update cadence, initialization-to-first-update behavior, advantage/update accounting, and opponent availability.</td></tr>
+              <tr><td>One coherent seed regression</td><td>Training-seed sensitivity, checkpoint path, opponent-source sequence, and trajectory divergence.</td></tr>
+              <tr><td>Late regression after earlier strength</td><td>Checkpoint oscillation, entropy/controller response, self-play forgetting, and snapshot composition.</td></tr>
+              <tr><td>One ruler or seat slice weak</td><td>Decision/loss replay on the failing style, traffic regime, and starting-position concentration.</td></tr>
+              <tr><td>Collapse guard fails</td><td>Entropy and action-distribution timeline, controller saturation, value/policy loss, and skill consequence.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>The investigation produces a human-readable HTML report and a local <code>needs-triage</code> issue. It does not authorize more races, training, hyperparameter changes, a new generation, CUDA, or scale beyond 1M.</p>
+      </section>
+
+      <section id="implementation">
+        <span class="section-kicker">Q09 · Small/medium implementation slice</span>
+        <h2>Reuse training state and evaluation primitives; add campaign-specific orchestration.</h2>
+        <div class="file-grid">
+          <div class="file-card"><code>experiments/run_32k_learning_quality.py</code><br>Resolve the frozen recipe, registered identities, three sequential runs, milestone policies, recovery state, heartbeat, and source receipts.</div>
+          <div class="file-card"><code>src/heat/ml/selfplay/eval_harness.py</code><br>The library now rotates focal seats inside each track. The campaign script still has to persist one row per race. Do not replace the harness to do that.</div>
+          <div class="file-card"><code>experiments/eval_32k_learning_quality.py</code><br>Build the V2 ruler matrices, fresh default track band, atomic cell persistence, and exact resume validation.</div>
+          <div class="file-card"><code>experiments/analyze_32k_learning_quality.py</code><br>Validate completeness, compute frozen gates and descriptive intervals, and generate failure-localization data.</div>
+          <div class="file-card"><code>experiments/policy_registry/</code><br>Allocate G0005 only after the resolved recipe and clean commit or dirty patch receipt are captured; finalize selected checkpoint sizes and hashes after training.</div>
+          <div class="file-card"><code>tests/</code><br>Focused recipe, identity, coordinate-balance, raw-row, resume-rejection, gate-boundary, and deterministic-summary tests.</div>
+        </div>
+        <div class="data-panel table-wrap">
+          <table>
+            <tbody>
+              <tr><td>Estimated code</td><td>Small/medium: roughly 500–900 production/experiment lines plus focused tests and reports. Stop and redesign if per-race support requires replacing the evaluation harness rather than extending it.</td></tr>
+              <tr><td>Correctness gates</td><td>Registry validation; exact two-update fresh-process resume; complete/unique race coordinates; balanced seats; identical coordinate manifests across contenders; deterministic analysis; checkpoint SHA verification.</td></tr>
+              <tr><td>Routine verification</td><td>Targeted pytest, targeted Ruff, <code>mypy src</code>, registry validation, deterministic regeneration, HTML structure and rendered-layout review.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>A separate deferred design note at <code>.scratch/track-distribution-training-effect/spec.md</code> records the future question of how default versus tight-biased training tracks affect learned skill. That work changes the training recipe and must not enter G0005.</p>
+      </section>
+
+      <section id="boundary">
+        <span class="section-kicker">Q10 · Current authorization</span>
+        <h2>Revised, not authorized.</h2>
+        <div class="verification-panel"><strong>Status: design revised on 1 October 2026. The campaign is not implemented.</strong><br>Question A and question B are written down. Seeds, the first-crossing stop, the smaller milestone screen, the seat-rotation rule, and the collapse guard’s use of <code>rollout_entropy</code> are specified. The campaign scripts named above do not exist. The glossary in <code>CONTEXT.md</code> still defines the shared words.</div>
+        <div class="decision-banner"><strong>Not authorized by this document</strong><br>No G0005 allocation, no training, no evaluation campaign, no CUDA change, no eight-hour rehearsal, no untouched final test, and no 3M or 10M extension. Pick question A or question B before anyone registers a generation.</div>
+      </section>
+    </article>
+  </div>
+</main>
+
+<footer class="hybrid-footer">Learned-agent strength · 32K comparison revised 1 October 2026 · campaign not started</footer>
+<script src="../design-doc.js"></script>
+</body>
+</html>

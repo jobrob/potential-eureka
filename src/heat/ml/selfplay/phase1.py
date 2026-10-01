@@ -25,6 +25,18 @@ from heat.ml.native_env.collector import (
     NativeCollectorState,
     native_runtime_receipt,
 )
+from heat.ml.spaces import (
+    CARDS_OFFSET,
+    CARDS_SIZE,
+    DISCARD_OFFSET,
+    DISCARD_SIZE,
+    GEAR_OFFSET,
+    GEAR_SIZE,
+    REACT_OFFSET,
+    REACT_SIZE,
+    SLIPSTREAM_OFFSET,
+    SLIPSTREAM_SIZE,
+)
 from heat.ml.selfplay.multiseat import CollectorTiming, MultiSeatCollector
 from heat.ml.selfplay.policy import PPOPolicy, build_policy
 from heat.ml.selfplay.ppo import ppo_update
@@ -181,6 +193,47 @@ class SeatCountSchedule:
             raise ValueError("seat-count schedule contains an invalid pending value")
         self._pending = [int(value) for value in pending]
         self._rng.bit_generator.state = rng_state
+
+
+# Taken-action ranges. Offsets are the frozen action-space contract.
+_ACTION_PHASES: tuple[tuple[str, int, int], ...] = (
+    ("gear", GEAR_OFFSET, GEAR_SIZE),
+    ("cards", CARDS_OFFSET, CARDS_SIZE),
+    ("react", REACT_OFFSET, REACT_SIZE),
+    ("slipstream", SLIPSTREAM_OFFSET, SLIPSTREAM_SIZE),
+    ("discard", DISCARD_OFFSET, DISCARD_SIZE),
+)
+
+
+def _phase_rollout_diagnostics(
+    entropy: torch.Tensor,
+    actions: torch.Tensor,
+    masks: torch.Tensor,
+) -> dict[str, float]:
+    """Per-phase means of the pre-update rollout entropy and legal-action count.
+
+    A row is grouped by the phase range that contains its taken action. Entropy
+    is that row's full masked-policy entropy, not a phase-conditional score.
+    Legal count is the mean number of True mask entries on those rows. A phase
+    with no rows reports zeros so every record has the same keys.
+    """
+    legal_count = masks.to(dtype=torch.float32).sum(dim=-1)
+    diagnostics: dict[str, float] = {}
+    for name, offset, size in _ACTION_PHASES:
+        selected = (actions >= offset) & (actions < offset + size)
+        rows = int(selected.sum().item())
+        if rows == 0:
+            diagnostics[f"rollout_entropy_{name}"] = 0.0
+            diagnostics[f"rollout_legal_count_{name}"] = 0.0
+        else:
+            diagnostics[f"rollout_entropy_{name}"] = float(
+                entropy[selected].mean().item()
+            )
+            diagnostics[f"rollout_legal_count_{name}"] = float(
+                legal_count[selected].mean().item()
+            )
+        diagnostics[f"rollout_rows_{name}"] = float(rows)
+    return diagnostics
 
 
 def training_track_source(
@@ -456,6 +509,9 @@ def train_selfplay_a8(
                 batch["obs"], batch["actions"], batch["masks"]
             )
             mean_entropy = float(entropy.mean().item())
+            phase_diagnostics = _phase_rollout_diagnostics(
+                entropy, batch["actions"], batch["masks"]
+            )
         min_entropy = min(min_entropy, mean_entropy)
         controller.update(mean_entropy)
         ever_engaged = ever_engaged or controller.engaged
@@ -479,12 +535,14 @@ def train_selfplay_a8(
             "opponent_current_iterations": float(opponent_iterations["current"]),
             "opponent_snapshot_iterations": float(opponent_iterations["snapshot"]),
             "opponent_anchor_iterations": float(opponent_iterations["anchor"]),
-            "entropy": mean_entropy,
             "ent_coef": controller.current_ent_coef,
             "engaged": float(controller.engaged),
-            "min_entropy": min_entropy,
             "ever_engaged": float(ever_engaged),
             **losses,
+            # After losses so an optimizer diagnostic cannot replace these.
+            "rollout_entropy": mean_entropy,
+            "min_entropy": min_entropy,
+            **phase_diagnostics,
         }
         if profile:
             assert collector_timing is not None

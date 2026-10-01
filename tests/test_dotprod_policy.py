@@ -254,8 +254,16 @@ def test_dotprod_train_a0_smoke() -> None:
     assert isinstance(policy, DotProductPolicy)
     assert len(seen) >= 1
     for info in seen:
-        for key in ("policy_loss", "value_loss", "entropy"):
+        for key in (
+            "policy_loss",
+            "value_loss",
+            "update_entropy",
+            "approx_kl",
+            "clip_fraction",
+            "explained_variance",
+        ):
             assert np.isfinite(info[key]), f"non-finite {key}={info[key]}"
+        assert "entropy" not in info
 
 
 def test_dotprod_train_multiseat_smoke() -> None:
@@ -267,5 +275,13 @@ def test_dotprod_train_multiseat_smoke() -> None:
     assert isinstance(policy, DotProductPolicy)
     assert len(seen) >= 1
     for info in seen:
-        for key in ("policy_loss", "value_loss", "entropy"):
+        for key in (
+            "policy_loss",
+            "value_loss",
+            "update_entropy",
+            "approx_kl",
+            "clip_fraction",
+            "explained_variance",
+        ):
             assert np.isfinite(info[key]), f"non-finite {key}={info[key]}"
+        assert "entropy" not in info

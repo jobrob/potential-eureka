@@ -24,12 +24,26 @@ from heat.ml.native_env.coordinator import (
 from heat.ml.selfplay.multiseat import CollectorTiming
 from heat.ml.selfplay.policy import PPOPolicy
 from heat.ml.selfplay.snapshots import SnapshotAgent
-from heat.ml.spaces import ACTION_DIM, OBS_DIM
+from heat.ml.spaces import ACTION_DIM, CODEC_VERSION, OBS_DIM
 from heat.models.game_state import GameState
 from heat.models.track import Track
 
 
 _KIND_CODE = {"gear": 1, "cards": 2, "react": 3, "slipstream": 4, "discard": 5}
+
+
+def _require_native_codec(policy: PPOPolicy, role: str) -> None:
+    """Refuse to score a historical codec on native observations.
+
+    The native encoder is codec v4. A codec 3 policy, including a frozen
+    anchor, must stay on the Python encoder that can still reproduce its
+    original inputs.
+    """
+    codec = int(getattr(policy, "codec_version", CODEC_VERSION))
+    if codec != CODEC_VERSION:
+        raise ValueError(
+            f"native observations are codec {CODEC_VERSION}; {role} is codec {codec}"
+        )
 
 
 def _policy_sha256(policy: PPOPolicy) -> str:
@@ -330,7 +344,6 @@ class NativeCollector:
         ready_rows: list[_ReadyMeta] = []
         encode_started = perf_counter() if timing is not None else 0.0
         for seat in seats:
-            observation = slot.bridge.observation_for_kind(seat, kind_code)
             legal_mask = slot.bridge.legal_mask_for_kind(seat, kind_code)
             legal = np.flatnonzero(legal_mask)
             if len(legal) == 0:
@@ -338,6 +351,7 @@ class NativeCollector:
             if len(legal) == 1:
                 forced_actions[seat] = int(legal[0])
                 continue
+            observation = slot.bridge.observation_for_kind(seat, kind_code)
             record = seat in self.policy_seats
             if record and seat in slot.pending:
                 self._close_pending(
@@ -587,6 +601,14 @@ class NativeCollector:
             raise ValueError("A9 native collector is CPU-only")
         if n_steps < 1:
             raise ValueError("n_steps must be positive")
+        _require_native_codec(policy, "the live policy")
+        opponent: SnapshotAgent | None = None
+        if self.scripted_seats:
+            opponents = {id(agent): agent for agent in self.scripted_seats.values()}
+            if len(opponents) != 1:
+                raise ValueError("A9 native collector supports one frozen opponent")
+            opponent = next(iter(opponents.values()))
+            _require_native_codec(opponent.policy, "the frozen opponent")
         from heat_native import NativePool
 
         if timing is not None:
@@ -595,11 +617,7 @@ class NativeCollector:
         registered: list[RegisteredPolicy] = [
             RegisteredPolicy(0, policy_version, cast(BatchedPolicy, policy))
         ]
-        if self.scripted_seats:
-            opponents = {id(agent): agent for agent in self.scripted_seats.values()}
-            if len(opponents) != 1:
-                raise ValueError("A9 native collector supports one frozen opponent")
-            opponent = next(iter(opponents.values()))
+        if opponent is not None:
             registered.append(
                 RegisteredPolicy(1, 0, cast(BatchedPolicy, opponent.policy))
             )

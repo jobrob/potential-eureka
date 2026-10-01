@@ -37,12 +37,9 @@ LENGTH = 14  # tiny_heat_track() is 14 spaces, 1 lap.
 def _multilap_track() -> Track:
     """A 3-lap Tiny-Heat track.
 
-    On the stock 1-lap Tiny-Heat bed the margin is identically 0: players race
-    at ``lap == 1`` so ``abs_pos = lap*length + pos >= laps*length`` and every
-    ``remaining`` clips to 0 (this mirrors ``_track_block.dist_to_finish``, which
-    is likewise degenerate on a 1-lap track). A multi-lap track keeps
-    ``remaining`` positive mid-race, so the collector tests can exercise a
-    genuinely non-zero margin term.
+    One-based remaining is positive on a 1-lap track too. The 3-lap bed keeps a
+    truncated race away from a pure finish-order comparison, so the collector
+    tests can still see a distance margin.
     """
     return replace(tiny_heat_track(), laps=3)
 
@@ -58,19 +55,28 @@ def _make_state(
     positions: list[int],
     laps: list[int],
     finished: list[bool],
+    finish_orders: list[int] | None = None,
 ) -> GameState:
     """A hand-built game state with each seat's lap/position/finished forced.
 
     Built from a real :func:`GameState.create` (so decks/hands are valid) then
-    the kinematic fields are overwritten to the controlled test values.
+    the kinematic fields are overwritten to the controlled test values. Finished
+    seats get a real finish order (1, 2, ... in list order unless given).
     """
     n = len(positions)
     state = GameState.create(track, n, seed=0)
+    next_order = 1
     for pid in range(n):
         p = state.get_player(pid)
         p.position = positions[pid]
         p.lap = laps[pid]
         p.finished = finished[pid]
+        if finished[pid]:
+            if finish_orders is not None:
+                p.finish_order = finish_orders[pid]
+            else:
+                p.finish_order = next_order
+                next_order += 1
     return state
 
 
@@ -82,22 +88,34 @@ def _make_state(
 def test_terminal_margin_arithmetic() -> None:
     track = tiny_heat_track()
 
-    # Leader ahead by k=4 spaces (both unfinished, lap 0): remaining(me)=14-10=4,
+    # Leader ahead by k=4 spaces (both unfinished, lap 1): remaining(me)=14-10=4,
     # remaining(opp)=14-6=8 -> margin(me) = (8-4)/14 = +4/14; antisymmetric.
-    s = _make_state(track, positions=[10, 6], laps=[0, 0], finished=[False, False])
+    s = _make_state(track, positions=[10, 6], laps=[1, 1], finished=[False, False])
     m0 = terminal_margin(s, 0)
     m1 = terminal_margin(s, 1)
     assert abs(m0 - 4.0 / LENGTH) < 1e-9
     assert abs(m0 + m1) < 1e-9, "unclipped 2-seat margin must be antisymmetric"
     assert m0 > 0.0 > m1
 
-    # Both finished -> zero remaining each -> 0 vs 0.
-    s = _make_state(track, positions=[0, 0], laps=[0, 0], finished=[True, True])
-    assert terminal_margin(s, 0) == 0.0
-    assert terminal_margin(s, 1) == 0.0
+    # Both finished: finish order, not remaining distance. Winner is +1, last is -1.
+    s = _make_state(track, positions=[0, 0], laps=[1, 1], finished=[True, True])
+    assert terminal_margin(s, 0) == 1.0
+    assert terminal_margin(s, 1) == -1.0
+
+    # Three finishers: compare each car to the best other finish order.
+    s = _make_state(
+        track,
+        positions=[0, 0, 0],
+        laps=[1, 1, 1],
+        finished=[True, True, True],
+        finish_orders=[1, 2, 3],
+    )
+    assert terminal_margin(s, 0) == 0.5
+    assert terminal_margin(s, 1) == -0.5
+    assert terminal_margin(s, 2) == -1.0
 
     # Finished vs not-finished -> strictly positive for the finisher.
-    s = _make_state(track, positions=[0, 6], laps=[0, 0], finished=[True, False])
+    s = _make_state(track, positions=[0, 6], laps=[1, 1], finished=[True, False])
     assert terminal_margin(s, 0) > 0.0, "finisher must lead the unfinished seat"
     assert terminal_margin(s, 1) < 0.0
 
@@ -108,14 +126,39 @@ def test_terminal_margin_arithmetic() -> None:
     # Margin greater than a full lap clips to +-1. On a 2-lap track (total_len=28)
     # a finished seat vs an opponent at the start line is a 2-lap raw lead (2.0).
     two_lap = replace(track, laps=2)
-    s = _make_state(two_lap, positions=[0, 0], laps=[0, 0], finished=[True, False])
+    s = _make_state(two_lap, positions=[0, 0], laps=[1, 1], finished=[True, False])
     assert terminal_margin(s, 0) == 1.0, "raw margin 2.0 must clip to +1"
     assert terminal_margin(s, 1) == -1.0, "raw margin -2.0 must clip to -1"
 
 
-# ---------------------------------------------------------------------------
-# Collector helpers (capture terminal state + flags)
-# ---------------------------------------------------------------------------
+def test_completed_race_margin_ranks_the_field() -> None:
+    """A real finished race ranks the winner above the last car."""
+    from heat.agents.heuristic_agent import HeuristicAgent
+    from heat.engine.game import Game
+    from heat.ml.native_env.bridge import legacy_state_to_native
+
+    game = Game(
+        tiny_heat_track(),
+        [HeuristicAgent(), HeuristicAgent()],
+        logging_enabled=False,
+        seed=0,
+    )
+    game.run()
+    state = game.state
+    assert all(player.finished for player in state.players)
+    orders = [player.finish_order for player in state.players]
+    assert len(set(orders)) == len(orders)
+    margins = [terminal_margin(state, player.player_id) for player in state.players]
+    winner = min(range(len(orders)), key=lambda index: orders[index])
+    last = max(range(len(orders)), key=lambda index: orders[index])
+    assert margins[winner] > 0.0
+    assert margins[last] < 0.0
+    assert margins != [0.0, 0.0]
+    native = legacy_state_to_native(state, game_id=1)
+    for player in state.players:
+        assert native.terminal_margin(player.player_id) == terminal_margin(
+            state, player.player_id
+        )
 
 
 class _CapturingCollector(MultiSeatCollector):
@@ -167,10 +210,8 @@ def _collect_one_game(
 
 
 def test_collector_margin_only_at_game_end(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    # At a fully *terminated* game every player has finished, so every
-    # ``remaining`` is 0 and the margin is 0 (placement grades finish order).
-    # The margin only carries signal on TRUNCATED ends (design §2.2), so force
-    # truncation to exercise a genuinely non-zero margin.
+    # Force truncation so the stored reward uses the distance margin on a race
+    # that has not finished, rather than the finish-order label.
     monkeypatch.setattr("heat.ml.selfplay.multiseat.MAX_ROUNDS", 1)
     policy = _policy(0)
     coef = 0.5

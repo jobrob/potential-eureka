@@ -50,23 +50,17 @@ from heat.models.cards import Card
 from heat.models.game_state import GameState
 import os
 
-from heat.ml import spaces
 from heat.ml.action_codec import decode_action, legal_action_mask
 from heat.ml.features import encode_observation
-from heat.ml.training import load_meta, vecnorm_path_for
+from heat.ml.training import (
+    CheckpointMismatchError as CheckpointMismatchError,
+    load_compatible_meta,
+    load_meta,
+    vecnorm_path_for,
+)
 
 if TYPE_CHECKING:
     from stable_baselines3.common.vec_env import VecNormalize
-
-
-class CheckpointMismatchError(RuntimeError):
-    """Raised when a checkpoint's sidecar does not match the live ML contract.
-
-    Signals that the model on disk was trained against a different
-    ``OBS_DIM`` / ``ACTION_DIM`` / ``codec_version`` than the code now running,
-    so its predictions cannot be trusted. Fail fast rather than act on a stale
-    policy (§3.4).
-    """
 
 
 class MLAgent(BaseAgent):
@@ -95,6 +89,7 @@ class MLAgent(BaseAgent):
         self.model_path = model_path
         self.deterministic = deterministic
         self._model: MaskablePPO | None = None
+        self._codec_version: int | None = None
         #: Loaded ``VecNormalize`` (obs stats only), or ``None`` for an
         #: un-normalized checkpoint (back-compat with Sprint-5 models).
         self._vecnorm: VecNormalize | None = None
@@ -103,36 +98,9 @@ class MLAgent(BaseAgent):
 
     # -- lazy model access with the §3.4 meta tripwire --
     def _validate_meta(self) -> None:
-        """Assert the checkpoint sidecar matches the live contract (§3.4).
-
-        Raises:
-            CheckpointMismatchError: on any ``obs_dim`` / ``action_dim`` /
-                ``codec_version`` mismatch, or if the sidecar is missing.
-        """
-        try:
-            meta = load_meta(self.model_path)
-        except FileNotFoundError as exc:
-            raise CheckpointMismatchError(
-                f"Checkpoint sidecar not found for {self.model_path!r}; "
-                "expected a '.meta.json' written by save_checkpoint."
-            ) from exc
-
-        expected = {
-            "obs_dim": spaces.OBS_DIM,
-            "action_dim": spaces.ACTION_DIM,
-            "codec_version": spaces.CODEC_VERSION,
-        }
-        mismatches = [
-            f"{key}: checkpoint={meta.get(key)!r} != runtime={want!r}"
-            for key, want in expected.items()
-            if meta.get(key) != want
-        ]
-        if mismatches:
-            raise CheckpointMismatchError(
-                f"Checkpoint {self.model_path!r} is incompatible with the "
-                "current ML contract (stale model vs drifted codec): "
-                + "; ".join(mismatches)
-            )
+        """Reject a checkpoint whose sidecar does not match the runtime codec."""
+        meta = load_compatible_meta(self.model_path)
+        self._codec_version = int(meta["codec_version"])
 
     def _get_model(self) -> MaskablePPO:
         if self._model is None:
@@ -193,9 +161,15 @@ class MLAgent(BaseAgent):
 
     # -- shared predict path: encode obs, mask, predict, decode --
     def _predict_flat(self, decision: Decision, state: GameState) -> int:
-        obs = encode_observation(state, decision.player_id, decision)
-        mask = legal_action_mask(decision, state)
         model = self._get_model()
+        assert self._codec_version is not None
+        obs = encode_observation(
+            state,
+            decision.player_id,
+            decision,
+            codec_version=self._codec_version,
+        )
+        mask = legal_action_mask(decision, state)
         if self._norm_obs and self._vecnorm is not None:
             # Apply the SAME obs normalization the policy was trained under.
             obs = cast(np.ndarray, self._vecnorm.normalize_obs(obs))

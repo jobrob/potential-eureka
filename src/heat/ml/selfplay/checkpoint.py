@@ -31,7 +31,7 @@ import torch
 
 from heat.ml.selfplay.policy import PPOPolicy, build_policy
 from heat.ml.selfplay.ppo import A0Config
-from heat.ml.spaces import ACTION_DIM, CODEC_VERSION, OBS_DIM
+from heat.ml.spaces import ACTION_DIM, CODEC_VERSION, LEGACY_PLAYABLE_CODECS, OBS_DIM
 
 
 class CheckpointMismatchError(RuntimeError):
@@ -167,26 +167,30 @@ def load_policy(path: str | Path) -> PPOPolicy:
 
     Reconstructs the network with :func:`build_policy` (the same factory the
     trainer uses) from the stored ``head`` / ``hidden_sizes``, then loads the
-    ``state_dict``. Before touching any weights it asserts the checkpoint's
-    obs/action/codec contract matches the live :mod:`heat.ml.spaces` contract,
-    raising :class:`CheckpointMismatchError` on any drift.
+    ``state_dict``. Dims must match the live contract. Codec 3 and 4 both load;
+    the returned policy keeps the blob's codec so historical inputs stay on v3.
+    Anything else raises :class:`CheckpointMismatchError`.
 
     Raises:
-        CheckpointMismatchError: on any ``obs_dim`` / ``action_dim`` /
-            ``codec_version`` mismatch with the running contract.
+        CheckpointMismatchError: on an ``obs_dim`` / ``action_dim`` mismatch, or
+            a ``codec_version`` outside ``(3, 4)``.
     """
     blob = torch.load(str(path), map_location="cpu", weights_only=False)
 
-    expected = {
-        "obs_dim": OBS_DIM,
-        "action_dim": ACTION_DIM,
-        "codec_version": CODEC_VERSION,
-    }
-    mismatches = [
-        f"{key}: checkpoint={blob.get(key)!r} != runtime={want!r}"
-        for key, want in expected.items()
-        if blob.get(key) != want
-    ]
+    mismatches: list[str] = []
+    if blob.get("obs_dim") != OBS_DIM:
+        mismatches.append(
+            f"obs_dim: checkpoint={blob.get('obs_dim')!r} != runtime={OBS_DIM!r}"
+        )
+    if blob.get("action_dim") != ACTION_DIM:
+        mismatches.append(
+            f"action_dim: checkpoint={blob.get('action_dim')!r} != runtime={ACTION_DIM!r}"
+        )
+    if blob.get("codec_version") not in LEGACY_PLAYABLE_CODECS:
+        mismatches.append(
+            "codec_version: checkpoint="
+            f"{blob.get('codec_version')!r} != runtime={LEGACY_PLAYABLE_CODECS!r}"
+        )
     if mismatches:
         raise CheckpointMismatchError(
             f"Checkpoint {str(path)!r} is incompatible with the current ML "
@@ -200,5 +204,6 @@ def load_policy(path: str | Path) -> PPOPolicy:
     )
     policy = build_policy(config)
     policy.load_state_dict(blob["state_dict"])
+    policy.codec_version = int(blob["codec_version"])
     policy.eval()
     return policy

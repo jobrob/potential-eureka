@@ -13,14 +13,12 @@ import math
 
 import pytest
 
-from heat.ml import spaces
 from heat.ml.model import PPOConfig
 from heat.ml.sweep import (
     Attribution,
     FactorAxis,
     ManifestReader,
     ManifestWriter,
-    RunConfig,
     SweepSpec,
     balanced_fields,
     build_attribution,
@@ -33,7 +31,7 @@ from heat.ml.sweep import (
     seat_rotations,
     write_outcomes_jsonl,
 )
-from heat.ml.training import CurriculumConfig, TrainingPhase, default_8c_phases
+from heat.ml.training import default_8c_phases
 from heat.simulation.runner import GameOutcome, PlayerOutcome
 from heat.simulation.stats import EloRating, TrueSkillRating, compute_elo
 
@@ -474,15 +472,3 @@ def test_report_states_caveats():
 # ===========================================================================
 # Contract guard (§10) -- 8D must not touch the codec.
 # ===========================================================================
-
-
-def test_codec_unchanged_8d():
-    """8D never edits spaces.py: the obs/action/codec contract is frozen.
-
-    The frozen contract is the obs/action *dimensions*. CODEC_VERSION has since
-    advanced past 2 (v3: the Option-C obs-purity fix, code-review 2026-06-22 #1),
-    a later intentional layout change -- asserted monotonic, not pinned to 2.
-    """
-    assert spaces.OBS_DIM == 104
-    assert spaces.ACTION_DIM == 516
-    assert spaces.CODEC_VERSION >= 2

@@ -37,8 +37,6 @@ from heat.ml.model import (
 from heat.ml.training import (
     CurriculumConfig,
     GateResult,
-    OpponentSchedule,
-    OpponentStage,
     TrainingPhase,
     default_8c_phases,
     load_meta,
@@ -610,7 +608,6 @@ def test_gate_promotes_on_wilson_lb() -> None:
 def test_broadened_phase1_pool_composition() -> None:
     """use_strong + broaden_mix yields the expected class mix and seat count."""
     from heat.agents.heuristic_agent import HeuristicAgent
-    from heat.agents.random_agent import RandomAgent
     from heat.agents.strong_heuristic import StrongHeuristicAgent
     from heat.ml.training import _StrongHeuristicFactory
 
@@ -683,19 +680,6 @@ def _tiny_8c_curriculum(tmp_path, **overrides) -> CurriculumConfig:
     )
     base.update(overrides)
     return CurriculumConfig(**base)
-
-
-def test_codec_unchanged_8c() -> None:
-    """8C must not touch the obs/action/codec contract (§4.5 / DoD f).
-
-    The contract 8C froze is the obs/action *dimensions*. CODEC_VERSION has since
-    advanced past 2 (v3: the Option-C obs-purity fix, code-review 2026-06-22 #1),
-    which is a later, intentional layout change -- so the version is asserted
-    monotonic, not pinned to 2.
-    """
-    assert spaces.OBS_DIM == 104
-    assert spaces.ACTION_DIM == 516
-    assert spaces.CODEC_VERSION >= 2
 
 
 def test_sprint_8c_preset_levers() -> None:

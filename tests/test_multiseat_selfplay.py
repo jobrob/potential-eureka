@@ -271,11 +271,16 @@ def _drive_env_episode(
     return out
 
 
-def test_scripted_seat_matches_env_path() -> None:
+def test_scripted_seat_matches_env_path(monkeypatch) -> None:
     """Seat 1 scripted (HeuristicAgent): only seat 0 records, and its recorded
     (action, reward, done) sequence matches a manually-driven HeatEnv learner
     under the same game seed + torch seed -- the regression bridge between the
     env path and the self-play path."""
+    from heat.ml import spaces
+
+    # Match the collector's explicit zero-shaping contract, independent of prior trainers.
+    monkeypatch.setattr(spaces, "SHAPING_WEIGHT", 0.0)
+    monkeypatch.setattr(spaces, "SHAPING_SPINOUT_WEIGHT", 0.0)
     track = tiny_heat_track()
     # Deterministic game seed: the collector's first rng draw.
     seed = int(np.random.default_rng(11).integers(0, 2**31 - 1))
@@ -344,8 +349,16 @@ def test_train_multiseat_smoke() -> None:
     assert isinstance(policy, HeatPolicy)
     assert len(infos) == 2
     for info in infos:
-        for key in ("policy_loss", "value_loss", "entropy"):
+        for key in (
+            "policy_loss",
+            "value_loss",
+            "update_entropy",
+            "approx_kl",
+            "clip_fraction",
+            "explained_variance",
+        ):
             assert np.isfinite(info[key]), f"{key} not finite: {info[key]}"
+        assert "entropy" not in info
         assert info["n_recorded"] >= config.n_steps
         assert info["n_episodes"] >= 1
 

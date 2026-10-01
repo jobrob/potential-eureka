@@ -3,7 +3,7 @@
 The learned leaf plugs A1's trained value net ``V`` into ``_leaf_score`` on
 **clean** leaves only (``own_spins == 0``); spinning leaves keep the unchanged
 ``_pre_spin_progress`` floor + the dominant own-spin penalty. These tests pin the
-six guarantees the A2 doc lists:
+learned-path guarantees from the A2 design:
 
   (a) **spin dominance:** with a *stub* V returning an arbitrarily huge value, a
       candidate whose forced move spins still scores strictly below a clean one --
@@ -12,34 +12,26 @@ six guarantees the A2 doc lists:
       stub) -- spinning leaves go through ``_pre_spin_progress``.
   (c) **determinism:** fixed state + seed + V -> byte-stable plan selection.
   (d) **legality:** the learned-leaf agent never returns an illegal move.
-  (e) **horizon-0 equivalence preserved** for the non-learned paths (the S1
-      ``progress``/``move_eval`` greedy equivalence still holds -- learned is a
-      purely additive branch).
   (f) **contract tripwire:** a V whose sidecar ``codec_version`` mismatches raises
       the ``MLAgent``-style ``CheckpointMismatchError``.
 
-Tests (a)-(e) inject a stub V by subclassing/overriding ``_value_leaf`` (or
-``_get_value_model``), so no real checkpoint is needed; (f) writes a real (tiny)
-checkpoint and corrupts its sidecar.
+Tests (a)-(d) inject a stub value function. Metadata tests write only a sidecar;
+one integration test saves and loads a random-weight checkpoint. Non-learned
+horizon-zero behavior is covered in test_search_agent.py.
 
 Mirrors the structure/style of ``tests/test_search_agent.py``.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import os
-import sys
 
 import pytest
 
-from heat.models.cards import Card
 from heat.models.game_state import GameState
 from heat.models.track import Corner, Space, Track
 from heat.engine import rules
 from heat.engine.game import Game
-from heat.agents.heuristic_agent import HeuristicAgent
 from heat.agents.search_agent import LookaheadAgent
 from heat.tracks.generator import generate_track
 
@@ -257,123 +249,56 @@ class TestLegality:
 
 
 # ---------------------------------------------------------------------------
-# (e) horizon-0 equivalence preserved for the non-learned paths
-# ---------------------------------------------------------------------------
-
-
-class TestNonLearnedPathsUnchanged:
-    """The learned branch is purely additive: the ``progress``/``move_eval`` leaf
-    paths still reduce to the single-round argmax at horizon 0 (the S1 contract).
-    """
-
-    def _greedy_reference(self, agent, state, player_id):
-        legal_gears = rules.legal_gear_shifts(
-            state.get_player(player_id).gear,
-            state.get_player(player_id).heat_available,
-        )
-        candidates = agent._candidate_plans(state, player_id, legal_gears)
-        sig = agent._turn_signature(state, player_id)
-        turn_seed = agent._turn_seed(sig)
-        best = candidates[0]
-        best_v = float("-inf")
-        for idx, (gear, cards) in enumerate(candidates):
-            v = agent._score_plan(state, player_id, gear, cards, turn_seed, idx)
-            if v > best_v:
-                best_v = v
-                best = (gear, cards)
-        return best
-
-    @pytest.mark.parametrize("leaf", ["progress", "move_eval"])
-    def test_horizon0_matches_single_round_argmax(self, leaf: str) -> None:
-        track = _gen_track(7)
-        agent = LookaheadAgent(horizon=0, n_determinizations=1, leaf_value=leaf)
-        state = GameState.create(track, 1, logging_enabled=False, seed=321)
-        state.players[0].lap = 1
-        state.players[0].position = 2
-
-        ref_gear, ref_cards = self._greedy_reference(agent, state, 0)
-
-        legal_gears = rules.legal_gear_shifts(
-            state.players[0].gear, state.players[0].heat_available
-        )
-        chosen_gear = agent.choose_gear(state, 0, legal_gears)
-        state.players[0].gear = chosen_gear[0]
-        legal_plays = rules.legal_card_plays(state.players[0].hand, chosen_gear[0])
-        chosen_cards = agent.choose_cards(state, 0, legal_plays)
-
-        assert chosen_gear == ref_gear
-        assert chosen_cards == ref_cards
-
-
-# ---------------------------------------------------------------------------
 # (f) contract tripwire: mismatched sidecar codec_version raises
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def real_value_checkpoint(tmp_path_factory) -> str:
-    """Train a tiny real value checkpoint (reuses the A1 deliverables).
+    """Save a random-weight model for the real loading/inference integration test."""
+    from heat.ml.env import HeatEnv
+    from heat.ml.model import PPOConfig, build_model
+    from heat.ml.training import save_checkpoint
 
-    Mirrors ``tests/test_value_net.py``'s tiny train: a 2-track dataset + 2-epoch
-    critic-only fit, fast enough for a unit test.
-    """
-    exp_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "experiments")
-    if exp_dir not in sys.path:
-        sys.path.insert(0, exp_dir)
-    import gen_value_data  # noqa: E402
-    import train_value  # noqa: E402
+    path = str(tmp_path_factory.mktemp("a2_value_ckpt") / "value.zip")
+    model = build_model(HeatEnv(num_players=1), PPOConfig(seed=0, device="cpu"))
+    save_checkpoint(model, path, track_name="generated", num_players=1, seed=0)
+    return path
 
-    data_out = str(tmp_path_factory.mktemp("a2_value_data") / "value.npz")
-    gen_value_data.generate_dataset(
-        argparse.Namespace(
-            out=data_out, train_tracks=2, val_tracks=1, rollouts=1, game_seed=7000
-        )
-    )
-    ckpt_out = str(tmp_path_factory.mktemp("a2_value_ckpt") / "value.zip")
-    train_value.train_value(
-        argparse.Namespace(
-            data=data_out, out=ckpt_out, epochs=2, batch=64, lr=3e-4, loss="mse",
-            eval_every=1, patience=8, net="default", device="cpu", seed=0,
-        )
-    )
-    return ckpt_out
+
+@pytest.fixture
+def value_sidecar(tmp_path) -> str:
+    """Write only the metadata consumed by the compatibility check."""
+    from heat.ml import spaces
+    from heat.ml.training import meta_path_for
+
+    path = str(tmp_path / "value.zip")
+    with open(meta_path_for(path), "w", encoding="utf-8") as output:
+        json.dump({"obs_dim": spaces.OBS_DIM, "action_dim": spaces.ACTION_DIM,
+                   "codec_version": spaces.CODEC_VERSION}, output)
+    return path
 
 
 class TestContractTripwire:
-    def test_valid_checkpoint_loads_under_tripwire(self, real_value_checkpoint) -> None:
+    def test_valid_checkpoint_loads_under_tripwire(self, value_sidecar) -> None:
         """A contract-matching V passes the A2 sidecar validation (sanity)."""
         agent = LookaheadAgent(
-            leaf_value="learned", value_model_path=real_value_checkpoint
+            leaf_value="learned", value_model_path=value_sidecar
         )
         agent._validate_value_meta()  # must not raise
 
-    def test_mismatched_codec_version_raises(
-        self, real_value_checkpoint, tmp_path
-    ) -> None:
-        """A V whose sidecar codec_version is corrupted fails fast with the
-        MLAgent-style mismatch error (a stale model vs drifted codec).
-
-        Copies the checkpoint + sidecar to a private temp path before corrupting
-        so the shared module-scoped fixture is never mutated (test isolation).
-        """
-        import shutil
-
+    def test_mismatched_codec_version_raises(self, value_sidecar) -> None:
+        """Reject an incompatible sidecar without constructing a model."""
         from heat.agents.ml_agent import CheckpointMismatchError
         from heat.ml.training import meta_path_for
 
-        # Copy the zip + sidecar to a fresh path we own, then corrupt the copy.
-        copy_zip = str(tmp_path / "value.zip")
-        shutil.copy(real_value_checkpoint, copy_zip)
-        shutil.copy(meta_path_for(real_value_checkpoint), meta_path_for(copy_zip))
-
-        meta_path = meta_path_for(copy_zip)
-        with open(meta_path, "r", encoding="utf-8") as fh:
-            meta = json.load(fh)
-        meta["codec_version"] = meta.get("codec_version", 0) + 999
-        with open(meta_path, "w", encoding="utf-8") as fh:
-            json.dump(meta, fh)
-
-        agent = LookaheadAgent(leaf_value="learned", value_model_path=copy_zip)
+        meta_path = meta_path_for(value_sidecar)
+        with open(meta_path, encoding="utf-8") as source:
+            meta = json.load(source)
+        meta["codec_version"] += 999
+        with open(meta_path, "w", encoding="utf-8") as output:
+            json.dump(meta, output)
+        agent = LookaheadAgent(leaf_value="learned", value_model_path=value_sidecar)
         with pytest.raises(CheckpointMismatchError):
             agent._validate_value_meta()
 

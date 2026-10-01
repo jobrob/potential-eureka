@@ -663,6 +663,7 @@ class NetAdapter:
     def __init__(self, model_path: str) -> None:
         self.model_path = model_path
         self._model: MaskablePPO | None = None
+        self._codec_version: int | None = None
         #: Sprint C6: the value transform read from the checkpoint sidecar's
         #: ``value_mode``. ``"rounds"`` (default / absent) returns the raw critic
         #: scalar (the C2-C5 −rounds_remaining quantity, byte-for-byte); ``"winloss"``
@@ -694,36 +695,11 @@ class NetAdapter:
         return state
 
     def _validate_meta(self) -> None:
-        """Assert the checkpoint sidecar matches the live contract (§3.4)."""
-        from heat.agents.ml_agent import CheckpointMismatchError
-        from heat.ml import spaces
-        from heat.ml.training import load_meta
+        """Validate the shared codec contract and restore the optional value mode."""
+        from heat.ml.training import load_compatible_meta
 
-        try:
-            meta = load_meta(self.model_path)
-        except FileNotFoundError as exc:
-            raise CheckpointMismatchError(
-                f"Checkpoint sidecar not found for {self.model_path!r}; "
-                "expected a '.meta.json' written by save_checkpoint."
-            ) from exc
-
-        expected = {
-            "obs_dim": spaces.OBS_DIM,
-            "action_dim": spaces.ACTION_DIM,
-            "codec_version": spaces.CODEC_VERSION,
-        }
-        mismatches = [
-            f"{key}: checkpoint={meta.get(key)!r} != runtime={want!r}"
-            for key, want in expected.items()
-            if meta.get(key) != want
-        ]
-        if mismatches:
-            raise CheckpointMismatchError(
-                f"Checkpoint {self.model_path!r} is incompatible with the current "
-                "ML contract (stale model vs drifted codec): " + "; ".join(mismatches)
-            )
-        # Sprint C6: read the (additive) value_mode so leaf_value applies the
-        # matching transform. Absent -> "rounds" (the C2-C5 raw-critic path).
+        meta = load_compatible_meta(self.model_path)
+        self._codec_version = int(meta["codec_version"])
         self._value_mode = str(meta.get("value_mode", "rounds"))
 
     def _get_model(self) -> MaskablePPO:
@@ -734,6 +710,12 @@ class NetAdapter:
             self._validate_meta()
             self._model = _load_cached_model(self.model_path)
         return self._model
+
+    def observation_codec(self) -> int:
+        """Codec recorded on this checkpoint. Loads the sidecar on first use."""
+        self._get_model()
+        assert self._codec_version is not None
+        return self._codec_version
 
     # -- the lean combined forward (Sprint C8, single source of truth) ----
 
@@ -1215,6 +1197,13 @@ class MCTSAgent(BaseAgent):
             self._net = NetAdapter(self.model_path)
         return self._net
 
+    def _observation_codec(self) -> int | None:
+        """Codec of a loaded checkpoint. An injected stub net stays on v4."""
+        net = self._get_net()
+        if isinstance(net, NetAdapter):
+            return net.observation_codec()
+        return None
+
     # -- determinism helpers (the S1 scheme) -----------------------------
 
     def _turn_signature(self, state: GameState, player_id: int) -> _TurnSig:
@@ -1333,7 +1322,12 @@ class MCTSAgent(BaseAgent):
         # (perfect information -- the opponent's hand is visible).
         mover = node.to_move
         if obs is None:
-            obs = encode_observation(node.state, mover, decision)
+            obs = encode_observation(
+                node.state,
+                mover,
+                decision,
+                codec_version=self._observation_codec(),
+            )
         mask = legal_action_mask(decision, node.state)
         probs = self._get_net().policy_prior(obs, mask)
 
@@ -1980,7 +1974,10 @@ class MCTSAgent(BaseAgent):
             decision = node.decision
             assert decision is not None
             prior_obs, value_obs = encode_observation_pair(
-                node.state, self.to_move_pid, decision
+                node.state,
+                self.to_move_pid,
+                decision,
+                codec_version=self._observation_codec(),
             )
             node.edges = self._edges_for(node, obs=prior_obs)
             node.expanded = True
@@ -2028,7 +2025,12 @@ class MCTSAgent(BaseAgent):
         # passes it when ``node.to_move == to_move_pid``, so it is byte-identical
         # to the un-shared encode below.
         if obs is None:
-            obs = encode_observation(node.state, self.to_move_pid, decision=None)
+            obs = encode_observation(
+                node.state,
+                self.to_move_pid,
+                decision=None,
+                codec_version=self._observation_codec(),
+            )
         return self._get_net().leaf_value(obs)
 
     def _terminal_value(self, state: GameState) -> float:
@@ -2261,7 +2263,12 @@ class MCTSAgent(BaseAgent):
         cand = self._candidate_actions(decision, state)
         if not cand:
             return legal[0] if legal else tuple()
-        obs = encode_observation(state, player_id, decision)
+        obs = encode_observation(
+            state,
+            player_id,
+            decision,
+            codec_version=self._observation_codec(),
+        )
         mask = legal_action_mask(decision, state)
         probs = self._get_net().policy_prior(obs, mask)
         best = cand[0]
@@ -2389,7 +2396,12 @@ class MCTSAgent(BaseAgent):
         from heat.ml.action_codec import decode_action, legal_action_mask
         from heat.ml.features import encode_observation
 
-        obs = encode_observation(state, decision.player_id, decision)
+        obs = encode_observation(
+            state,
+            decision.player_id,
+            decision,
+            codec_version=self._observation_codec(),
+        )
         mask = legal_action_mask(decision, state)
         probs = self._get_net().policy_prior(obs, mask)
         # Argmax over legal (masked) actions.

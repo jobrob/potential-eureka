@@ -47,6 +47,7 @@ from heat.ml.action_codec import (
 )
 from heat.ml.features import encode_observation
 from heat.ml.selfplay.policy import PPOPolicy
+from heat.ml.spaces import CODEC_VERSION
 
 
 class SnapshotAgent(BaseAgent):
@@ -95,7 +96,12 @@ class SnapshotAgent(BaseAgent):
         if forced is not NO_FORCED:
             return forced
 
-        obs = encode_observation(state, decision.player_id, decision)
+        obs = encode_observation(
+            state,
+            decision.player_id,
+            decision,
+            codec_version=int(getattr(self._policy, "codec_version", CODEC_VERSION)),
+        )
         mask = legal_action_mask(decision, state)
         obs_t = torch.as_tensor(
             obs, dtype=torch.float32, device=self._device

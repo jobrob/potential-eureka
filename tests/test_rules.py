@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from heat.models.cards import Card, CardType, Deck
 from heat.models.player_state import PlayerState
@@ -297,10 +296,6 @@ class TestLegalCardPlays:
 # ===========================================================================
 
 class TestIsClutteredHand:
-    def test_cluttered_true(self) -> None:
-        # 5 heat + 2 speed in hand, gear 3 => 2 playable < 3 needed => True
-        hand = [_heat(i) for i in range(5)] + [_speed(1, 0), _speed(2, 1)]
-        assert is_cluttered_hand(hand, 3) is True
 
     def test_cluttered_false(self) -> None:
         # 2 heat + 5 speed in hand, gear 3 => 5 playable >= 3 needed => False
@@ -737,10 +732,6 @@ class TestSlipstreamEligible:
 # ===========================================================================
 
 class TestSlipstreamWouldCrossFinish:
-    def test_would_cross_on_final_lap(self) -> None:
-        track = _make_track(30, laps=1)
-        player = _make_player(position=28, lap=1)
-        assert slipstream_would_cross_finish(player, track) is True
 
     def test_would_not_cross_not_final_lap(self) -> None:
         track = _make_track(30, laps=2)

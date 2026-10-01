@@ -34,6 +34,7 @@ from heat.ml.selfplay.action_features import ACTION_FEAT_DIM, action_feature_tab
 from heat.ml.spaces import (
     ACTION_DIM,
     BLOCK_HAND_HISTOGRAM,
+    CODEC_VERSION,
     OBS_DIM,
 )
 
@@ -191,6 +192,8 @@ class HeatPolicy(nn.Module):
         super().__init__()
         self.obs_dim = obs_dim
         self.action_dim = action_dim
+        # Plain attribute, not a buffer: historical state_dicts omit it.
+        self.codec_version = CODEC_VERSION
 
         self.encoder = encoder
         self.trunk, prev = _build_trunk(obs_dim, hidden_sizes, encoder)
@@ -313,6 +316,8 @@ class DotProductPolicy(nn.Module):
         self.action_dim = action_dim
         self.embed_dim = embed_dim
         self.encoder = encoder
+        # Plain attribute, not a buffer: historical state_dicts omit it.
+        self.codec_version = CODEC_VERSION
 
         # State trunk is shared with HeatPolicy; A4 swaps only this component.
         self.trunk, prev = _build_trunk(obs_dim, hidden_sizes, encoder)

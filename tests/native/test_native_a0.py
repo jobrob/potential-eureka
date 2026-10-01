@@ -23,8 +23,8 @@ def test_receipt_and_strict_fixed_buffer_roundtrip() -> None:
     pool = _pool()
     receipt = pool.receipt()
     assert receipt["protocol_version"] == 1
-    assert receipt["state_schema_hash"] == "d3-a5-v3-r104-a516-p6-r200-c424-t90"
-    assert receipt["codec_version"] == 3
+    assert receipt["state_schema_hash"] == "d3-a5-v4-r104-a516-p6-r200-c424-t90"
+    assert receipt["codec_version"] == 4
     assert receipt["build_type"] in {"debug", "release"}
 
     source = np.arange(24, dtype=np.float32).reshape(4, 6)

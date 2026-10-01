@@ -44,7 +44,6 @@ import gen_selfplay as G  # noqa: E402
 from heat.agents import mcts_agent  # noqa: E402
 from heat.agents.mcts_agent import MCTSAgent, MCTSConfig, NetAdapter  # noqa: E402
 from heat.engine import rules  # noqa: E402
-from heat.engine.driver import Decision, DecisionKind  # noqa: E402
 from heat.models.game_state import GameState  # noqa: E402
 from heat.ml import features as F  # noqa: E402
 from heat.ml.action_codec import legal_action_mask  # noqa: E402
@@ -53,13 +52,13 @@ from heat.tracks.generator import generate_track  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Shared cold prior (a random-weight codec-v3 checkpoint; C7 is net-agnostic)
+# Shared cold prior (a random-weight live-codec checkpoint; C7 is net-agnostic)
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="module")
 def cold_prior(tmp_path_factory) -> str:
-    """Mint a fresh random-weight codec-v3 ``MaskablePPO`` checkpoint once.
+    """Mint a fresh random-weight ``MaskablePPO`` checkpoint once.
 
     C7 verifies determinism (model reuse / workers / encoder cache), which is
     net-agnostic, so random weights are enough; CPU matches the NetAdapter path.
@@ -111,6 +110,7 @@ class TestWorkersByteIdentical:
         data = np.load(out)
         return {k: data[k] for k in data.files}
 
+    @pytest.mark.slow
     def test_workers_4_equals_workers_1_solo(self, cold_prior, tmp_path) -> None:
         """The C2-C5 solo generator: ``workers=4`` == ``workers=1`` byte-for-byte
         on every array, after the deterministic seed-sorted merge."""
@@ -122,6 +122,7 @@ class TestWorkersByteIdentical:
                 "(the deterministic merge is broken)"
             )
 
+    @pytest.mark.slow
     def test_workers_4_equals_workers_1_two_player(self, cold_prior, tmp_path) -> None:
         """The C6 1v1 win/loss generator: also byte-identical across --workers."""
         serial = self._generate(tmp_path, cold_prior, workers=1, two_player=True)
@@ -131,14 +132,34 @@ class TestWorkersByteIdentical:
                 f"array {k!r} differs between workers=1 and workers=4 (1v1)"
             )
 
-    def test_workers_default_is_serial(self, cold_prior, tmp_path) -> None:
-        """``--workers`` absent (the getattr default 1) is the serial path -- a
-        Namespace without the field still generates (backward-compat)."""
-        out = str(tmp_path / "sp_default.npz")
-        args = _gen_args(out, model=cold_prior, workers=1)
-        delattr(args, "workers")  # simulate an old caller with no --workers
-        summary = G.generate_dataset(args)
-        assert summary["n_rows"] > 0
+    def test_workers_default_is_serial(self, tmp_path, monkeypatch) -> None:
+        """Missing workers uses the serial dispatcher, without loading a model."""
+        import multiprocessing
+
+        args = _gen_args(str(tmp_path / "unused.npz"), model="unused.zip", workers=1)
+        delattr(args, "workers")
+        calls = []
+
+        def run_one(spec):
+            calls.append(spec)
+            return object()
+
+        class DispatchComplete(Exception):
+            """Stop before dataset serialization after checking dispatch results."""
+
+        def merge(buf, results):
+            assert len(results) == args.tracks + args.val_tracks
+            assert len(calls) == len(results)
+            raise DispatchComplete
+
+        def pool_forbidden(*args, **kwargs):
+            pytest.fail("missing workers must not create a multiprocessing pool")
+
+        monkeypatch.setattr(G, "_run_one_game", run_one)
+        monkeypatch.setattr(G, "_merge_into", merge)
+        monkeypatch.setattr(multiprocessing, "get_context", pool_forbidden)
+        with pytest.raises(DispatchComplete):
+            G.generate_dataset(args)
 
 
 # ---------------------------------------------------------------------------
@@ -147,19 +168,12 @@ class TestWorkersByteIdentical:
 
 
 def _reference_track_block(player, track) -> list[float]:
-    """The PRE-C7 ``_track_block`` body, recomputed from scratch (no precompute).
-
-    A faithful copy of the original un-cached implementation, used as the
-    bit-identical reference the cached encoder must match.
-    """
+    """Uncached v4 ``_track_block``. The cached encoder must match it bit for bit."""
     from heat.ml import spaces
 
     length = track.length or 1
     pos = player.position
     corners = list(track.corners)
-    max_limit = max((c.speed_limit for c in corners), default=1) or 1
-    max_clen = max(((c.end - c.start + 1) for c in corners), default=1) or 1
-    max_lanes = max((s.lanes for s in track.spaces), default=1) or 1
 
     def fwd_dist(c) -> int:
         d = (c.start - pos) % length
@@ -181,18 +195,23 @@ def _reference_track_block(player, track) -> list[float]:
                 entry_lanes = 1
             slots += [
                 clip01(d / length),
-                clip01(c.speed_limit / max_limit),
-                clip01((c.end - c.start + 1) / max_clen),
-                clip01(entry_lanes / max_lanes),
+                clip01(c.speed_limit / spaces.SPEED_LIMIT_SCALE),
+                clip01((c.end - c.start + 1) / spaces.CORNER_LENGTH_SCALE),
+                clip01(entry_lanes / spaces.LANE_SCALE),
             ]
         else:
             slots += [0.0, 0.0, 0.0, 0.0]
 
     laps = track.laps or 1
-    laps_remaining = clip01((laps - player.lap) / laps)
     total_len = length * laps
-    abs_pos = player.lap * length + pos
-    dist_to_finish = clip01((total_len - abs_pos) / total_len)
+    if player.finished or player.lap > laps:
+        laps_remaining = 0.0
+        dist_to_finish = 0.0
+    else:
+        current_lap = max(player.lap, 1)
+        laps_remaining = clip01((laps - current_lap + 1) / laps)
+        completed = (current_lap - 1) * length + pos
+        dist_to_finish = clip01((total_len - completed) / total_len)
     heat = clip01(player.heat_available / rules.HEAT_POOL_SIZE)
     pos_in_lap = clip01(pos / length)
     return slots + [laps_remaining, dist_to_finish, heat, pos_in_lap]
@@ -251,16 +270,28 @@ class TestEncoderCacheBitIdentical:
                     send = None
                     continue
                 pid = decision.player_id
-                # Warm encode, then cold encode (cache cleared) -- must match.
-                warm = encode_observation(state, pid, decision)
+                # Warm encode, then cold encode (cache cleared) -- must match
+                # for both the historical codec and the live one.
+                for codec in (3, 4):
+                    warm = encode_observation(
+                        state, pid, decision, codec_version=codec
+                    )
+                    F._track_precompute.clear()
+                    cold = encode_observation(
+                        state, pid, decision, codec_version=codec
+                    )
+                    assert np.array_equal(warm, cold), (tseed, decision.kind, codec)
+                    warm_v = encode_observation(state, pid, None, codec_version=codec)
+                    F._track_precompute.clear()
+                    cold_v = encode_observation(state, pid, None, codec_version=codec)
+                    assert np.array_equal(warm_v, cold_v)
+                # A v4 cache entry stores raw geometry, so a later v3 read matches
+                # a cold v3 encode.
+                encode_observation(state, pid, decision, codec_version=4)
+                cross = encode_observation(state, pid, decision, codec_version=3)
                 F._track_precompute.clear()
-                cold = encode_observation(state, pid, decision)
-                assert np.array_equal(warm, cold), (tseed, decision.kind)
-                # Also the value-path obs (decision=None) must be cache-stable.
-                warm_v = encode_observation(state, pid, None)
-                F._track_precompute.clear()
-                cold_v = encode_observation(state, pid, None)
-                assert np.array_equal(warm_v, cold_v)
+                cold_v3 = encode_observation(state, pid, decision, codec_version=3)
+                assert np.array_equal(cross, cold_v3)
                 seen_kinds.add(decision.kind)
                 n_checked += 1
                 mask = legal_action_mask(decision, state)

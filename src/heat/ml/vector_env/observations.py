@@ -1,4 +1,8 @@
-"""Tensor-native observations and GEAR/CARDS masks for Direction D2 Chunk 2."""
+"""Tensor-native observations and GEAR/CARDS masks for Direction D2 Chunk 2.
+
+Observations match the live codec (v4): fixed corner scales, corrected lap and
+finish distance, and the public race fields in phase indices 10-16.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +17,17 @@ from heat.ml.spaces import (
     ACTION_DIM,
     BLOCK_PHASE_CONTEXT,
     CARDS_OFFSET,
+    CORNER_LENGTH_SCALE,
+    CORNER_SPEED_SCALE,
     GEAR_OFFSET,
+    HEAT_COST_SCALE,
+    LANE_SCALE,
     MAX_CORNERS,
     MAX_PLAYERS,
     OBS_DIM,
     REACT_OFFSET,
+    SPEED_LIMIT_SCALE,
+    TRACK_LENGTH_SCALE,
 )
 from heat.ml.vector_env.state import (
     CARD_TYPE_HEAT,
@@ -189,6 +199,49 @@ def tensor_observations_for_indices(
     )
     phase[:, 9] = torch.clamp(
         state.round_num[lanes].to(torch.float64) / 50.0, 0.0, 1.0
+    )
+    # Indices 10-16 are state, not the decision. 17-18 stay 0. Same values as
+    # features._write_v4_race_context, including a decision-free +2-space probe.
+    speed = (
+        state.speed_from_cards[lanes, players]
+        + state.speed_from_boost[lanes, players]
+        + state.speed_from_adrenaline[lanes, players]
+    )
+    turn_start_position = state.turn_start_position[lanes, players]
+    turn_start_lap = state.turn_start_lap[lanes, players]
+    safe_length = torch.clamp(track_lengths, min=1)
+    safe_laps = torch.clamp(track_laps, min=1)
+    moved = (lap - turn_start_lap) * safe_length + (position - turn_start_position)
+    phase[:, 10] = torch.clamp(
+        speed.to(torch.float64) / float(CORNER_SPEED_SCALE), 0.0, 1.0
+    )
+    phase[:, 11] = _ratio(turn_start_position, safe_length)
+    phase[:, 12] = torch.clamp(
+        (lap - turn_start_lap).to(torch.float64) / safe_laps.to(torch.float64),
+        -1.0,
+        1.0,
+    )
+    heat_scale = float(HEAT_COST_SCALE)
+    phase[:, 13] = torch.clamp(
+        _public_heat_cost(state, lanes, players, moved, speed).to(torch.float64)
+        / heat_scale,
+        0.0,
+        1.0,
+    )
+    phase[:, 14] = torch.clamp(
+        _public_heat_cost(state, lanes, players, moved, speed + 1).to(torch.float64)
+        / heat_scale,
+        0.0,
+        1.0,
+    )
+    phase[:, 15] = torch.clamp(
+        _public_heat_cost(state, lanes, players, moved + 2, speed).to(torch.float64)
+        / heat_scale,
+        0.0,
+        1.0,
+    )
+    phase[:, 16] = torch.clamp(
+        track_lengths.to(torch.float64) / float(TRACK_LENGTH_SCALE), 0.0, 1.0
     )
 
     observation = torch.cat(
@@ -431,10 +484,56 @@ def _deck_composition(
     )
 
 
+def _public_heat_cost(
+    state: TensorGameState,
+    lanes: torch.Tensor,
+    players: torch.Tensor,
+    spaces_moved: torch.Tensor,
+    speed: torch.Tensor,
+) -> torch.Tensor:
+    """Sum corner heat on a geometric path. Does not mutate ``state``.
+
+    Matches ``rules.corners_crossed``: no move pays nothing, a move of at least
+    one lap pays every on-track corner once, and a shorter move pays a corner
+    whose span meets the forward arc. The turn-start space itself is excluded.
+    ``speed`` is cards plus boost plus adrenaline, without slipstream.
+    """
+    length = torch.clamp(state.track_lengths[lanes], min=1)
+    start = state.turn_start_position[lanes, players]
+    corners = state.track_corners[lanes]
+    slot = torch.arange(MAX_CORNERS, device=length.device)
+    valid = slot[None, :] < state.track_corner_counts[lanes, None]
+    corner_start = corners[:, :, 0]
+    corner_end = corners[:, :, 1]
+    limits = corners[:, :, 2]
+    low = torch.clamp(corner_start, min=0)
+    high = torch.minimum(corner_end, length[:, None] - 1)
+    on_track = valid & (corner_end >= corner_start) & (low <= high)
+
+    relative_start = torch.remainder(low - start[:, None], length[:, None])
+    relative_end = torch.remainder(high - start[:, None], length[:, None])
+    spaces = spaces_moved[:, None]
+    crosses_origin = relative_start > relative_end
+    overlaps_arc = torch.where(
+        crosses_origin,
+        (relative_start <= spaces) | (relative_end >= 1),
+        (relative_start <= spaces) & (relative_end >= 1),
+    )
+    moved = spaces_moved[:, None]
+    hit = on_track & (moved > 0) & ((moved >= length[:, None]) | overlaps_arc)
+    per_corner = torch.clamp(speed[:, None] - limits, min=0)
+    return torch.where(hit, per_corner, torch.zeros_like(per_corner)).sum(dim=1)
+
+
 def _track_block(
     state: TensorGameState, lanes: torch.Tensor, players: torch.Tensor
 ) -> torch.Tensor:
-    """Encode all corner slots and track-global fields with batched tensor ops."""
+    """Encode corner slots and track globals with the live v4 scales.
+
+    Corner limit, length, and lanes use the fixed codec divisors. Laps remaining
+    count the current one-based lap, and distance to the finish uses completed
+    distance. A finished car, or one already past the last lap, reads 0 for both.
+    """
     length = state.track_lengths[lanes]
     position = state.position[lanes, players]
     corners = state.track_corners[lanes]
@@ -450,41 +549,38 @@ def _track_block(
     sort_keys = torch.where(valid, distances, length[:, None] + 1)
     order = torch.argsort(sort_keys, dim=1, stable=True)
 
-    space_indices = torch.arange(MAX_TRACK_SPACES, device=length.device)
-    valid_spaces = space_indices[None, :] < length[:, None]
-    max_lanes = torch.where(valid_spaces, state.track_lanes[lanes], 0).amax(dim=1)
-    max_lanes = torch.clamp(max_lanes, min=1)
     entry_lanes = state.track_lanes[lanes].gather(
         1, torch.clamp(starts, min=0, max=MAX_TRACK_SPACES - 1)
     )
-    max_limits = torch.clamp(torch.where(valid, limits, 0).amax(dim=1), min=1)
-    max_corner_lengths = torch.clamp(
-        torch.where(valid, corner_lengths, 0).amax(dim=1), min=1
-    )
-
     intrinsic = torch.stack(
         (
             _ratio(distances, length[:, None]),
-            _ratio(limits, max_limits[:, None]),
-            _ratio(corner_lengths, max_corner_lengths[:, None]),
-            _ratio(entry_lanes, max_lanes[:, None]),
+            torch.clamp(limits.to(torch.float64) / float(SPEED_LIMIT_SCALE), 0.0, 1.0),
+            torch.clamp(
+                corner_lengths.to(torch.float64) / float(CORNER_LENGTH_SCALE), 0.0, 1.0
+            ),
+            torch.clamp(entry_lanes.to(torch.float64) / float(LANE_SCALE), 0.0, 1.0),
         ),
         dim=2,
     )
     intrinsic = torch.where(valid[:, :, None], intrinsic, 0.0)
     ordered = intrinsic.gather(1, order[:, :, None].expand(-1, -1, 4))
 
-    laps = state.track_laps[lanes]
+    safe_length = torch.clamp(length, min=1)
+    safe_laps = torch.clamp(state.track_laps[lanes], min=1)
     player_lap = state.lap[lanes, players]
+    current_lap = torch.clamp(player_lap, min=1)
+    done = state.finished[lanes, players] | (player_lap > safe_laps)
+    total_length = safe_length * safe_laps
+    completed = (current_lap - 1) * safe_length + position
+    zeros = torch.zeros(done.shape, dtype=torch.float64, device=done.device)
     heat = state.heat_pool.lengths[lanes, players]
-    total_length = length * laps
-    absolute_position = player_lap * length + position
     globals_ = torch.stack(
         (
-            _ratio(laps - player_lap, laps),
-            _ratio(total_length - absolute_position, total_length),
+            torch.where(done, zeros, _ratio(safe_laps - current_lap + 1, safe_laps)),
+            torch.where(done, zeros, _ratio(total_length - completed, total_length)),
             torch.clamp(heat.to(torch.float64) / 6.0, 0.0, 1.0),
-            _ratio(position, length),
+            _ratio(position, safe_length),
         ),
         dim=1,
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 from heat.ml.native_env.collector import NativeCollector, NativeCollectorState
@@ -13,6 +14,13 @@ from heat.ml.selfplay.policy import build_policy
 from heat.ml.selfplay.snapshots import SnapshotAgent
 from heat.ml.selfplay.tiny_heat import tiny_heat_track
 from heat.ml.selfplay.training_state import training_state_digest
+
+
+def _published_checkpoint(path: Path) -> Path:
+    """Return the generation file named by the latest pointer."""
+    pointer = path.with_name(path.name + ".latest")
+    name = pointer.read_text(encoding="ascii").strip()
+    return path.with_name(path.name + ".generations") / name
 
 
 def _policy(seed: int = 901) -> tuple[A8Config, object]:
@@ -24,9 +32,19 @@ def _policy(seed: int = 901) -> tuple[A8Config, object]:
     return config, policy
 
 
-def test_native_collection_is_exact_under_repeated_manifest_execution() -> None:
+def test_native_collection_is_exact_under_repeated_manifest_execution(monkeypatch) -> None:
     """Identical keyed manifests produce byte-identical canonical PPO tensors."""
     config, policy = _policy()
+    from heat.ml.native_env.bridge import NativeStateBridge
+
+    encode = NativeStateBridge.observation_for_kind
+
+    def encode_real_choice(bridge, seat, kind):
+        """Forced moves must not pay for an unused observation."""
+        assert np.count_nonzero(bridge.legal_mask_for_kind(seat, kind)) > 1
+        return encode(bridge, seat, kind)
+
+    monkeypatch.setattr(NativeStateBridge, "observation_for_kind", encode_real_choice)
 
     def collect() -> tuple[dict[str, torch.Tensor], NativeCollectorState]:
         state = NativeCollectorState(rows_per_game_ema=10.0)
@@ -56,6 +74,44 @@ def test_native_collection_is_exact_under_repeated_manifest_execution() -> None:
     assert first_state.export_state() == second_state.export_state()
     assert torch.isfinite(first["advantages"]).all()
     assert torch.isfinite(first["returns"]).all()
+
+
+def test_native_collector_rejects_a_codec_v3_policy() -> None:
+    """A historical policy must not be scored on native codec v4 observations."""
+    _config, policy = _policy(903)
+    policy.codec_version = 3
+    collector = NativeCollector(
+        tiny_heat_track(),
+        2,
+        state=NativeCollectorState(),
+        worker_count=1,
+        ready_capacity=4,
+        sampling_seed=1,
+        rows_ema_alpha=1.0,
+    )
+    with pytest.raises(ValueError, match="codec 3"):
+        collector.collect(
+            policy, 4, torch.device("cpu"), np.random.default_rng(1),
+            gamma=1.0, gae_lambda=1.0, policy_version=1,
+        )
+
+    snapshot = SnapshotAgent(policy, name="legacy-anchor")
+    _config, live = _policy(904)
+    anchored = NativeCollector(
+        tiny_heat_track(),
+        2,
+        state=NativeCollectorState(),
+        worker_count=1,
+        ready_capacity=4,
+        sampling_seed=1,
+        rows_ema_alpha=1.0,
+        scripted_seats={1: snapshot},
+    )
+    with pytest.raises(ValueError, match="frozen opponent"):
+        anchored.collect(
+            live, 4, torch.device("cpu"), np.random.default_rng(1),
+            gamma=1.0, gae_lambda=1.0, policy_version=1,
+        )
 
 
 def test_native_collector_supports_frozen_snapshot_rows_without_recording_them() -> None:
@@ -185,8 +241,12 @@ def test_native_safe_boundary_resume_matches_uninterrupted_training(
             save_path=segmented_path,
         ),
     )
-    complete = torch.load(complete_path, map_location="cpu", weights_only=False)
-    segmented = torch.load(segmented_path, map_location="cpu", weights_only=False)
+    complete = torch.load(
+        _published_checkpoint(complete_path), map_location="cpu", weights_only=False
+    )
+    segmented = torch.load(
+        _published_checkpoint(segmented_path), map_location="cpu", weights_only=False
+    )
     assert training_state_digest(complete) == training_state_digest(segmented)
     assert complete["native_collector"] == segmented["native_collector"]
     assert complete["native_runtime_receipt"] == segmented["native_runtime_receipt"]

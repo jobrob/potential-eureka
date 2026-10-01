@@ -221,7 +221,8 @@ def main(argv: list[str] | None = None) -> int:
             f"opponents={int(record['opponent_current_iterations'])}/"
             f"{int(record['opponent_snapshot_iterations'])}/"
             f"{int(record['opponent_anchor_iterations'])} "
-            f"entropy={record['entropy']:.3f} "
+            f"rollout_entropy={record['rollout_entropy']:.3f} "
+            f"update_entropy={record['update_entropy']:.3f} "
             f"policy_loss={record['policy_loss']:+.4f} "
             f"value_loss={record['value_loss']:.4f}{profile_text}",
             flush=True,

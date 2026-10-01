@@ -36,13 +36,20 @@ from heat.models.player_state import PlayerState
 #: v2 (Sprint B): replaced the 4-dim next-corner lookahead with an all-corners
 #: ego-centric track block (Option A whole-track obs). OBS_DIM 72 -> 104. v1
 #: checkpoints are intentionally rejected by the MLAgent version tripwire.
-#: v3 (Option C prep, code-review 2026-06-22 #1): made the observation a pure
-#: function of game state -- ``round_num`` (phase-block index 9) is now encoded
-#: unconditionally by ``features.encode_observation`` instead of only when a real
-#: ``decision`` is present. OBS_DIM/ACTION_DIM unchanged; only the value written
-#: at index 9 changes (it is now identical for ``decision=None`` and a real
-#: decision). v1/v2 checkpoints are rejected by the MLAgent version tripwire.
-CODEC_VERSION: int = 3
+#: v3 (Option C prep, code-review 2026-06-22 #1): ``round_num`` (phase index 9)
+#: is encoded unconditionally. Corner limit, length, and lanes are divided by
+#: that track's own maxima. ``laps_remaining`` is ``(laps - lap) / laps``.
+#: ``dist_to_finish`` uses ``lap * length + position``. Phase indices 10-18 are 0.
+#: v4 (review 2026-09-05): same block order and the same 104/516 dims. Corner
+#: features use the fixed scales below, not the track's own max. Race progress
+#: counts laps still to drive, including the current one-based lap. Phase indices
+#: 10-16 carry revealed speed, turn origin, and the public heat bill; 17-18 stay
+#: 0. A v3 checkpoint must be encoded with codec 3 so its inputs stay identical.
+CODEC_VERSION: int = 4
+
+#: Checkpoints at these codecs still load when the dims match. New saves write
+#: :data:`CODEC_VERSION`. Anything else is rejected.
+LEGACY_PLAYABLE_CODECS: tuple[int, ...] = (3, 4)
 
 # ---------------------------------------------------------------------------
 # Observation space (§3.1)
@@ -78,6 +85,14 @@ CORNER_SLOT_FLOATS: int = 4
 #: Track-global floats appended after the corner slots: (laps_remaining,
 #: dist_to_finish, heat_pool, pos_in_lap).
 TRACK_GLOBALS: int = 4
+
+#: Fixed v4 divisors. v3 ignores these and divides by the track's own maxima.
+SPEED_LIMIT_SCALE: int = 5
+CORNER_LENGTH_SCALE: int = 90
+LANE_SCALE: int = 3
+TRACK_LENGTH_SCALE: int = 120
+CORNER_SPEED_SCALE: int = 12
+HEAT_COST_SCALE: int = 6
 #: All-corners ego-centric track block: MAX_CORNERS slots + the globals
 #: sub-block. Replaces the old 4-dim BLOCK_TRACK_LOOKAHEAD.
 BLOCK_TRACK: int = MAX_CORNERS * CORNER_SLOT_FLOATS + TRACK_GLOBALS  # 36
@@ -212,32 +227,23 @@ def _placement_reward(state: GameState, learner_id: int) -> float:
 
 
 def terminal_margin(state: GameState, player_id: int) -> float:
-    """Normalized progress lead over the best opponent at game end (Sprint A6).
+    """Lead over the best opponent at game end, in ``[-1, +1]`` (Sprint A6).
 
-    A *dense* terminal target: how far ahead of the whole field the learner is,
-    as a fraction of one full lap. Positive == leading; a one-full-lap lead
-    saturates at ``+1`` (and a one-lap deficit at ``-1``). Unlike the sparse
-    :func:`_placement_reward` (which says only *whether* you won), this grades a
-    dominant position apart from a lucky squeaker, so GAE returns -- and therefore
-    the PPO value loss AND advantages -- carry graded information.
+    The coefficient that adds this into the reward stays 0. The label itself
+    must still rank a finished race: treating every finished car as remaining 0
+    made a normal result all zeros.
 
-    Using the same absolute-progress arithmetic as
-    :func:`heat.ml.features._track_block`
-    (``abs_pos = player.lap * length + player.position``), each player's
-    *remaining* distance to the finish is::
+    A car still racing uses one-based laps. Completed distance is
+    ``(max(lap, 1) - 1) * length + position``, not ``lap * length + position``.
+    Remaining distance is ``laps * length - completed``, floored at 0.
 
-        remaining(p) = 0.0                                  if p.finished
-                     = max(0, laps*length - abs_pos(p))     otherwise
+    When every car has finished with a real ``finish_order``, the margin is
+    ``(best opponent finish_order - my finish_order) / (n - 1)``. The best
+    opponent is the smallest finish order among the others, so the winner of a
+    2-car race is ``+1`` and the last car is ``-1``.
 
-    A finished player has zero remaining, so it counts as strictly ahead of any
-    opponent still on track. The margin is the gap between the best (smallest)
-    opponent remaining and the learner's own, normalized by ``track.length`` and
-    clipped to ``[-1, +1]``::
-
-        margin = clip((min_opp remaining(opp) - remaining(me)) / length, -1, +1)
-
-    In an unclipped 2-seat game ``margin(s, 0) == -margin(s, 1)`` (antisymmetric).
-    Returns ``0.0`` for a solo field (``n <= 1``), which has no opponent to lead.
+    A finished car versus someone still racing uses remaining distance: the
+    finisher has 0 left, so they lead. Solo (``n <= 1``) is 0.
     """
     n = state.starting_player_count or state.num_players
     if n <= 1:
@@ -245,20 +251,28 @@ def terminal_margin(state: GameState, player_id: int) -> float:
     length = state.track.length or 1
     laps = state.track.laps or 1
     total_len = laps * length
+    me = state.get_player(player_id)
+    opponents = [p for p in state.players if p.player_id != player_id]
+    if not opponents:  # pragma: no cover - guarded by n <= 1 above
+        return 0.0
+
+    ranked = (
+        me.finished
+        and me.finish_order > 0
+        and all(p.finished and p.finish_order > 0 for p in opponents)
+    )
+    if ranked:
+        best_order = min(p.finish_order for p in opponents)
+        margin = (best_order - me.finish_order) / (n - 1)
+        return float(np.clip(margin, -1.0, 1.0))
 
     def _remaining(p: PlayerState) -> float:
         if p.finished:
             return 0.0
-        abs_pos = p.lap * length + p.position
-        return max(0.0, float(total_len - abs_pos))
+        completed = (max(p.lap, 1) - 1) * length + p.position
+        return max(0.0, float(total_len - completed))
 
-    my_remaining = _remaining(state.get_player(player_id))
-    opp_remaining = [
-        _remaining(p) for p in state.players if p.player_id != player_id
-    ]
-    if not opp_remaining:  # pragma: no cover - guarded by n <= 1 above
-        return 0.0
-    margin = (min(opp_remaining) - my_remaining) / length
+    margin = (min(_remaining(p) for p in opponents) - _remaining(me)) / length
     return float(np.clip(margin, -1.0, 1.0))
 
 

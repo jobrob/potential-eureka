@@ -88,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             f"iter {iteration:>4d} | "
             f"policy_loss {info['policy_loss']:+.4f} | "
             f"value_loss {info['value_loss']:.4f} | "
-            f"entropy {info['entropy']:.4f} | "
+            f"update_entropy {info['update_entropy']:.4f} | "
             f"mean_return {info['mean_episode_return']:+.4f} "
             f"(n_ep={int(info['n_episodes'])})"
         )

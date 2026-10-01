@@ -68,7 +68,7 @@ from heat.ml.opponents import opponent_action
 from heat.ml.selfplay.buffer import RolloutBuffer
 from heat.ml.selfplay.policy import PPOPolicy, build_policy
 from heat.ml.selfplay.ppo import A0Config, ppo_update
-from heat.ml.spaces import ACTION_DIM, OBS_DIM, step_reward, terminal_margin
+from heat.ml.spaces import ACTION_DIM, CODEC_VERSION, OBS_DIM, step_reward, terminal_margin
 
 #: A single game yields at most 5 recordable decisions per active seat per round
 #: (GEAR, CARDS, REACT, SLIPSTREAM, DISCARD), bounded by ``MAX_ROUNDS`` rounds.
@@ -77,6 +77,11 @@ from heat.ml.spaces import ACTION_DIM, OBS_DIM, step_reward, terminal_margin
 #: spin-loop game -- ``get()``/``compute_gae`` slice by ``_pos``, so the headroom
 #: costs only zero-fill it never reads.
 _MAX_RECORDED_PER_GAME: int = 5 * MAX_ROUNDS
+
+
+def _policy_codec(policy: PPOPolicy) -> int:
+    """Codec the policy was loaded or built with. A fresh policy is v4."""
+    return int(getattr(policy, "codec_version", CODEC_VERSION))
 
 
 @dataclass
@@ -363,7 +368,7 @@ class MultiSeatCollector:
         decisions: list[Decision],
         state: GameState,
         policy: PPOPolicy,
-        buffers: list[RolloutBuffer],
+        buffers: list[RolloutBuffer] | None,
         pending: dict[int, _Pending],
         seat_return: dict[int, float],
         seat_recorded: dict[int, int],
@@ -378,6 +383,8 @@ class MultiSeatCollector:
             seat = decision.player_id
             if seat in pending:
                 prev = pending.pop(seat)
+                if buffers is None:
+                    continue
                 reward = step_reward(
                     prev.prev_state,
                     state,
@@ -393,8 +400,11 @@ class MultiSeatCollector:
                 seat_recorded[seat] += 1
 
         encode_started = perf_counter() if timing is not None else 0.0
+        codec = _policy_codec(policy)
         observations = [
-            encode_observation(state, decision.player_id, decision)
+            encode_observation(
+                state, decision.player_id, decision, codec_version=codec
+            )
             for decision in decisions
         ]
         masks = [legal_action_mask(decision, state) for decision in decisions]
@@ -431,7 +441,8 @@ class MultiSeatCollector:
                 value=float(value_t[row].item()),
                 mask=masks[row],
                 # Every simultaneous choice snapshots the same unapplied state.
-                prev_state=state.clone(reseed=0),
+                # Outcome-only evaluation never computes transition rewards.
+                prev_state=state if buffers is None else state.clone(reseed=0),
             )
             queued[(decision.kind, seat)] = decode_legal_action(
                 decision, state, action
@@ -443,7 +454,7 @@ class MultiSeatCollector:
         kind: DecisionKind,
         state: GameState,
         policy: PPOPolicy,
-        buffers: list[RolloutBuffer],
+        buffers: list[RolloutBuffer] | None,
         pending: dict[int, _Pending],
         seat_return: dict[int, float],
         seat_recorded: dict[int, int],
@@ -486,13 +497,13 @@ class MultiSeatCollector:
     def _play_one_game(
         self,
         policy: PPOPolicy,
-        buffers: list[RolloutBuffer],
+        buffers: list[RolloutBuffer] | None,
         device: torch.device,
         rng: np.random.Generator,
         gamma: float,
         timing: CollectorTiming | None,
     ) -> list[float]:
-        """Play one complete self-play game, recording every policy seat's stream.
+        """Play one game; ``buffers=None`` skips training storage and rewards.
 
         Mirrors :meth:`HeatEnv.reset` / :meth:`HeatEnv._advance_to_learner` but for
         *all* policy seats at once. Returns the per-seat game returns (only for
@@ -591,6 +602,18 @@ class MultiSeatCollector:
         # Game ended: complete every pending transition with done=True.
         terminated, truncated = self._episode_flags(state)
         for seat, prev in pending.items():
+            if buffers is None:
+                # Preserve the collector's RNG consumption at a time limit:
+                # _seat_value calls act(), which also samples an action.
+                if truncated and not terminated:
+                    self._seat_value(
+                        policy,
+                        encode_observation(
+                            state, seat, None, codec_version=_policy_codec(policy)
+                        ),
+                        device,
+                    )
+                continue
             reward = step_reward(
                 prev.prev_state,
                 state,
@@ -615,7 +638,9 @@ class MultiSeatCollector:
             # for this seat with no pending decision), keeping done=True.
             if truncated and not terminated:
                 encode_started = perf_counter() if timing is not None else 0.0
-                s_next = encode_observation(state, seat, None)
+                s_next = encode_observation(
+                    state, seat, None, codec_version=_policy_codec(policy)
+                )
                 if timing is not None:
                     timing.encoding_seconds += perf_counter() - encode_started
                 inference_started = perf_counter() if timing is not None else 0.0

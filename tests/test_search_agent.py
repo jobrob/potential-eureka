@@ -19,7 +19,7 @@ import pickle
 
 import pytest
 
-from heat.models.cards import Card, CardType
+from heat.models.cards import Card
 from heat.models.game_state import GameState
 from heat.models.track import Corner, Space, Track
 from heat.engine import rules
@@ -27,7 +27,6 @@ from heat.engine.game import Game
 from heat.agents.heuristic_agent import HeuristicAgent
 from heat.agents.search_agent import LookaheadAgent
 from heat.agents import LookaheadAgent as ExportedLookahead
-from heat.agents import _move_eval as ME
 from heat.tracks.generator import generate_track
 from heat.simulation.runner import (
     heuristic_agent_factory,
@@ -188,25 +187,39 @@ class TestHorizonZeroIsGreedy:
     def _greedy_reference(
         self, agent: LookaheadAgent, state: GameState, player_id: int
     ) -> tuple[tuple[int, int], tuple[Card, ...]]:
-        """Brute-force the best candidate by simulating exactly one forced round."""
-        legal_gears = rules.legal_gear_shifts(
-            state.get_player(player_id).gear,
-            state.get_player(player_id).heat_available,
+        """Score each candidate after exactly one independently driven round."""
+        from heat.engine.driver import DecisionKind, run_round_driver
+        from heat.ml.opponents import opponent_action
+
+        player = state.get_player(player_id)
+        candidates = agent._candidate_plans(
+            state, player_id, rules.legal_gear_shifts(player.gear, player.heat_available)
         )
-        candidates = agent._candidate_plans(state, player_id, legal_gears)
-        sig = agent._turn_signature(state, player_id)
-        turn_seed = agent._turn_seed(sig)
-        best = candidates[0]
-        best_v = float("-inf")
-        for idx, (gear, cards) in enumerate(candidates):
-            v = agent._score_plan(state, player_id, gear, cards, turn_seed, idx)
-            if v > best_v:
-                best_v = v
-                best = (gear, cards)
-        return best
+        turn_seed = agent._turn_seed(agent._turn_signature(state, player_id))
+        scored = []
+        for index, (gear, cards) in enumerate(candidates):
+            clone = state.clone(reseed=(turn_seed + index * 100003) & 0x7FFFFFFF)
+            clone.logging_enabled = True
+            first_round = clone.round_num
+            driver = run_round_driver(clone)
+            answer = None
+            while True:
+                try:
+                    decision = driver.send(answer)
+                except StopIteration:
+                    break
+                if decision.player_id == player_id and decision.kind == DecisionKind.GEAR:
+                    answer = gear
+                elif decision.player_id == player_id and decision.kind == DecisionKind.CARDS:
+                    answer = cards
+                else:
+                    answer = opponent_action(agent.rollout_policy, decision, clone)
+            own_spins, later_spins = agent._count_spins(clone, player_id, first_round)
+            scored.append(agent._leaf_score(clone, player_id, gear, cards, own_spins, later_spins))
+        return candidates[max(range(len(candidates)), key=scored.__getitem__)]
 
     @pytest.mark.parametrize("leaf", ["progress", "move_eval"])
-    def test_horizon0_matches_single_round_argmax(self, leaf: str) -> None:
+    def test_horizon0_matches_single_round_argmax(self, leaf: str, monkeypatch) -> None:
         track = _gen_track(7)
         agent = LookaheadAgent(horizon=0, n_determinizations=1, leaf_value=leaf)
         state = GameState.create(track, 1, logging_enabled=False, seed=321)
@@ -214,6 +227,14 @@ class TestHorizonZeroIsGreedy:
         state.players[0].position = 2  # run-up to the limit-1 corner at 4-5
 
         ref_gear, ref_cards = self._greedy_reference(agent, state, 0)
+        score_leaf = agent._leaf_score
+
+        def score_after_one_round(clone, *args):
+            """Catch a wrong depth even when it happens to select the same move."""
+            assert clone.round_num == state.round_num + 1
+            return score_leaf(clone, *args)
+
+        monkeypatch.setattr(agent, "_leaf_score", score_after_one_round)
 
         legal_gears = rules.legal_gear_shifts(
             state.players[0].gear, state.players[0].heat_available

@@ -200,6 +200,42 @@ def load_meta(path: str) -> dict[str, Any]:
         return cast(dict[str, Any], json.load(fh))
 
 
+class CheckpointMismatchError(RuntimeError):
+    """A saved SB3 checkpoint does not match the runtime observation/action contract."""
+
+
+def load_compatible_meta(path: str, *, label: str = "Checkpoint") -> dict[str, Any]:
+    """Load a sidecar and reject missing or incompatible codec metadata."""
+    try:
+        meta = load_meta(path)
+    except FileNotFoundError as exc:
+        raise CheckpointMismatchError(
+            f"{label} sidecar not found for {path!r}; "
+            "expected a '.meta.json' written by save_checkpoint."
+        ) from exc
+    mismatches: list[str] = []
+    if meta.get("obs_dim") != spaces.OBS_DIM:
+        mismatches.append(
+            f"obs_dim: checkpoint={meta.get('obs_dim')!r} != runtime={spaces.OBS_DIM!r}"
+        )
+    if meta.get("action_dim") != spaces.ACTION_DIM:
+        mismatches.append(
+            "action_dim: checkpoint="
+            f"{meta.get('action_dim')!r} != runtime={spaces.ACTION_DIM!r}"
+        )
+    if meta.get("codec_version") not in spaces.LEGACY_PLAYABLE_CODECS:
+        mismatches.append(
+            "codec_version: checkpoint="
+            f"{meta.get('codec_version')!r} != runtime={spaces.LEGACY_PLAYABLE_CODECS!r}"
+        )
+    if mismatches:
+        raise CheckpointMismatchError(
+            f"{label} {path!r} is incompatible with the current ML contract "
+            "(stale model vs drifted codec): " + "; ".join(mismatches)
+        )
+    return meta
+
+
 # ---------------------------------------------------------------------------
 # Frozen self-play snapshot opponent (§5c, §6.5)
 # ---------------------------------------------------------------------------
@@ -230,6 +266,7 @@ class FrozenSnapshotAgent(BaseAgent):
         self.model_path = model_path
         self.deterministic = deterministic
         self._model: MaskablePPO | None = None
+        self._codec_version: int | None = None
 
     # -- lazy model access (keeps the spec picklable) --
     def _get_model(self) -> MaskablePPO:
@@ -238,6 +275,8 @@ class FrozenSnapshotAgent(BaseAgent):
             # opponent inference is tiny and keeping snapshots off the GPU avoids
             # contending for device memory (§6C Part 1). SB3 maps tensors on load,
             # so a GPU-trained checkpoint loads fine on CPU.
+            meta = load_compatible_meta(self.model_path)
+            self._codec_version = int(meta["codec_version"])
             self._model = MaskablePPO.load(self.model_path, device="cpu")
         return self._model
 
@@ -249,9 +288,15 @@ class FrozenSnapshotAgent(BaseAgent):
 
     # -- shared predict path --
     def _predict_flat(self, decision: Decision, state: GameState) -> int:
-        obs = encode_observation(state, decision.player_id, decision)
-        mask = legal_action_mask(decision, state)
         model = self._get_model()
+        assert self._codec_version is not None
+        obs = encode_observation(
+            state,
+            decision.player_id,
+            decision,
+            codec_version=self._codec_version,
+        )
+        mask = legal_action_mask(decision, state)
         action, _ = model.predict(
             obs,
             action_masks=mask,

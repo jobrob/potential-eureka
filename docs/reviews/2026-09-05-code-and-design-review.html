@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HEAT — independent code and design review · 5 September 2026</title>
+<style>
+:root{color-scheme:light;--ink:#172b35;--muted:#51626b;--line:#ccd8dc;--paper:#fff;--bg:#edf2f3;--accent:#16676c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.65 system-ui,sans-serif}
+main{max-width:1050px;margin:auto;padding:48px 32px 80px}header{border-top:6px solid var(--accent);padding-top:24px}
+h1{font-size:clamp(2rem,5vw,3rem);line-height:1.15;letter-spacing:-.035em}h2{font-size:1.65rem;margin-top:48px;line-height:1.3}h3{font-size:1.2rem;line-height:1.4;margin-top:0}
+p{margin:12px 0 18px}a{color:#115b76;text-underline-offset:3px}code{font-size:.88em;overflow-wrap:anywhere}
+.meta,.evidence{color:var(--muted);font-size:.91rem}.lead{font-size:1.2rem}.verdict{background:#dceced;border-left:5px solid var(--accent);padding:20px 24px;margin:28px 0}
+.finding{background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:24px;margin:20px 0}.tag{font-size:.78rem;font-weight:700;letter-spacing:.055em;text-transform:uppercase;color:#8e3428;display:block;margin-bottom:10px}
+.judgment .tag{color:#6c561d}.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;background:white;font-size:.94rem}th,td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:14px}th{background:#dce6e9}td:first-child{min-width:165px;font-weight:650}
+li{margin:9px 0}pre{overflow-x:auto;background:#172b35;color:#e9f2f3;padding:18px;border-radius:6px;font-size:.85rem;line-height:1.6}footer{border-top:1px solid var(--line);margin-top:40px;padding-top:18px}
+@media(max-width:600px){main{padding:24px 18px 50px}.finding{padding:18px}th,td{padding:10px}body{font-size:16px}}
+@media print{body{background:white}main{max-width:none;padding:0}.finding{break-inside:avoid}a{color:inherit}h2{break-after:avoid}}
+</style>
+</head>
+<body><main>
+<header>
+<p class="meta">Independent review · 5 September 2026 · HEAD <code>73c07fd</code> plus the existing uncommitted designs</p>
+<h1>Keep the native PPO direction.<br>Revisit what the learner can see.</h1>
+<p class="lead">The strongest reason to change the roadmap is a set of concrete observation defects. Some strategically different states are indistinguishable to the current policy. More compute or a more elaborate encoder cannot recover information its inputs omit.</p>
+</header>
+<div class="verdict"><strong>Recommendation:</strong> revise the frozen 32K design before implementation. First repair measurement and recovery, and specify a corrected observation contract. Keep the existing native engine and simple PPO baseline. Defer CUDA, the original worker-loop rewrite, large training runs, and speculative model changes.</div>
+<p>This review assesses code, assumptions, experiment design, and outstanding work. It does not treat “implemented,” “exact,” or “gate passed” as proof of every intended property. Production code, existing designs, registry entries, and policy weights were left unchanged. The review adds this report and small reproduction probes.</p>
+
+<h2>What is actually outstanding?</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Area</th><th>Current evidence</th><th>My recommendation</th></tr></thead>
+<tbody>
+<tr><td>Native CPU collection</td><td>A0–A10 implemented, including a simpler Python-coordinated integration. The saved one-hour receipt reports 21.18M transitions, 5,875.53/s and 98.84% minimum/median stability.</td><td>Retain it. The original worker-owned live-game loop remains incomplete, but completing that architecture is not presently justified by a learning result.</td></tr>
+<tr><td>32K adoption campaign</td><td>Design only. Registry still ends at G0004. The three proposed orchestration/evaluation/analysis scripts are absent.</td><td>Revise the design at the points below before implementation and registration.</td></tr>
+<tr><td>Learned-agent investigations</td><td>L0 is complete. Loss replay, state audits, longer curves, self-play dynamics, representation, targets and combination remain proposals.</td><td>Move observation correctness forward. Then choose one intervention from measured errors, rather than executing L1–L8 as a mandatory sequence.</td></tr>
+<tr><td>Static opponents</td><td>V2 development rulers are implemented and documented.</td><td>Keep their versions fixed for comparisons. A scripted ruler is useful evidence, but does not define human strength or all multiplayer opponent mixtures.</td></tr>
+<tr><td>Track distribution</td><td>One deferred note under <code>.scratch/track-distribution-training-effect/</code>.</td><td>Keep separate. First ensure track inputs preserve the physical quantities that the proposed distribution experiment changes.</td></tr>
+<tr><td>CUDA / long runs</td><td>Designs and future gates; no established learning curve beyond 1M in the active learned-agent evidence.</td><td>Require useful improvement per elapsed hour before more runtime engineering. The 800M target is a capacity assumption, not an established learning requirement.</td></tr>
+</tbody></table></div>
+<p class="evidence">Operational status was checked against <a href="../../runs/direction_d/d3_a10_48x8_soak_1h_20260723.json">the saved soak receipt</a>, <a href="../direction-D/D3-options-A-C-detailed-design.html">the native design</a>, and <a href="../../experiments/policy_registry/index.json">the registry</a>. The historical soak was not rerun.</p>
+
+<h2>Confirmed findings</h2>
+<p>P1 means address before relying on the affected learning or evidence claim. P2 means a bounded correctness or reliability repair. These are current-tree findings, not claims about which commit introduced them.</p>
+
+<article class="finding" id="track-inputs">
+<span class="tag">1 · P1 · Observation information loss</span>
+<h3>Track-relative normalization erases absolute corner limits.</h3>
+<p>Each speed limit is divided by the largest limit on that track, and that divisor is not supplied to the policy. A track whose corners all limit speed to 1 therefore looks identical to the same geometry with every limit set to 2. These cases have different heat costs.</p>
+<p><strong>Reproduced:</strong> two generator-produced tracks, six corners each, identical seeded player state: the complete 104-value observations and legal GEAR masks match. The native observations also match. Crossing a corner at speed 3 costs 2 heat in one case and 1 in the other.</p>
+<p><strong>Change:</strong> preserve absolute units using fixed scaling, or supply the per-track scale explicitly. Audit track length, corner length and lane information by the same principle. Start with a small flat representation; no attention model is required to fix this.</p>
+<p class="evidence"><a href="../../src/heat/ml/features.py">features.py:203–215</a>. The probe proves information loss, not its frequency or contribution to the measured win rate. The limit combinations are possible under the default generator, though the probe forces them for a deterministic reproduction.</p>
+<p><strong>Status:</strong> Implemented as codec v4. Corner limit, length, and lanes use fixed scales (5, 90, and 3). Codec v3 still divides by that track's own maxima, so a historical checkpoint keeps its old inputs on the Python encoder. The native collector is codec v4 only and refuses a codec 3 policy instead of scoring it on the new inputs. The native schema hash is <code>d3-a5-v4-r104-a516-p6-r200-c424-t90</code>.</p>
+</article>
+
+<article class="finding" id="react-inputs">
+<span class="tag">2 · P1 · Missing public decision context</span>
+<h3>REACT cannot reliably distinguish a dangerous revealed move from a safe one.</h3>
+<p>The observation includes current position and legal reaction flags, but omits revealed speed and the turn's movement origin. The engine uses those omitted fields to calculate which corners were crossed and the heat bill. After movement, the forward-looking corner slots alone do not describe that bill.</p>
+<p><strong>Reproduced:</strong> controlled transient states with the same observation and mask, speeds 5 and 1, and different turn origins. With no extra movement, the engine's corner check spins out the first car and leaves the second safe.</p>
+<p><strong>Change:</strong> encode current effective speed and sufficient movement/corner-cost context at REACT and SLIPSTREAM. Test strategically different states that require different decisions, as well as hidden-information leakage.</p>
+<p class="evidence"><a href="../../src/heat/ml/features.py">features.py:387–430</a>; <a href="../../src/heat/engine/phases.py">phases.py:553–599</a>. This is a controlled state-pair reproduction, not two replayed complete race histories. No strength impact was measured.</p>
+<p><strong>Status:</strong> Implemented in codec v4. Phase indices 10–16 carry revealed corner speed, turn origin, heat at that speed, heat at one speed faster, heat two spaces further along, and track length. They are written from the player and the track for every decision, including no decision. Indices 17–18 stay 0. Codec v3 leaves 10–18 at 0.</p>
+</article>
+
+<article class="finding" id="finish-target">
+<span class="tag">3 · P2 active feature / P1 before reward reuse</span>
+<h3>The finish-distance convention is wrong, and the deferred margin has a deeper problem than the design admits.</h3>
+<p>Racing starts at lap 1, but remaining distance uses <code>lap × length + position</code> as completed distance. At position 0 on the final lap of an 83-space track, the feature already says zero distance remains. One lap remains. Other inputs can partly compensate, so this alone does not establish a training ceiling.</p>
+<p>The margin proposal is more seriously flawed: the game ends when <em>all</em> players finish; <code>terminal_margin</code> assigns every finished player zero remaining distance. Consequently the margin is zero at every normally completed race, regardless of lap count. The collector adds it at game end. Moving the experiment to a multi-lap bed alone will not fix this.</p>
+<p><strong>Change:</strong> use a tested race-progress definition with one-based lap semantics. Redesign a future target around an informative event or recorded finish timing, and prove nonzero, useful labels on actual completed traces before training. An extra terminal reward is also not automatically a dense intermediate learning signal.</p>
+<p class="evidence"><a href="../../src/heat/ml/features.py">features.py:294–299</a>; <a href="../../src/heat/ml/spaces.py">spaces.py:248–263</a>; <a href="../../src/heat/models/game_state.py">game_state.py:101–104</a>; <a href="../../src/heat/ml/selfplay/multiseat.py">multiseat.py:592–611</a>; <a href="../direction-A/A6-dense-margin-target.md">A6 design, status and follow-up</a>. Margin coefficient is currently zero, so the inactive target is not corrupting the adopted reward.</p>
+<p><strong>Status:</strong> The observation and the unused margin label are corrected. Laps remaining count the current lap. Distance to the finish uses completed distance <code>(max(lap, 1) - 1) * length + position</code>. When every car has a finish order, the margin uses that order. <code>margin_coef</code> stays 0, so the training reward is unchanged. The corrected margin has not been trained.</p>
+</article>
+
+<article class="finding" id="entropy">
+<span class="tag">4 · P1 for the proposed collapse guard</span>
+<h3>The logged entropy is not the entropy driving the controller.</h3>
+<p>The trainer stores pre-update rollout entropy as <code>record["entropy"]</code>, then expands <code>**losses</code>, which contains another <code>entropy</code>. The latter overwrites the former with an average measured during optimization. The controller itself receives the intended pre-update value; the record and proposed guard can disagree with it.</p>
+<p><strong>Reproduced:</strong> injecting an optimizer diagnostic of 9.876 produced recorded entropy 9.876 while the controller's minimum recorded input was 1.24593.</p>
+<p><strong>Change:</strong> distinct <code>rollout_entropy</code> and <code>update_entropy</code> fields, plus an explicit guard definition. Add per-phase entropy and legal-action count as diagnostics: a changing mixture of two-choice and many-choice decisions changes aggregate entropy even without a collapse.</p>
+<p class="evidence"><a href="../../src/heat/ml/selfplay/phase1.py">phase1.py:482–487</a>; <a href="../../src/heat/ml/selfplay/ppo.py">ppo.py:275–279</a>. Existing historical entropy columns must be interpreted according to this actual implementation.</p>
+<p><strong>Status:</strong> Implemented. New trainer rows store <code>rollout_entropy</code> and <code>update_entropy</code>, plus per-phase entropy, legal-action count, and row count. Approximate KL, clip fraction, and explained variance are logged and do not stop an update. There is no <code>entropy</code> key for the loss dict to overwrite. Older rows that contain <code>entropy</code> still hold the optimizer value.</p>
+</article>
+
+<article class="finding" id="evaluation">
+<span class="tag">5 · P1 for track/starting-seat interpretation</span>
+<h3>Globally balanced races can still confound track and starting seat.</h3>
+<p>The harness uses <code>g % seat_count</code> for the focal seat and <code>g % track_count</code> for the track. With 40 tracks, a particular track always gets the same focal seat at two and four players; at six players it sees only one parity of seats. The proposed design's global balance rules permit this.</p>
+<p><strong>Reproduced:</strong> track 0 in a 200-race cell gets seat 0 on all five races at two and four players, and only seats 0/2/4 at six players.</p>
+<p><strong>Change:</strong> build coordinates explicitly and rotate starts within each track across repetitions. Exact all-six-seat coverage is impossible with five repeats, so balance coverage as far as the budget permits and document the omission. Preserve these coordinates across contenders. Current comparisons remain comparisons on their sampled coordinates; this finding particularly limits broader starting-seat and geometry claims.</p>
+<p class="evidence"><a href="../../src/heat/ml/selfplay/eval_harness.py">eval_harness.py:327–328</a>; <a href="../agent-strength/32k-learning-quality-comparison-design.html#screen">32K balance contract</a>.</p>
+<p><strong>Status:</strong> Implemented. Race <code>g</code> uses track <code>g % track_count</code>. The focal seat is <code>(track_index + repeat_index) % seat_count</code>. Five repeats still cannot cover six seats. The race seed is still <code>base_seed + g</code>.</p>
+</article>
+
+<article class="finding" id="recovery">
+<span class="tag">6 · P2 · Recovery reliability</span>
+<h3>Checkpoint and receipt are individually atomic, but a failed save can destroy the last resumable pair.</h3>
+<p>The writer replaces the checkpoint first, then replaces its checksum sidecar. A crash between those operations leaves the new file with the old receipt. Verification correctly refuses it, but the old verified checkpoint has already been overwritten.</p>
+<p><strong>Reproduced:</strong> an injected failure during sidecar publication left only an invalid pair; the previous checkpoint was no longer retained. This is safe rejection of unverified data, but not the promised bounded recovery gap.</p>
+<p><strong>Change:</strong> write immutable numbered checkpoint/receipt pairs and publish a small latest pointer only after both are complete; retain at least one previous verified pair. Add a failure-injection check. Existing clean fresh-process continuation tests are valuable, but test a different property.</p>
+<p><strong>Status:</strong> Implemented. A save writes <code>&lt;name&gt;.generations/000001.pt</code> and its receipt, then replaces <code>&lt;name&gt;.latest</code> only after those bytes match. The previous published pair is kept. A failed receipt write leaves the prior pointer loadable, and an old path-plus-sidecar file still loads until a pointer exists.</p>
+<p class="evidence"><a href="../../src/heat/ml/selfplay/training_state.py">training_state.py</a>. The original failure was injected only into disposable temporary files.</p>
+</article>
+
+<h2>Where I would change the designs</h2>
+<article class="finding judgment" id="32k-design">
+<span class="tag">Design judgment · revise before implementation</span>
+<h3>The 32K comparison is useful, but its meaning and stopping rule need tightening.</h3>
+<p>I agree with three fresh seeds, frozen selected checkpoints, identical evaluation coordinates, and separate operational and learning evidence. An unchanged historical baseline is adequate for a practical adoption decision; a new small-rollout control is only necessary if the question becomes causal attribution.</p>
+<ul>
+<li><strong>Use an actual-transition stopping rule.</strong> Thirty requested 32,768-row updates total 983,040 rows. Draining games often supplies the difference, but does not contractually guarantee it. In the existing soak, 1M was crossed at update 27 and update 30 reached 1,114,422. Define first-crossing selection and explicit hard iteration/time caps; do not make success depend on incidental overshoot.</li>
+<li><strong>Call out the changed training dynamics.</strong> The current trainer picks one seat count and one opponent configuration for an entire update. Thirty updates give only six updates per seat count, versus 976 nominal updates in the registered 1,024-row G0002 recipe. Snapshot spacing, opponent residence time, controller response and within-batch diversity change too. Equal sample exposures do not make these learning schedules equivalent.</li>
+<li><strong>Measure update size before choosing a PPO repair.</strong> Log approximate KL (how far the new action distribution moves), clipping fraction and value explained variance. Present code logs loss terms but not these diagnostics. Clipping alone does not guarantee a small policy change; <a href="https://spinningup.openai.com/en/latest/algorithms/ppo.html">OpenAI's PPO documentation</a> explicitly discusses this. Add measurement first; KL-based early stopping would itself change the recipe.</li>
+<li><strong>Treat three seeds as a pilot adoption decision.</strong> The point gates are an engineering tolerance, not a precise non-inferiority confidence claim. Keep the full run × ruler × seat matrix visible. For track-population uncertainty, resample tracks as blocks while retaining all paired contender results, and distinguish that uncertainty from training-seed uncertainty.</li>
+<li><strong>Prioritize the decisive evaluation.</strong> Promotion provides the actual same-band decision; 10,800 additional milestone races are diagnostic. I would make promotion first and consider a smaller predeclared milestone screen, saving budget for replayable error examples. Calibrate evaluation throughput with the actual V2 rulers before treating the 75–80 minute estimate as established.</li>
+</ul>
+<p><strong>Status:</strong> Revised in the 32K design on 1 October 2026. The campaign is not authorized and its scripts do not exist.</p>
+</article>
+
+<article class="finding judgment" id="direction">
+<span class="tag">Design judgment · change the next-work order</span>
+<h3>Input correctness deserves priority over architecture, scale and an exhaustive investigation queue.</h3>
+<p>The parent plan's statement that PPO handles partial observability “for free” is too strong. PPO can learn from incomplete observations, but the feed-forward policy cannot distinguish identical inputs. It does not acquire memory of a revealed speed that the encoder omits. Fix accessible public information before considering recurrence or opponent inference. <a href="https://sb3-contrib.readthedocs.io/en/master/modules/ppo_recurrent.html">Recurrent PPO</a> adds explicit recurrent state; it is not a property of this existing MLP.</p>
+<p>I would also narrow conclusions from old gates. A3 tested one static-feature action head on Tiny-Heat, not every action-scoring architecture. A4's small-seed result supports retaining the cheap default, not ruling out structure forever. A6 never tested a useful completed-race margin. Respect the recorded decisions, but do not elevate those experiments into universal exclusions.</p>
+<p>Before another action-head experiment, audit which legal choices the codec can express. DISCARD deliberately exposes only “discard the lowest k cards.” A stronger scorer cannot choose a discard set that the representation excludes. This is an intentional restriction to evaluate, not a newly proven rules bug.</p>
+<p><strong>My preferred next sequence:</strong> fix entropy, coordinate generation and recovery; specify and test observation sufficiency using small counterexamples; then choose the campaign's question explicitly. If the immediate aim remains assessing adoption of the existing runtime/recipe package, run the amended 32K pilot with the legacy observation and make no broader strength claim. If the aim is the fastest route to stronger play, my preference is a newly declared native recipe with corrected inputs, compared against the preserved G0002 baseline. That comparison changes inputs and runtime together and must be described accordingly.</p>
+<p>Do not silently amend the supposedly frozen recipe. G0005 is still unallocated, so the decision can be revised openly before registration. Preserve legacy codec behavior for historical checkpoints; simply changing the encoder underneath G0002 would invalidate its baseline identity.</p>
+<p><strong>Status:</strong> The code repairs in the preferred sequence are in. The <a href="../agent-strength/32k-learning-quality-comparison-design.html">32K design</a> was revised on 1 October 2026 and is not authorized. Question A keeps codec v3 with the native runtime. Question B uses codec v4 and the native runtime. G0005 is not allocated. No campaign script was added.</p>
+</article>
+
+<h2>Code organization: a small consolidation, not a rewrite</h2>
+<p>The policy interface and Python/native differential approach are useful foundations. The main maintenance weakness is accumulated experiment machinery: <code>A8Config</code> inherits historical settings, <code>phase1.py</code> owns scheduling, four collection paths, optimization, diagnostics, milestones and recovery, and evaluation uses a training collector to obtain terminal state.</p>
+<p>I would create two focused modules as part of the necessary work: <strong>one race executor</strong> taking an explicit coordinate and returning a typed outcome, and <strong>one training-state owner</strong> responsible for validation and durable checkpoint publication. Aggregate evaluation should reduce stored outcomes, and campaign scripts should compose these modules. Keep cheap evaluation free to skip training buffers. Replace loosely typed callbacks only where these changes touch them; avoid a broad framework or wholesale configuration rewrite.</p>
+<p>The test lesson is equally important: shape, bounds and Python/native parity do not prove that a feature means what its name says. The current finish-distance test repeats the same incorrect arithmetic. Add a few independent examples based on race semantics: one lap remaining, different absolute speed limits, different revealed speeds, and interrupted save publication.</p>
+<p><strong>Status:</strong> Race coordinates and a typed race outcome live in the eval harness. Durable checkpoint publication lives in the training-state module. The new observation tests use race meaning rather than the old formula. No new framework was added.</p>
+
+<h2>Verification and scope</h2>
+<ul>
+<li><strong>52 focused tests passed in 11.67 seconds</strong> across A8 training, A7 evaluation, D0 resume, native A9 integration, and observation features.</li>
+<li><strong>Five groups of bounded review probes completed</strong>: observation/target examples, entropy overwrite, checkpoint failure injection, coordinate coverage, and horizon arithmetic, including native confirmation of the corner-limit collision. See <a href="../../.scratch/code-design-review-2026-09-05/review-probe-results.json">raw receipts</a> and <a href="../../.scratch/code-design-review-2026-09-05/review_probes.py">reproduction script</a>.</li>
+<li>Reviewed the active plans and relevant historical A3/A4/A6 decisions, training/evaluation/recovery modules, observation codec, native integration, registry and saved operational receipts. This is not a line-by-line audit of every engine rule, search variant, archive or native C++ function.</li>
+<li>No learned-policy campaign, scale benchmark, new race matrix, model tuning, registry allocation, commit or production fix was performed. The entropy probe uses one tiny collection with the optimizer mocked out.</li>
+</ul>
+<pre><code>.venv\Scripts\python.exe -m pytest tests/test_a8_phase1.py tests/test_a7_eval_harness.py tests/test_direction_d0.py tests/native/test_native_a9.py tests/test_ml_features.py tests/test_ml_features_track_block.py -q
+.venv\Scripts\python.exe .scratch\code-design-review-2026-09-05\review_probes.py</code></pre>
+<footer class="meta">Review findings 1–6 are implemented. The 32K design is revised and not authorized. No training campaign was run, and G0005 is not allocated. Existing historical evidence remains historical evidence; none of these probes establishes the size of a future learning improvement.</footer>
+</main></body></html>

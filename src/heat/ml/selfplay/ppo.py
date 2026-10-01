@@ -193,6 +193,19 @@ def _bootstrap_value(
     return float(value_t.item())
 
 
+def _explained_variance(values: torch.Tensor, returns: torch.Tensor) -> float:
+    """Population explained variance of ``returns`` by ``values``.
+
+    ``1 - Var(returns - values) / Var(returns)``. A zero return variance has no
+    scale to explain, so the result is 0. Not an input to the PPO loss.
+    """
+    returns_variance = torch.var(returns, unbiased=False)
+    if float(returns_variance.item()) == 0.0:
+        return 0.0
+    residual_variance = torch.var(returns - values, unbiased=False)
+    return float((1.0 - residual_variance / returns_variance).item())
+
+
 def ppo_update(
     policy: PPOPolicy,
     optimizer: torch.optim.Optimizer,
@@ -208,15 +221,20 @@ def ppo_update(
       and ``A`` is the (batch-)normalized advantage.
     * **value_loss** -- MSE of the predicted value against the GAE return target.
     * **entropy** -- mean policy entropy, *subtracted* (a bonus) to discourage
-      premature collapse.
+      premature collapse. Logged as ``update_entropy``, not ``entropy``.
 
     Advantages are normalized across the whole rollout (mean 0 / std 1) for
     scale-stable updates, gradients are clipped to ``max_grad_norm``, and the
     same legal-action mask used at collection time is re-applied via
     :meth:`HeatPolicy.evaluate` so the update is consistent with the rollout.
 
-    Returns a dict of mean loss terms (for logging / the smoke test's finiteness
-    check).
+    ``approx_kl``, ``clip_fraction``, and ``explained_variance`` are measurements
+    only. A large KL does not skip epochs or change the loss. Explained variance
+    uses the last epoch's minibatch value predictions concatenated with the
+    matching returns (population variance). Zero return variance yields ``0.0``.
+
+    Returns mean loss terms for logging. Keys: ``policy_loss``, ``value_loss``,
+    ``update_entropy``, ``approx_kl``, ``clip_fraction``, ``explained_variance``.
     """
     obs = batch["obs"]
     actions = batch["actions"]
@@ -236,8 +254,14 @@ def ppo_update(
     policy_losses: list[float] = []
     value_losses: list[float] = []
     entropies: list[float] = []
+    approx_kls: list[float] = []
+    clip_fractions: list[float] = []
+    last_values: list[torch.Tensor] = []
+    last_returns: list[torch.Tensor] = []
 
     for _epoch in range(config.n_epochs):
+        epoch_values: list[torch.Tensor] = []
+        epoch_returns: list[torch.Tensor] = []
         perm = torch.randperm(n, device=obs.device)
         for start in range(0, n, batch_size):
             idx = perm[start : start + batch_size]
@@ -268,14 +292,33 @@ def ppo_update(
             nn.utils.clip_grad_norm_(policy.parameters(), config.max_grad_norm)
             optimizer.step()
 
+            # Logged only. A large KL must not skip later minibatches or epochs.
+            with torch.no_grad():
+                approx_kl = (old_logps[idx] - new_logps).mean()
+                clipped_rows = (ratio - 1.0).abs() > config.clip_range
+                clip_fraction = clipped_rows.to(dtype=torch.float32).mean()
             policy_losses.append(float(policy_loss.item()))
             value_losses.append(float(value_loss.item()))
             entropies.append(float(entropy_mean.item()))
+            approx_kls.append(float(approx_kl.item()))
+            clip_fractions.append(float(clip_fraction.item()))
+            epoch_values.append(values.detach())
+            epoch_returns.append(returns[idx].detach())
+        last_values = epoch_values
+        last_returns = epoch_returns
 
+    explained_variance = (
+        _explained_variance(torch.cat(last_values), torch.cat(last_returns))
+        if last_values
+        else 0.0
+    )
     return {
         "policy_loss": float(np.mean(policy_losses)),
         "value_loss": float(np.mean(value_losses)),
-        "entropy": float(np.mean(entropies)),
+        "update_entropy": float(np.mean(entropies)),
+        "approx_kl": float(np.mean(approx_kls)),
+        "clip_fraction": float(np.mean(clip_fractions)),
+        "explained_variance": explained_variance,
     }
 
 

@@ -14,8 +14,10 @@ Design decisions (see ``docs/direction-A/A7-eval-harness.md``):
   held-out band. Training namespaces use ``base_seed != 0`` and land in a
   structurally disjoint seed region, so a training campaign can never regenerate
   a held-out eval track (a test *verifies* this by fingerprint).
-* **Games run through the A2/A5 machinery.** A policy seat rotates through the
-  field, every other seat scripted (:class:`_EvalCollector`, promoted here from
+* **Games run through the A2/A5 machinery.** The focal seat comes from
+  :func:`race_coordinates` (rotated within each track across repeats, not
+  locked to ``g % seat_count``); every other seat is scripted
+  (:class:`_EvalCollector`, promoted here from
   :mod:`heat.ml.selfplay.recipe`). No SB3 / ``evaluate_ml`` dependency.
 * **"Win" = first place; placement reward reported alongside.** At >2 seats a
   binary top-half signal hides skill, so the headline metric is first-place rate
@@ -92,8 +94,8 @@ class _EvalCollector(MultiSeatCollector):
 
     Promoted from :mod:`heat.ml.selfplay.recipe` so there is exactly one
     implementation; the recipe imports it back for its periodic vs-weak /
-    vs-oldest eval. Overrides only the :meth:`_on_game_end` seam to stash the
-    final :class:`~heat.models.game_state.GameState`.
+    vs-oldest eval. Captures the terminal state and exposes an outcome-only
+    entry point over the same race driver used by training collection.
     """
 
     def __init__(self, *args: object, **kwargs: object) -> None:
@@ -104,6 +106,16 @@ class _EvalCollector(MultiSeatCollector):
         self, state: GameState, terminated: bool, truncated: bool
     ) -> None:
         self.last_state = state
+
+    def play_game(
+        self, policy: PPOPolicy, device: torch.device, rng: np.random.Generator
+    ) -> GameState:
+        """Return one race outcome without allocating or filling training buffers."""
+        self.last_state = None
+        self._play_one_game(policy, None, device, rng, gamma=1.0, timing=None)
+        self.last_games_collected = 1
+        assert self.last_state is not None
+        return self.last_state
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +310,98 @@ def _play_scripted_game(
     return state
 
 
+@dataclass(frozen=True)
+class RaceOutcome:
+    """Focal-seat result of one evaluation race.
+
+    ``win`` is first place. ``placement_reward`` is that seat's signed
+    placement reward. :func:`_run_cell` sums these into the existing
+    :class:`EvalCell` totals.
+    """
+
+    win: bool
+    placement_reward: float
+
+
+def race_coordinates(
+    games: int, track_count: int, seat_count: int
+) -> list[tuple[int, int, int]]:
+    """Return ``(track_index, focal_seat, repeat_index)`` for each race index.
+
+    Race ``g`` keeps ``track_index = g % track_count``, so tracks stay evenly
+    cycled. ``repeat_index`` is how many times that track has already been
+    used in this cell. ``focal_seat = (track_index + repeat_index) % seat_count``
+    rotates the starting seat within the track across those repeats, instead
+    of locking it to ``g % seat_count``. The same arguments always return the
+    same list, in race-index order, so contenders compared on the same games,
+    tracks, and seat count share coordinates.
+
+    Five repeats cannot cover all six seats, so a 200-race / 40-track /
+    6-seat cell still omits some seats on each track. That omission is
+    accepted: this does not drop or duplicate races to force full coverage.
+    The list length is always ``games``.
+    """
+    coordinates: list[tuple[int, int, int]] = []
+    used = [0] * track_count
+    for g in range(games):
+        track_index = g % track_count
+        repeat_index = used[track_index]
+        used[track_index] += 1
+        focal_seat = (track_index + repeat_index) % seat_count
+        coordinates.append((track_index, focal_seat, repeat_index))
+    return coordinates
+
+
+def _play_race(
+    policy: PPOPolicy | BaseAgent,
+    opp_factory: Callable[[], BaseAgent],
+    track: Track,
+    focal_seat: int,
+    seat_count: int,
+    seed: int,
+    device: torch.device,
+) -> RaceOutcome:
+    """Play one race from an explicit track, focal seat, and seed.
+
+    ``seed`` must be ``base_seed + g``, so game randomness stays a pure
+    function of the cell seed and the race index. A scripted policy plays
+    through :func:`_play_scripted_game` and does not allocate a rollout
+    buffer. A learned policy samples via :meth:`_EvalCollector.play_game`
+    inside a torch RNG forked from ``seed`` alone.
+    """
+    rng = np.random.default_rng(seed)
+    scripted: dict[int, BaseAgent] = {
+        s: opp_factory() for s in range(seat_count) if s != focal_seat
+    }
+    if isinstance(policy, BaseAgent):
+        game_seed = int(rng.integers(0, 2**31 - 1))
+        agents = dict(scripted)
+        # A fresh policy-seat agent per game, mirroring the per-seat
+        # opponents and run_batch's documented per-game-factory contract, so
+        # a stateful scripted agent cannot carry state across games. (In
+        # practice StrongHeuristicAgent's per-turn plan cache is self-
+        # validating, so this is defensive rather than load-bearing.)
+        agents[focal_seat] = copy.deepcopy(policy)
+        state = _play_scripted_game(track, seat_count, agents, game_seed)
+    else:
+        collector = _EvalCollector(track, seat_count, scripted_seats=scripted)
+        cuda_devices: list[int] = []
+        if device.type == "cuda":
+            cuda_devices = [
+                device.index
+                if device.index is not None
+                else torch.cuda.current_device()
+            ]
+        policy_seed = (seed + 0xA7E7A7) % (2**63 - 1)
+        with torch.random.fork_rng(devices=cuda_devices):
+            torch.manual_seed(policy_seed)
+            state = collector.play_game(policy, device, rng)
+    return RaceOutcome(
+        win=_first_place(state, focal_seat),
+        placement_reward=_placement_reward(state, focal_seat),
+    )
+
+
 def _run_cell(
     policy: PPOPolicy | BaseAgent,
     opp_factory: Callable[[], BaseAgent],
@@ -310,54 +414,29 @@ def _run_cell(
     """Play ``games`` of ``policy`` vs an ``opp_factory`` field; return
     ``(first_place_wins, total_placement_reward)``.
 
-    The policy seat rotates game-to-game; every other seat is a fresh
-    ``opp_factory()`` instance; the track cycles through ``tracks``. A
-    :class:`~heat.agents.base.BaseAgent` policy skips encoding and plays through
-    :func:`_play_scripted_game`; a :class:`PPOPolicy` **samples** (``act``) via
-    :class:`_EvalCollector`. Both paths draw the per-game seed from a freshly
-    seeded RNG identically, so equal ``g`` plays the same game. Policy sampling
-    also runs inside a forked, per-game-seeded torch RNG context: repeated
-    evaluation of the same checkpoint is byte-for-byte reproducible and does
-    not consume the caller/trainer's torch RNG stream.
+    Each race uses :func:`race_coordinates`: the track still cycles with
+    ``g % n_tracks``, and the focal seat rotates within that track across
+    repeats. Every other seat is a fresh ``opp_factory()`` instance.
+    :func:`_play_race` receives seed ``base_seed + g``, so repeated
+    evaluation of the same cell is reproducible and does not consume the
+    caller/trainer's torch RNG stream.
     """
     wins = 0
     total_reward = 0.0
     n_tracks = len(tracks)
-    for g in range(games):
-        policy_seat = g % seat_count
-        track = tracks[g % n_tracks]
-        rng = np.random.default_rng(base_seed + g)
-        scripted: dict[int, BaseAgent] = {
-            s: opp_factory() for s in range(seat_count) if s != policy_seat
-        }
-        if isinstance(policy, BaseAgent):
-            game_seed = int(rng.integers(0, 2**31 - 1))
-            agents = dict(scripted)
-            # A fresh policy-seat agent per game, mirroring the per-seat
-            # opponents and run_batch's documented per-game-factory contract, so
-            # a stateful scripted agent cannot carry state across games. (In
-            # practice StrongHeuristicAgent's per-turn plan cache is self-
-            # validating, so this is defensive rather than load-bearing.)
-            agents[policy_seat] = copy.deepcopy(policy)
-            state = _play_scripted_game(track, seat_count, agents, game_seed)
-        else:
-            collector = _EvalCollector(track, seat_count, scripted_seats=scripted)
-            cuda_devices: list[int] = []
-            if device.type == "cuda":
-                cuda_devices = [
-                    device.index
-                    if device.index is not None
-                    else torch.cuda.current_device()
-                ]
-            policy_seed = (base_seed + g + 0xA7E7A7) % (2**63 - 1)
-            with torch.random.fork_rng(devices=cuda_devices):
-                torch.manual_seed(policy_seed)
-                # n_steps=1 -> one complete game (finish-the-in-flight-game).
-                collector.collect(policy, 1, device, rng, gamma=1.0)
-            assert collector.last_state is not None  # a game always ends
-            state = collector.last_state
-        total_reward += _placement_reward(state, policy_seat)
-        if _first_place(state, policy_seat):
+    coordinates = race_coordinates(games, n_tracks, seat_count)
+    for g, (track_index, focal_seat, _repeat_index) in enumerate(coordinates):
+        outcome = _play_race(
+            policy,
+            opp_factory,
+            tracks[track_index],
+            focal_seat,
+            seat_count,
+            base_seed + g,
+            device,
+        )
+        total_reward += outcome.placement_reward
+        if outcome.win:
             wins += 1
     return wins, total_reward
 
@@ -473,9 +552,10 @@ def evaluate_policy(
 ) -> EvalReport:
     """Score ``policy`` over the (opponent x seat_count x split) grid.
 
-    For each cell the policy seat rotates through the field game-to-game, every
-    other seat is a fresh opponent instance, and the track cycles through the
-    split's list. The policy **samples** (``act``); a
+    For each cell the focal seat rotates within each track across repeats
+    (:func:`race_coordinates`), every other seat is a fresh opponent instance,
+    and the track cycles through the split's list. The policy **samples**
+    (``act``); a
     :class:`~heat.agents.base.BaseAgent` in the policy seat plays directly (the
     heuristic-only baseline path, §5 G1).
 

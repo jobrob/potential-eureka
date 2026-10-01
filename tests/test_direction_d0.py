@@ -57,6 +57,13 @@ def _load(path: Path, config: A8Config, *, source: str = "test-source") -> dict:
     )
 
 
+def _published_checkpoint(path: Path) -> Path:
+    """Return the generation file named by the latest pointer."""
+    pointer = path.with_name(path.name + ".latest")
+    name = pointer.read_text(encoding="ascii").strip()
+    return path.with_name(path.name + ".generations") / name
+
+
 def test_seat_schedule_round_trip_preserves_next_work() -> None:
     """A saved partial balance block resumes with the exact next seat count."""
     original = SeatCountSchedule((2, 3, 4), np.random.default_rng(7))
@@ -142,8 +149,9 @@ def test_training_state_rejects_damaged_bytes_and_source_mismatch(
             save_path=path,
         ),
     )
-    data = path.read_bytes()
-    path.write_bytes(data[: len(data) // 2])
+    published = _published_checkpoint(path)
+    data = published.read_bytes()
+    published.write_bytes(data[: len(data) // 2])
     with pytest.raises(TrainingStateError, match="SHA-256 mismatch"):
         _load(path, config)
 

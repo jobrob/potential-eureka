@@ -29,8 +29,14 @@ from heat.ml.spaces import (
     DISCARD_OFFSET,
     GEAR_OFFSET,
     REACT_OFFSET,
-    SLIPSTREAM_OFFSET,
 )
+
+
+def test_published_codec_contract() -> None:
+    """Own the published dimensions/version; intentional codec changes update this guard."""
+    from heat.ml import spaces
+
+    assert (spaces.OBS_DIM, spaces.ACTION_DIM, spaces.CODEC_VERSION) == (104, 516, 3)
 
 
 def _track(laps: int = 2) -> Track:

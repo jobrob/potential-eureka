@@ -179,10 +179,8 @@ def _evaluate_vs(
         }
         collector = _EvalCollector(track, num_players, scripted_seats=scripted)
         rng = np.random.default_rng(base_seed + g)
-        # n_steps=1 -> exactly one complete game (finish-the-in-flight-game rule).
-        collector.collect(policy, 1, device, rng, gamma=1.0)
-        state = collector.last_state
-        reward = _placement_reward(state, policy_seat)  # type: ignore[arg-type]
+        state = collector.play_game(policy, device, rng)
+        reward = _placement_reward(state, policy_seat)
         total_return += reward
         if reward > 0.0:
             wins += 1

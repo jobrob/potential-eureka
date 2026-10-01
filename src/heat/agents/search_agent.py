@@ -282,6 +282,7 @@ class LookaheadAgent(BaseAgent):
         #: "learned"``; ``None`` until the first clean leaf is scored. Nulled in
         #: ``__getstate__`` so the agent pickles by path (the MLAgent pattern).
         self._value_model: MaskablePPO | None = None
+        self._value_codec_version: int | None = None
 
         #: Per-agent profiling (clones/move, ms/move). Always on; cheap.
         self.profile = SearchProfile()
@@ -308,44 +309,12 @@ class LookaheadAgent(BaseAgent):
         return state
 
     def _validate_value_meta(self) -> None:
-        """Assert the value checkpoint's sidecar matches the live ML contract.
+        """Reject a value checkpoint whose sidecar does not match the runtime codec."""
+        from heat.ml.training import load_compatible_meta
 
-        Identical tripwire to :meth:`MLAgent._validate_meta` (§3.4): a stale V --
-        one trained against a now-drifted ``obs_dim`` / ``action_dim`` /
-        ``codec_version`` -- fails fast with a
-        :class:`~heat.agents.ml_agent.CheckpointMismatchError` instead of silently
-        scoring leaves with a garbage value head.
-        """
-        from heat.agents.ml_agent import CheckpointMismatchError
-        from heat.ml import spaces
-        from heat.ml.training import load_meta
-
-        value_model_path = self.value_model_path
-        assert value_model_path is not None
-        try:
-            meta = load_meta(value_model_path)
-        except FileNotFoundError as exc:
-            raise CheckpointMismatchError(
-                f"Value-net sidecar not found for {self.value_model_path!r}; "
-                "expected a '.meta.json' written by save_checkpoint."
-            ) from exc
-
-        expected = {
-            "obs_dim": spaces.OBS_DIM,
-            "action_dim": spaces.ACTION_DIM,
-            "codec_version": spaces.CODEC_VERSION,
-        }
-        mismatches = [
-            f"{key}: checkpoint={meta.get(key)!r} != runtime={want!r}"
-            for key, want in expected.items()
-            if meta.get(key) != want
-        ]
-        if mismatches:
-            raise CheckpointMismatchError(
-                f"Value net {self.value_model_path!r} is incompatible with the "
-                "current ML contract (stale model vs drifted codec): "
-                + "; ".join(mismatches)
-            )
+        assert self.value_model_path is not None
+        meta = load_compatible_meta(self.value_model_path, label="Value net")
+        self._value_codec_version = int(meta["codec_version"])
 
     def _get_value_model(self) -> MaskablePPO:
         """Lazy-load + validate the value net (CPU), caching it on the instance.
@@ -387,8 +356,14 @@ class LookaheadAgent(BaseAgent):
 
         from heat.ml.features import encode_observation
 
-        obs = encode_observation(clone, player_id, decision=None)
         model = self._get_value_model()
+        assert self._value_codec_version is not None
+        obs = encode_observation(
+            clone,
+            player_id,
+            decision=None,
+            codec_version=self._value_codec_version,
+        )
         ob = torch.as_tensor(obs).reshape(1, -1)
         with torch.no_grad():
             v = model.policy.predict_values(ob)

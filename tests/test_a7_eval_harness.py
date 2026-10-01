@@ -20,10 +20,12 @@ from heat.ml.selfplay.checkpoint import (
 )
 from heat.ml.selfplay.eval_harness import (
     EvalReport,
+    RaceOutcome,
     _first_place,
     evaluate_policy,
     evaluate_vs_anchor,
     held_out_tracks,
+    race_coordinates,
 )
 from heat.ml.selfplay.policy import build_policy
 from heat.ml.selfplay.ppo import A0Config
@@ -193,6 +195,80 @@ def test_evaluate_vs_anchor_selfplay_symmetry() -> None:
     assert cell.chance == 0.5
     assert cell.games == 40
     assert 0.25 <= cell.win_rate <= 0.75
+
+
+def test_race_coordinates_rotate_focal_seat_within_track() -> None:
+    """A 200-race, 40-track cell does not lock a track to one seat parity.
+
+    Five repeats still cannot cover six seats. That gap is accepted: the
+    schedule stays exactly 200 races, five on every track.
+    """
+    games = 200
+    track_count = 40
+    for seat_count in (2, 4, 6):
+        coords = race_coordinates(games, track_count, seat_count)
+        assert coords == race_coordinates(games, track_count, seat_count)
+        assert len(coords) == games
+
+        seen = [0] * track_count
+        seats: list[list[int]] = [[] for _ in range(track_count)]
+        for g, (track_index, focal_seat, repeat_index) in enumerate(coords):
+            assert track_index == g % track_count
+            assert repeat_index == seen[track_index]
+            assert focal_seat == (track_index + repeat_index) % seat_count
+            seen[track_index] += 1
+            seats[track_index].append(focal_seat)
+
+        assert seen == [5] * track_count
+        assert set(seats[0]) != {0}
+        if seat_count == 2:
+            assert seats[0] == [0, 1, 0, 1, 0]
+        elif seat_count == 4:
+            assert seats[0] == [0, 1, 2, 3, 0]
+        else:
+            assert seats[0] == [0, 1, 2, 3, 4]
+            assert not set(seats[0]) <= {0, 2, 4}
+        # The track index is part of the seat, not only the repeat count.
+        assert seats[1][0] == 1 % seat_count
+
+
+def test_run_cell_reduces_explicit_race_coordinates(monkeypatch: object) -> None:
+    """Each cell race is one outcome at that coordinate, seeded by race index."""
+    from heat.ml.selfplay import eval_harness as harness
+
+    seen: list[tuple[int, int, int]] = []
+
+    def fake_play(
+        policy: object,
+        opp_factory: object,
+        track: int,
+        focal_seat: int,
+        seat_count: int,
+        seed: int,
+        device: object,
+    ) -> RaceOutcome:
+        del policy, opp_factory, seat_count, device
+        seen.append((track, focal_seat, seed))
+        return RaceOutcome(win=focal_seat == 0, placement_reward=0.25)
+
+    monkeypatch.setattr(harness, "_play_race", fake_play)  # type: ignore[attr-defined]
+    tracks = list(range(40))
+    wins, total = harness._run_cell(
+        object(),  # type: ignore[arg-type]
+        lambda: None,  # type: ignore[arg-type, return-value]
+        6,
+        tracks,  # type: ignore[arg-type]
+        200,
+        1000,
+        torch.device("cpu"),
+    )
+    expected = race_coordinates(200, 40, 6)
+    assert [(track, seat) for track, seat, _seed in seen] == [
+        (tracks[track_index], focal_seat) for track_index, focal_seat, _repeat in expected
+    ]
+    assert [seed for _track, _seat, seed in seen] == [1000 + g for g in range(200)]
+    assert wins == sum(focal_seat == 0 for _track, focal_seat, _repeat in expected)
+    assert total == 200 * 0.25
 
 
 def test_heuristic_in_policy_seat_beats_weak() -> None:

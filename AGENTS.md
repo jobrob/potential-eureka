@@ -42,3 +42,17 @@ Before starting, registering, or comparing a non-smoke learned-policy campaign, 
     - Do not start large experiments without permission from the user.
     - Before starting experiments make sure that reasonable time limits are set or logging produced so that we know if the experiment is progressing or has stalled
    
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as local Markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The default canonical triage label vocabulary is used. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repo using root `CONTEXT.md` and `docs/adr/`. See `docs/agents/domain.md`.

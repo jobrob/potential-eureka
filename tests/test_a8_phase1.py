@@ -157,7 +157,16 @@ def test_a8_training_smoke_covers_variable_seats() -> None:
     for record in records:
         assert record["games"] >= 1
         assert record["n_recorded"] > 0
-        for key in ("policy_loss", "value_loss", "entropy"):
+        assert "entropy" not in record
+        for key in (
+            "policy_loss",
+            "value_loss",
+            "rollout_entropy",
+            "update_entropy",
+            "approx_kl",
+            "clip_fraction",
+            "explained_variance",
+        ):
             assert np.isfinite(record[key])
 
 

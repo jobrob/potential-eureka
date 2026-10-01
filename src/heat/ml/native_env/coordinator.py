@@ -181,7 +181,7 @@ class CpuPolicyCoordinator:
                 raise ValueError(f"policy version mismatch for policy_id {policy_id}")
 
             obs = torch.from_numpy(ready.observations[indices])
-            masks_np = ready.legal_masks[indices].copy()
+            masks_np = ready.legal_masks[indices]  # Advanced indexing already copies.
             value_only = ready.value_only[indices]
             masks_np[value_only] = True
             distribution, batch_values = entry.policy._distribution_and_value(
@@ -218,12 +218,12 @@ class CpuPolicyCoordinator:
                 batch_actions[action_positions] = sampled
                 batch_logps = distribution.log_prob(batch_actions.clamp_min(0))
                 logps[indices[action_positions]] = (
-                    batch_logps[action_positions].cpu().numpy().astype(np.float32)
+                    batch_logps[action_positions].cpu().numpy().astype(np.float32, copy=False)
                 )
                 words[indices[action_positions]] = action_words
 
             actions[indices] = batch_actions.cpu().numpy()
-            values[indices] = batch_values.cpu().numpy().astype(np.float32)
+            values[indices] = batch_values.cpu().numpy().astype(np.float32, copy=False)
             self._inference_calls += 1
             self._batch_sizes.append(len(indices))
             self._rows_by_policy[policy_id] = (

@@ -55,8 +55,16 @@ def test_a0_train_runs_and_losses_finite() -> None:
     assert isinstance(policy, HeatPolicy)
     assert len(seen) >= 1, "expected at least one PPO update"
     for info in seen:
-        for key in ("policy_loss", "value_loss", "entropy"):
+        for key in (
+            "policy_loss",
+            "value_loss",
+            "update_entropy",
+            "approx_kl",
+            "clip_fraction",
+            "explained_variance",
+        ):
             assert np.isfinite(info[key]), f"non-finite {key}={info[key]}"
+        assert "entropy" not in info
 
 
 def test_a0_policy_never_samples_illegal_action() -> None:

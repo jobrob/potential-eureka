@@ -185,10 +185,11 @@ class TestGlobals:
 
         length = track.length
         laps = track.laps
-        assert abs(laps_remaining - (laps - player.lap) / laps) < 1e-6
+        current_lap = max(player.lap, 1)
+        assert abs(laps_remaining - (laps - current_lap + 1) / laps) < 1e-6
         total = length * laps
-        abs_pos = player.lap * length + player.position
-        assert abs(dist_to_finish - (total - abs_pos) / total) < 1e-6
+        completed = (current_lap - 1) * length + player.position
+        assert abs(dist_to_finish - (total - completed) / total) < 1e-6
         assert abs(heat_pool - player.heat_available / rules.HEAT_POOL_SIZE) < 1e-6
         assert abs(pos_in_lap - player.position / length) < 1e-6
 
@@ -213,6 +214,26 @@ class TestGlobals:
         vec = features.encode_observation(state, 0, None)
         dist_to_finish = float(vec[_GLOBALS_START + 1])
         assert dist_to_finish < 1.0 / track.length + 1e-6
+
+    def test_dist_to_finish_keeps_one_lap_at_final_lap_start(self) -> None:
+        # Position 0 of the last lap still has a full lap of spaces left.
+        length = 83
+        spaces_ = [Space(index=i, lanes=1) for i in range(length)]
+        track = Track(
+            name="final-lap-start",
+            spaces=spaces_,
+            corners=[Corner(start=10, end=12, speed_limit=2)],
+            start_positions=[0, 1, 2, 3, 4, 5],
+            laps=2,
+        )
+        state = GameState.create(track, 2, seed=0)
+        player = state.get_player(0)
+        player.lap = track.laps
+        player.position = 0
+        vec = features.encode_observation(state, 0, None)
+        assert abs(float(vec[_GLOBALS_START + 1]) - 0.5) < 1e-6
+        legacy = features.encode_observation(state, 0, None, codec_version=3)
+        assert float(legacy[_GLOBALS_START + 1]) == 0.0
 
 
 class TestDeterminismAndNoMutation:
@@ -256,14 +277,13 @@ class TestBlockAccounting:
         assert sp.BLOCK_TRACK == 36
 
     def test_codec_version_bumped(self) -> None:
-        # v3 (Option C prep, code-review 2026-06-22 #1): round_num is now encoded
-        # unconditionally so the observation is a pure function of game state.
-        assert sp.CODEC_VERSION == 3
+        # v4 is the live observation. Codec 3 still loads for historical checkpoints.
+        assert sp.CODEC_VERSION == 4
+        assert sp.LEGACY_PLAYABLE_CODECS == (3, 4)
 
-    def test_corner_len_normalized_by_max_corner_len(self) -> None:
-        # Freeze the corner_len normalization choice (/ max_corner_len, relative).
-        # A track whose longest corner spans 3 spaces: that corner's corner_len
-        # field reads 1.0; a 1-space corner reads 1/3.
+    def test_corner_len_uses_fixed_scale(self) -> None:
+        # v4 divides corner length by CORNER_LENGTH_SCALE, not the track max.
+        # A 1-space corner reads 1/90; a 3-space corner reads 3/90.
         length = 40
         spaces_ = [Space(index=i, lanes=1) for i in range(length)]
         corners = [
@@ -280,5 +300,10 @@ class TestBlockAccounting:
         block = _track_block_of(features.encode_observation(state, 0, None))
         # Ordered by forward distance from pos 0: corner@4 (len 1) then corner@12
         # (len 3). corner_len is the 3rd float (index 2) of each slot.
-        assert abs(float(_slot(block, 0)[2]) - 1.0 / 3.0) < 1e-6
-        assert abs(float(_slot(block, 1)[2]) - 1.0) < 1e-6
+        assert abs(float(_slot(block, 0)[2]) - 1.0 / sp.CORNER_LENGTH_SCALE) < 1e-6
+        assert abs(float(_slot(block, 1)[2]) - 3.0 / sp.CORNER_LENGTH_SCALE) < 1e-6
+        legacy = _track_block_of(
+            features.encode_observation(state, 0, None, codec_version=3)
+        )
+        assert abs(float(_slot(legacy, 0)[2]) - 1.0 / 3.0) < 1e-6
+        assert abs(float(_slot(legacy, 1)[2]) - 1.0) < 1e-6

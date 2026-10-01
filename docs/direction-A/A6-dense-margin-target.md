@@ -1,8 +1,10 @@
 # Sprint A6 — First dense target: terminal margin
 
-> **Status:** **implemented and complete; gate G2 failed** (2026-07-10). The
-> mechanism is correct and default-off because the one-lap Tiny-Heat gate made the
-> margin identically zero. Retained as a constraint and possible multi-lap follow-up.
+> **Status:** **formula corrected 2026-10-01; coefficient still 0; gate G2 failed**
+> (2026-07-10). The July gate trained the old margin, which was zero on a normally
+> finished race. The label now uses one-based completed distance, and finish order
+> when every car has finished. It has not been trained. Leave the coefficient at 0
+> until a new gate says otherwise.
 
 ## 1. Purpose
 
@@ -50,20 +52,32 @@ information. Remaining Direction-C aux heads stay in Phase 1 (A8).
 
 ### 4.1 `terminal_margin` (spaces.py)
 
-Using the same absolute-progress arithmetic as `features._track_block`
-(`abs_pos = player.lap * length + player.position`; a finished player counts as
-`laps * length + length`, i.e. strictly ahead of any unfinished player):
+The July gate used the old formula below. That formula is what sections 6 and 7
+describe. The live function, corrected on 2026-10-01, is different, and the
+coefficient is still 0.
+
+Old formula, used by the gate:
 
 ```
 remaining(p) = 0.0                          if p.finished
              = laps*length - (p.lap*length + p.position)   otherwise (clipped >= 0)
-margin(state, pid) = clip((min over opponents of remaining(opp) - remaining(me))
-                          / track.length, -1.0, +1.0)
+margin = clip((min remaining(opp) - remaining(me)) / track.length, -1, +1)
 ```
 
-Positive = ahead of the whole field; in an unclipped 2-seat game
-`margin(s, 0) == -margin(s, 1)` (assert in a test). Solo (`n <= 1`) returns 0.0.
-Docstring must state the normalization: a one-full-lap lead saturates at ±1.
+Live formula:
+
+```
+if every car has finished with a finish_order:
+    margin = clip((best opponent finish_order - my finish_order) / (n - 1), -1, +1)
+else:
+    remaining = 0 if finished
+              = laps*length - ((max(lap, 1) - 1)*length + position) otherwise
+    margin = clip((min remaining(opp) - remaining(me)) / track.length, -1, +1)
+```
+
+A finished car against someone still racing has 0 left, so the finisher leads.
+Solo (`n <= 1`) returns 0.0. A one-full-lap lead still saturates at ±1. The
+winner of a finished 2-car race is +1 and the other car is -1.
 
 ### 4.2 Collector plumbing (multiseat.py)
 
@@ -169,6 +183,9 @@ reaches 0.70.
 
 ### The decisive finding: the margin term is identically zero on this bed
 
+This section describes the formula the July gate actually trained. That formula
+was replaced on 2026-10-01. The numbers below are historical and were not rerun.
+
 The margin is **provably 0 for every transition on the 1-lap Tiny-Heat bed**, so the
 two arms train on byte-identical rewards and the dense target contributes *nothing*.
 Faithfully mirroring `features._track_block` (design §4.1), each player's remaining
@@ -191,11 +208,11 @@ introduced by A6, and it dominates any per-seat comparison at this budget.
 
 ### Verdicts (per §5)
 
-- **G1 — margin function correct: PASS.** `tests/test_a6_margin.py` (6 tests) —
-  antisymmetry, ±1 clipping, both-finished, finished-vs-not, solo, and the collector
-  plumbing (margin only at game end, only when `coef != 0`, on truncation too) —
-  all green. The unit tests exercise a *live* margin by driving a multi-lap track;
-  the arithmetic is correct where the bed is non-degenerate.
+- **G1 — margin function correct: PASS for the old formula.** `tests/test_a6_margin.py`
+  (6 tests at the time) — antisymmetry, ±1 clipping, both-finished, finished-vs-not,
+  solo, and the collector plumbing — all green. Those tests accepted a zero margin
+  on a normally finished race. That acceptance was the bug. The 2026-10-01 formula
+  is covered by the updated tests and was not the formula this gate passed.
 - **G2 — sample efficiency: FAIL.** By the letter of §5: mean wr@40k is **0.817 for
   both arms** (not baseline+3), and `steps->=70%` is **not strictly lower on every
   seed** (margin is worse on seed 0: 41140 vs 20588). The "no final regression"
@@ -209,15 +226,15 @@ introduced by A6, and it dominates any per-seat comparison at this budget.
   **1050 passed / 1 skipped**. `ruff check` clean; `mypy --strict` clean on the
   changed `src` files.
 - **G4 — decision: default stays 0.0.** Gate did not PASS, so `A5Config.margin_coef`
-  remains `0.0` (opt-in, off). The mechanism is committed and correct, ready to be
-  re-gated on a bed where it can carry signal.
+  remains `0.0` (opt-in, off). The 2026-10-01 formula is in the code and still off.
+  It needs its own gate before anyone turns the coefficient on.
 
 ### Follow-up (not part of A6; out of scope here)
 
-The result is a **bed/target mismatch**, not a broken mechanism. To actually test the
-dense target, a future sprint should either (a) run the gate on a **multi-lap** bed
-where `remaining` is non-degenerate, and/or (b) make the terminal reward
-**finish-order-aware** so a dominant win is graded above a squeaker even at full
-termination (where all `remaining` are 0). A prerequisite for any real A/B on this
-loop is to **make A5 training reproducible** (same seed → same weights); the current
-run-to-run nondeterminism is large enough to swamp a small dense-reward effect.
+The July result was a **bed/target mismatch** on the old formula. The live label is
+now finish-order-aware when every car has finished, and the one-lap distance bug is
+corrected. The coefficient is still 0, and no new gate has been run. A future test
+still has to show nonzero labels on real completed traces before training. A
+prerequisite for any real A/B on this loop is to **make A5 training reproducible**
+(same seed → same weights); the run-to-run nondeterminism in the July table is large
+enough to swamp a small dense-reward effect.

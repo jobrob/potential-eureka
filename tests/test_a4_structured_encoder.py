@@ -163,5 +163,13 @@ def test_structured_multiseat_training_smoke() -> None:
     )
     assert isinstance(policy.trunk, StructuredObservationEncoder)
     assert seen
-    for key in ("policy_loss", "value_loss", "entropy"):
+    assert "entropy" not in seen[-1]
+    for key in (
+        "policy_loss",
+        "value_loss",
+        "update_entropy",
+        "approx_kl",
+        "clip_fraction",
+        "explained_variance",
+    ):
         assert np.isfinite(seen[-1][key])

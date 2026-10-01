@@ -13,7 +13,10 @@ from typing import Any, Iterable
 import numpy as np
 import torch
 
-from heat.ml.selfplay.training_state import load_training_state
+from heat.ml.selfplay.training_state import (
+    load_training_state,
+    published_checkpoint_path,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -34,7 +37,8 @@ def _parse_args() -> argparse.Namespace:
 
 def _load_verified(path: Path) -> dict[str, Any]:
     """Load the historical run through its stored production identity gates."""
-    raw = torch.load(path, map_location="cpu", weights_only=False)
+    stored = published_checkpoint_path(path)
+    raw = torch.load(stored, map_location="cpu", weights_only=False)
     if not isinstance(raw, dict):
         raise TypeError("checkpoint root must be a dictionary")
     return load_training_state(

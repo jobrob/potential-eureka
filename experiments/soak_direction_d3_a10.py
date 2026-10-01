@@ -30,6 +30,7 @@ import torch
 from heat.ml.selfplay.phase1 import A8Config, A8ResumeConfig, train_selfplay_a8
 from heat.ml.selfplay.training_state import (
     checkpoint_receipt_path,
+    published_checkpoint_path,
     load_training_state,
     recipe_sha256,
     resolved_recipe,
@@ -647,9 +648,9 @@ def main() -> int:
             checkpoint_pass,
         )
     )
-    receipt_text = checkpoint_receipt_path(args.checkpoint).read_text(
-        encoding="ascii"
-    ).strip()
+    receipt_text = checkpoint_receipt_path(
+        published_checkpoint_path(args.checkpoint)
+    ).read_text(encoding="ascii").strip()
     artifact = {
         "schema_version": 1,
         "stage": "D3_A10_native_operational_soak",
