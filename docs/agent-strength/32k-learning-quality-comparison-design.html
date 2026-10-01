@@ -11,15 +11,15 @@
 <header class="hybrid-hero">
   <div class="hybrid-shell hybrid-hero-grid">
     <div>
-      <span class="status">Revised 1 October 2026 · campaign not started · G0005 not allocated</span>
-      <h1>Pick the question before any 32K run.</h1>
+      <span class="status">2 October 2026 · Question B chosen · scaffolding scripts exist · G0005 not allocated · campaign not started</span>
+      <h1>Question B scaffolding is in the tree; the pilot is not authorized.</h1>
       <p class="hero-copy">The 5 September review kept this comparison, and changed what it is allowed to mean. Thirty large updates are a pilot of one declared recipe. They are not a human-strength test, and they are not the same learning schedule as G0002.</p>
-      <p><a href="L0-learned-strength-map.html">Start from the L0 evidence map</a> · <a href="../reviews/2026-09-05-code-and-design-review.html">5 September review</a><br><span class="muted">First drafted 3 August 2026. Revised after that review; not implemented.</span></p>
+      <p><a href="L0-learned-strength-map.html">Start from the L0 evidence map</a> · <a href="../reviews/2026-09-05-code-and-design-review.html">5 September review</a><br><span class="muted">First drafted 3 August 2026. Question B (native 32K + codec v4) locked; orchestration scripts exist; G0005 still unallocated.</span></p>
     </div>
     <aside class="status-board" aria-label="Design decision">
-      <span class="board-label">Decision sought</span>
-      <strong>Choose one question,<br>then register it.</strong>
-      <p>Runtime adoption keeps the legacy observation. A corrected observation is a different generation. Neither run is authorized by this revision.</p>
+      <span class="board-label">Decision locked</span>
+      <strong>Question B:<br>native 32K + codec v4.</strong>
+      <p>Report it as an input change plus a runtime change. G0005 stays unallocated until James registers it after pre-flight smokes.</p>
     </aside>
   </div>
 </header>
@@ -225,12 +225,13 @@
         <span class="section-kicker">Q09 · Small/medium implementation slice</span>
         <h2>Reuse training state and evaluation primitives; add campaign-specific orchestration.</h2>
         <div class="file-grid">
-          <div class="file-card"><code>experiments/run_32k_learning_quality.py</code><br>Resolve the frozen recipe, registered identities, three sequential runs, milestone policies, recovery state, heartbeat, and source receipts.</div>
+          <div class="file-card"><code>experiments/run_32k_learning_quality.py</code><br><strong>Exists (scaffolding).</strong> Resolves the frozen Question B recipe, disposable <code>dev-*</code> identities, three sequential runs, milestone hooks, recovery state, heartbeat, and source receipts. Default is dry-run; does not allocate G0005.</div>
           <div class="file-card"><code>src/heat/ml/selfplay/eval_harness.py</code><br>The library now rotates focal seats inside each track. The campaign script still has to persist one row per race. Do not replace the harness to do that.</div>
-          <div class="file-card"><code>experiments/eval_32k_learning_quality.py</code><br>Build the V2 ruler matrices, fresh default track band, atomic cell persistence, and exact resume validation.</div>
-          <div class="file-card"><code>experiments/analyze_32k_learning_quality.py</code><br>Validate completeness, compute frozen gates and descriptive intervals, and generate failure-localization data.</div>
-          <div class="file-card"><code>experiments/policy_registry/</code><br>Allocate G0005 only after the resolved recipe and clean commit or dirty patch receipt are captured; finalize selected checkpoint sizes and hashes after training.</div>
-          <div class="file-card"><code>tests/</code><br>Focused recipe, identity, coordinate-balance, raw-row, resume-rejection, gate-boundary, and deterministic-summary tests.</div>
+          <div class="file-card"><code>experiments/eval_32k_learning_quality.py</code><br><strong>Exists (scaffolding).</strong> Builds the V2 ruler matrices, fresh default track band, atomic cell persistence with raw rows, and exact resume validation.</div>
+          <div class="file-card"><code>experiments/analyze_32k_learning_quality.py</code><br><strong>Exists (scaffolding).</strong> Validates completeness, computes frozen gates and descriptive intervals, and generates failure-localization data.</div>
+          <div class="file-card"><code>experiments/smoke_32k_resume_integrity.py</code> / <code>probe_32k_v2_ruler_timing.py</code><br><strong>Exists.</strong> Disposable two-update fresh-process resume smoke and short V2 ruler timing probe (pre-registration helpers).</div>
+          <div class="file-card"><code>experiments/policy_registry/</code><br>Allocate G0005 only after the resolved recipe and clean commit or dirty patch receipt are captured; finalize selected checkpoint sizes and hashes after training. <strong>Not done.</strong></div>
+          <div class="file-card"><code>tests/test_32k_learning_quality.py</code><br><strong>Exists.</strong> Focused recipe, identity, coordinate-balance, raw-row, resume-rejection, gate-boundary, and deterministic-summary tests.</div>
         </div>
         <div class="data-panel table-wrap">
           <table>
@@ -247,14 +248,14 @@
       <section id="boundary">
         <span class="section-kicker">Q10 · Current authorization</span>
         <h2>Revised, not authorized.</h2>
-        <div class="verification-panel"><strong>Status: design revised on 1 October 2026. The campaign is not implemented.</strong><br>Question A and question B are written down. Seeds, the first-crossing stop, the smaller milestone screen, the seat-rotation rule, and the collapse guard’s use of <code>rollout_entropy</code> are specified. The campaign scripts named above do not exist. The glossary in <code>CONTEXT.md</code> still defines the shared words.</div>
-        <div class="decision-banner"><strong>Not authorized by this document</strong><br>No G0005 allocation, no training, no evaluation campaign, no CUDA change, no eight-hour rehearsal, no untouched final test, and no 3M or 10M extension. Pick question A or question B before anyone registers a generation.</div>
+        <div class="verification-panel"><strong>Status: 2 October 2026. Question B chosen. Scaffolding implemented; campaign not started.</strong><br>Scripts now exist: <code>experiments/run_32k_learning_quality.py</code>, <code>eval_32k_learning_quality.py</code>, <code>analyze_32k_learning_quality.py</code>, plus <code>smoke_32k_resume_integrity.py</code> and <code>probe_32k_v2_ruler_timing.py</code>. Default CLI mode is dry-run. G0005 is still not allocated in <code>experiments/policy_registry/</code>. The glossary in <code>CONTEXT.md</code> still defines the shared words.</div>
+        <div class="decision-banner"><strong>Not authorized by this document</strong><br>No G0005 allocation, no training pilot, no evaluation campaign, no CUDA change, no eight-hour rehearsal, no untouched final test, and no 3M or 10M extension. Pre-registration smokes may run as disposable <code>dev-*</code> jobs; the registered pilot still needs an explicit go-ahead.</div>
       </section>
     </article>
   </div>
 </main>
 
-<footer class="hybrid-footer">Learned-agent strength · 32K comparison revised 1 October 2026 · campaign not started</footer>
+<footer class="hybrid-footer">Learned-agent strength · 32K Question B scaffolding 2 October 2026 · G0005 not allocated · campaign not started</footer>
 <script src="../design-doc.js"></script>
 </body>
 </html>
